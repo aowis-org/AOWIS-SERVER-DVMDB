@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <iostream>
 #include <fstream>
 #include <iterator>
@@ -81,16 +82,18 @@ void compare(const std::filesystem::path& root, const std::vector<Snapshot>& exp
     const std::vector<ProjectInfo> projects = service.listProjects();
     require(projects.size() == expected.size(), "restored project count mismatch");
     const std::vector<aowis::dvmdb::WorkingCopyInfo> drafts = service.listWorkingCopies();
-    require(drafts.size() == 1 && drafts.front().projectId == expected.front().id &&
-            drafts.front().branchId == expected.front().mainBranchId &&
-            drafts.front().baseRevision == expected.front().main &&
-            drafts.front().generation == 1 && drafts.front().dirty &&
-            drafts.front().candidateChanges.size() == 1 &&
-            drafts.front().candidateChanges.front().record.has_value() &&
-            drafts.front().candidateChanges.front().record->payload ==
+    require(drafts.size() == 1, "restored draft count mismatch");
+    const aowis::dvmdb::WorkingCopyInfo draft = service.workingCopy(drafts.front().id);
+    require(draft.projectId == expected.front().id &&
+            draft.branchId == expected.front().mainBranchId &&
+            draft.baseRevision == expected.front().main &&
+            draft.generation == 1 && draft.dirty &&
+            draft.candidateChanges.size() == 1 &&
+            draft.candidateChanges.front().record.has_value() &&
+            draft.candidateChanges.front().record->payload ==
                 std::vector<std::uint8_t>({42, 43}) &&
-            drafts.front().journal.size() == 1 &&
-            drafts.front().journal.front().encoded.size() > 32,
+            draft.journal.size() == 1 && draft.journalCount == 1 &&
+            draft.journal.front().encoded.size() > 32,
             "backup/restore lost the saved private candidate overlay");
     for (const Snapshot& item : expected) {
         const ProjectInfo project = service.project(item.id);
@@ -229,23 +232,36 @@ void tests(const std::string& python, const std::string& script, const std::stri
         ProjectService store(backup);
         return store.listWorkingCopies().front();
     }();
-    const std::filesystem::path draftPath = backup / "working-copies" / draftInfo.id;
-    const std::string originalDraft = [&]() {
-        std::ifstream input(draftPath, std::ios::binary);
+    const std::filesystem::path draftDirectory = backup / "working-copies" / draftInfo.id;
+    const std::function<std::string(const std::filesystem::path&)> readAll =
+        [](const std::filesystem::path& path) {
+        std::ifstream input(path, std::ios::binary);
         return std::string(std::istreambuf_iterator<char>(input), {});
-    }();
-    {
-        std::ofstream invalid(draftPath, std::ios::binary | std::ios::trunc);
-        invalid << "AOWIS-WORKING-COPY-1\nproject\tbroken\n";
-    }
-    const std::filesystem::path invalidDraftRestore = temporary.directory / "bad-draft";
-    require(run(python, script, verify, "restore", backup, invalidDraftRestore) != 0,
-            "offline restore accepted corrupt private working-copy metadata");
-    require(!std::filesystem::exists(invalidDraftRestore),
-            "offline restore published corrupt working-copy metadata");
-    {
-        std::ofstream reset(draftPath, std::ios::binary | std::ios::trunc);
-        reset << originalDraft;
+    };
+    // The data files the meta names (candidate-<uuid>, journal-<uuid>).
+    std::vector<std::filesystem::path> draftFiles{draftDirectory / "meta"};
+    for (const std::filesystem::directory_entry& entry :
+         std::filesystem::directory_iterator(draftDirectory))
+        if (entry.path().filename() != "meta") draftFiles.push_back(entry.path());
+    require(draftFiles.size() == 3, "backup draft lacks its candidate and journal files");
+    for (std::size_t index = 0; index < draftFiles.size(); ++index) {
+        const std::filesystem::path& damaged = draftFiles[index];
+        const std::string original = readAll(damaged);
+        {
+            std::string altered = original;
+            if (index == 0) altered = "AOWIS-WORKING-COPY-1\nproject\tbroken\n";
+            else altered[altered.size() - 1] = static_cast<char>(altered.back() ^ 0x01);
+            std::ofstream invalid(damaged, std::ios::binary | std::ios::trunc);
+            invalid << altered;
+        }
+        const std::filesystem::path invalidDraftRestore =
+            temporary.directory / ("bad-draft-" + std::to_string(index));
+        require(run(python, script, verify, "restore", backup, invalidDraftRestore) != 0,
+                "offline restore accepted a corrupt private working-copy file");
+        require(!std::filesystem::exists(invalidDraftRestore),
+                "offline restore published a corrupt working copy");
+        std::ofstream reset(damaged, std::ios::binary | std::ios::trunc);
+        reset << original;
     }
     // A backup with a corrupted catalogue-root identity must fail closed;
     // restore must never invent a different UUID or publish such a root.

@@ -8,9 +8,11 @@
 #include <charconv>
 #include <chrono>
 #include <limits>
+#include <map>
 #include <cstring>
 #include <fcntl.h>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <iterator>
 #include <sstream>
@@ -19,6 +21,7 @@
 #include <memory>
 #include <optional>
 #include <sys/file.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
 
@@ -130,15 +133,14 @@ bool removePrefixed(const std::filesystem::path& directory,
 }
 
 // Crash remnants of the no-replace publication protocol: staged repository
-// identity, drafts, local Commit records and unpublished project directories.
-// None was ever visible, so removing them loses nothing; it also lets a retry
-// of an interrupted caller-chosen project creation proceed.
+// identity, local Commit records and unpublished project directories (drafts:
+// removeDraftRemnants). None was ever visible, so removing them loses
+// nothing; it also lets a retry of an interrupted caller-chosen project
+// creation proceed.
 void removeCatalogueRemnants(const std::filesystem::path& root) {
     if (removePrefixed(root, {".repository-id-creating-"}, false)) syncDirectory(root);
-    for (const char* subdirectory : {"working-copies", "local-commits"}) {
-        if (removePrefixed(root / subdirectory, {".creating-", ".updating-"}, false))
-            syncDirectory(root / subdirectory);
-    }
+    if (removePrefixed(root / "local-commits", {".creating-", ".updating-"}, false))
+        syncDirectory(root / "local-commits");
     if (removePrefixed(root / "projects", {".creating-"}, true)) syncDirectory(root / "projects");
 }
 
@@ -456,9 +458,9 @@ bool ProjectService::validBranchName(std::string_view name) {
 ProjectService::Project::Project(ProjectInfo value) : info(std::move(value)) {}
 
 namespace {
-// Private draft format: one authoritative pre-release record encoding.
-// No readers or migrators for experimental V1/V2 drafts are retained.
-constexpr std::string_view workingCopyMarker = "AOWIS-WORKING-COPY-3\n";
+// Private draft format (see docs/working-copy-storage-v1.md). Earlier
+// pre-release formats are rejected, never migrated.
+constexpr std::string_view workingCopyMarker = "AOWIS-WORKING-COPY-4\n";
 constexpr std::size_t workingCopyMaxBytes = 8 * 1024 * 1024;
 constexpr std::size_t workingCopyMaxChanges = 20000;
 constexpr std::size_t workingCopyMaxEvents = 4096;
@@ -468,7 +470,8 @@ std::filesystem::path workingCopyDirectory(const std::filesystem::path& root) {
 }
 
 // Published draft UUIDs in ascending order. Unpublished crash remnants
-// (.creating-*, .updating-*) are checked and skipped, never advertised.
+// (.creating-*, .deleting-* directories) are checked and skipped, never
+// advertised.
 std::vector<std::string> publishedDraftIds(const std::filesystem::path& directory) {
     std::vector<std::string> ids;
     if (!std::filesystem::exists(directory) && !std::filesystem::is_symlink(directory))
@@ -478,12 +481,10 @@ std::vector<std::string> publishedDraftIds(const std::filesystem::path& director
     for (const std::filesystem::directory_entry& entry :
          std::filesystem::directory_iterator(directory)) {
         const std::string id = entry.path().filename().string();
-        if (id.starts_with(".creating-") || id.starts_with(".updating-")) {
-            const std::string_view prefix = id.starts_with(".creating-") ?
-                std::string_view(".creating-") : std::string_view(".updating-");
-            check(UuidV7::parse(std::string_view(id).substr(prefix.size())).has_value() &&
-                  !entry.is_symlink() && entry.is_regular_file(),
-                  "unsafe staged working-copy record");
+        if (id.starts_with(".creating-") || id.starts_with(".deleting-")) {
+            check(UuidV7::parse(std::string_view(id).substr(10)).has_value() &&
+                  !entry.is_symlink() && entry.is_directory(),
+                  "unsafe staged working-copy directory");
             continue;
         }
         ids.push_back(id);
@@ -595,57 +596,219 @@ std::string saveBatchFingerprint(const std::vector<ModelChange>& changes,
     return hexBytes(hash.data(), hash.size());
 }
 
-std::string draftBody(const WorkingCopyInfo& draft) {
-    std::string body = std::string(workingCopyMarker)
+// ---------------------------------------------------------------------------
+// Draft storage (AOWIS-WORKING-COPY-4). One directory per draft:
+//   meta                  small text record, atomically replaced; authoritative
+//   candidate-<uuidv7>    immutable binary candidate overlay (sorted changes)
+//   journal-<uuidv7>      append-only binary MODEL event journal
+// `meta` names the current candidate and journal files and records their
+// counts, lengths and digests. Leases, releases and listings touch only
+// `meta`; a Save writes a new candidate file only when the candidate changes
+// and appends only its own events. Readers take no lock: a file named by a
+// meta they read stays valid until a newer meta replaces it, and they retry
+// once the name disappears.
+// ---------------------------------------------------------------------------
+
+constexpr std::string_view draftMetaName = "meta";
+constexpr std::uint32_t absentRecord = std::numeric_limits<std::uint32_t>::max();
+constexpr std::string_view candidateMagic = "AOWC\x01";
+
+// Files referenced by a draft's meta.
+struct DraftFiles {
+    std::string candidate = "-";          // file name or "-" for an empty overlay
+    std::uint64_t candidateCount = 0;
+    std::uint64_t candidateBytes = 0;
+    std::string candidateDigest = "-";    // SHA-256 of the file, hex
+    std::string journal = "-";            // file name or "-" for an empty journal
+    std::uint64_t journalBytes = 0;       // acknowledged prefix length
+    std::string journalDigest = "-";      // chained SHA-256 over the frames, hex
+};
+
+struct StoredDraft {
+    WorkingCopyInfo info;
+    DraftFiles files;
+};
+
+enum class DraftLoad { Meta, Candidate, Full };
+
+bool fileReference(std::string_view value, std::string_view prefix) {
+    return value == "-" ||
+           (value.starts_with(prefix) && UuidV7::parse(value.substr(prefix.size())).has_value());
+}
+
+bool hexDigest(std::string_view value) {
+    return value.size() == 64 && std::all_of(value.begin(), value.end(), [](char ch) {
+        return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
+    });
+}
+
+void appendBig32(Bytes& out, std::uint32_t value) {
+    for (unsigned step = 0; step < 4; ++step)
+        out.push_back(static_cast<std::uint8_t>(value >> (24 - step * 8)));
+}
+
+std::uint32_t big32(const std::uint8_t* data) {
+    return (static_cast<std::uint32_t>(data[0]) << 24) | (static_cast<std::uint32_t>(data[1]) << 16) |
+           (static_cast<std::uint32_t>(data[2]) << 8) | data[3];
+}
+
+std::string metaBody(const WorkingCopyInfo& draft, const DraftFiles& files) {
+    return std::string(workingCopyMarker)
         + "project\t" + draft.projectId + "\n"
         + "branch\t" + draft.branchId + "\n"
         + "base\t" + (draft.baseRevision ? draft.baseRevision->toString() : "-") + "\n"
         + "session\t" + draft.sessionId + "\n"
         + "generation\t" + std::to_string(draft.generation) + "\n"
         + "dirty\t" + (draft.dirty ? "1" : "0") + "\n"
-        + "validation\tunvalidated\n";
-    body += "lease-session\t" + draft.leaseSessionId.value_or("-") + "\n"
+        + "validation\tunvalidated\n"
+        + "lease-session\t" + draft.leaseSessionId.value_or("-") + "\n"
         + "lease-token\t" + draft.leaseToken.value_or("-") + "\n"
-        + "lease-expires\t" + std::to_string(draft.leaseExpiresAtMs) + "\n";
-    body += "changes\t" + std::to_string(draft.candidateChanges.size()) + "\n";
-    for (const ModelChange& change : draft.candidateChanges) {
-        body += "change\t" + hexBytes(change.key.data(), change.key.size()) + "\t";
-        if (!change.record) body += "-";
-        else {
-            const Bytes encoded = encodeModelRecord(*change.record);
-            body += hexBytes(encoded.data(), encoded.size());
-        }
-        body += "\n";
-        check(body.size() <= workingCopyMaxBytes, "draft candidate exceeds storage limit",
-              StorageErrorKind::InvalidInput);
-    }
-    body += "events\t" + std::to_string(draft.journal.size()) + "\n";
-    for (const WorkingCopyEvent& event : draft.journal) {
-        body += "event\t" + event.id + "\t" +
-            hexBytes(event.encoded.data(), event.encoded.size()) + "\n";
-        check(body.size() <= workingCopyMaxBytes, "draft event journal exceeds storage limit",
-              StorageErrorKind::InvalidInput);
-    }
-    body += "last-save\t" + draft.lastSaveFingerprint.value_or("-") + "\n";
-    check(body.size() <= workingCopyMaxBytes,
-          "draft candidate exceeds storage limit", StorageErrorKind::InvalidInput);
-    return body;
+        + "lease-expires\t" + std::to_string(draft.leaseExpiresAtMs) + "\n"
+        + "candidate\t" + files.candidate + "\t" + std::to_string(files.candidateCount) + "\t"
+            + std::to_string(files.candidateBytes) + "\t" + files.candidateDigest + "\n"
+        + "journal\t" + files.journal + "\t" + std::to_string(draft.journalCount) + "\t"
+            + std::to_string(files.journalBytes) + "\t" + files.journalDigest + "\n"
+        + "last-save\t" + draft.lastSaveFingerprint.value_or("-") + "\n";
 }
 
-WorkingCopyInfo readWorkingCopy(const std::filesystem::path& path) {
-    check(!std::filesystem::is_symlink(path) && std::filesystem::is_regular_file(path)
-          && std::filesystem::file_size(path) <= workingCopyMaxBytes,
-          "unsafe or oversized working-copy record: " + path.string());
-    const std::string id = path.filename().string();
-    check(UuidV7::parse(id).has_value(), "invalid working-copy record UUIDv7");
-    std::ifstream stream(path, std::ios::binary);
-    check(stream.good(), "cannot open working-copy record");
-    const std::string body((std::istreambuf_iterator<char>(stream)),
-                           std::istreambuf_iterator<char>());
-    check(body.starts_with(workingCopyMarker) && !body.empty() && body.back() == '\n',
+Bytes encodeCandidate(const std::vector<ModelChange>& changes) {
+    Bytes bytes(candidateMagic.begin(), candidateMagic.end());
+    for (const ModelChange& change : changes) {
+        bytes.insert(bytes.end(), change.key.begin(), change.key.end());
+        if (!change.record) {
+            appendBig32(bytes, absentRecord);
+        } else {
+            const Bytes record = encodeModelRecord(*change.record);
+            appendBig32(bytes, static_cast<std::uint32_t>(record.size()));
+            bytes.insert(bytes.end(), record.begin(), record.end());
+        }
+        check(bytes.size() <= workingCopyMaxBytes, "draft candidate exceeds the 8 MiB storage limit",
+              StorageErrorKind::LimitExceeded);
+    }
+    return bytes;
+}
+
+std::vector<ModelChange> decodeCandidate(const Bytes& bytes, std::uint64_t count) {
+    check(bytes.size() >= candidateMagic.size() &&
+          std::equal(candidateMagic.begin(), candidateMagic.end(), bytes.begin()),
+          "invalid draft candidate file header");
+    std::vector<ModelChange> changes;
+    std::size_t offset = candidateMagic.size();
+    std::optional<Key> last;
+    for (std::uint64_t i = 0; i < count; ++i) {
+        check(bytes.size() - offset >= 20, "truncated draft candidate record");
+        ModelChange change;
+        std::copy_n(bytes.begin() + static_cast<std::ptrdiff_t>(offset), change.key.size(),
+                    change.key.begin());
+        check(!last || *last < change.key, "unsorted or duplicate draft changes");
+        last = change.key;
+        const std::uint32_t size = big32(bytes.data() + offset + 16);
+        offset += 20;
+        if (size != absentRecord) {
+            check(bytes.size() - offset >= size, "truncated draft candidate record");
+            change.record = decodeModelRecord(Bytes(
+                bytes.begin() + static_cast<std::ptrdiff_t>(offset),
+                bytes.begin() + static_cast<std::ptrdiff_t>(offset + size)));
+            offset += size;
+        }
+        changes.push_back(std::move(change));
+    }
+    check(offset == bytes.size(), "trailing draft candidate content");
+    return changes;
+}
+
+// Journal frame: event UUID (16) + frame length (4) + MODEL frame bytes.
+Bytes encodeJournalFrames(const std::vector<WorkingCopyEvent>& events) {
+    Bytes bytes;
+    for (const WorkingCopyEvent& event : events) {
+        const std::optional<UuidV7> id = UuidV7::parse(event.id);
+        check(id.has_value(), "invalid journal event UUIDv7", StorageErrorKind::Internal);
+        bytes.insert(bytes.end(), id->bytes.begin(), id->bytes.end());
+        appendBig32(bytes, static_cast<std::uint32_t>(event.encoded.size()));
+        bytes.insert(bytes.end(), event.encoded.begin(), event.encoded.end());
+    }
+    return bytes;
+}
+
+// digest_0 = 32 zero bytes; digest_i = SHA-256(digest_{i-1} || frame_i).
+Hash chainJournal(const Hash& previous, const std::vector<WorkingCopyEvent>& events) {
+    Hash digest = previous;
+    for (const WorkingCopyEvent& event : events) {
+        Bytes input(digest.begin(), digest.end());
+        input.insert(input.end(), event.encoded.begin(), event.encoded.end());
+        digest = sha256(input);
+    }
+    return digest;
+}
+
+Hash digestFromHex(std::string_view value) {
+    Hash digest{};
+    if (value == "-") return digest;
+    const Bytes bytes = unhexBytes(value);
+    check(bytes.size() == digest.size(), "invalid draft digest");
+    std::copy(bytes.begin(), bytes.end(), digest.begin());
+    return digest;
+}
+
+// Reads exactly `size` bytes from the start of `path`; nullopt if the file
+// vanished (a concurrent writer replaced it).
+std::optional<Bytes> readPrefix(const std::filesystem::path& path, std::uint64_t size) {
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0 && errno == ENOENT) return std::nullopt;
+    syscallChecked(fd >= 0, "open draft file");
+    Bytes bytes(static_cast<std::size_t>(size));
+    std::size_t done = 0;
+    try {
+        struct stat st{};
+        syscallChecked(::fstat(fd, &st) == 0, "stat draft file");
+        check(S_ISREG(st.st_mode) && static_cast<std::uint64_t>(st.st_size) >= size,
+              "draft file is shorter than its meta record");
+        while (done < bytes.size()) {
+            const ssize_t amount = ::pread(fd, bytes.data() + done, bytes.size() - done,
+                                           static_cast<off_t>(done));
+            if (amount < 0 && errno == EINTR) continue;
+            syscallChecked(amount >= 0, "read draft file");
+            check(amount > 0, "truncated draft file");
+            done += static_cast<std::size_t>(amount);
+        }
+    } catch (...) { ::close(fd); throw; }
+    ::close(fd);
+    return bytes;
+}
+
+// Parses meta. Returns nullopt if the draft directory or meta vanished.
+std::optional<StoredDraft> readDraftMeta(const std::filesystem::path& directory) {
+    const std::string id = directory.filename().string();
+    check(UuidV7::parse(id).has_value(), "invalid working-copy UUIDv7");
+    if (!std::filesystem::exists(directory) && !std::filesystem::is_symlink(directory))
+        return std::nullopt;
+    check(!std::filesystem::is_symlink(directory) && std::filesystem::is_directory(directory),
+          "unsupported working-copy record (expected a draft directory): " + directory.string());
+    const std::filesystem::path path = directory / draftMetaName;
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0 && errno == ENOENT) return std::nullopt;
+    syscallChecked(fd >= 0, "open working-copy meta");
+    std::string body;
+    try {
+        struct stat st{};
+        syscallChecked(::fstat(fd, &st) == 0, "stat working-copy meta");
+        check(S_ISREG(st.st_mode) && st.st_size > 0 && st.st_size <= 4096,
+              "invalid working-copy meta file");
+        body.resize(static_cast<std::size_t>(st.st_size));
+        std::size_t done = 0;
+        while (done < body.size()) {
+            const ssize_t amount = ::pread(fd, body.data() + done, body.size() - done,
+                                           static_cast<off_t>(done));
+            if (amount < 0 && errno == EINTR) continue;
+            syscallChecked(amount >= 0, "read working-copy meta");
+            check(amount > 0, "truncated working-copy meta");
+            done += static_cast<std::size_t>(amount);
+        }
+    } catch (...) { ::close(fd); throw; }
+    ::close(fd);
+    check(body.starts_with(workingCopyMarker) && body.back() == '\n',
           "invalid working-copy record marker");
-    const std::string_view marker = workingCopyMarker;
-    std::istringstream lines(body.substr(marker.size()));
+    std::istringstream lines(body.substr(workingCopyMarker.size()));
     const std::function<std::string(std::string_view)> nextField =
         [&](std::string_view name) -> std::string {
         std::string line;
@@ -654,7 +817,19 @@ WorkingCopyInfo readWorkingCopy(const std::filesystem::path& path) {
               "invalid working-copy record field: " + std::string(name));
         return line.substr(name.size() + 1);
     };
-    WorkingCopyInfo draft;
+    const std::function<std::vector<std::string>(const std::string&)> split =
+        [](const std::string& value) {
+        std::vector<std::string> parts;
+        std::size_t start = 0;
+        for (;;) {
+            const std::size_t tab = value.find('\t', start);
+            parts.push_back(value.substr(start, tab == std::string::npos ? std::string::npos : tab - start));
+            if (tab == std::string::npos) return parts;
+            start = tab + 1;
+        }
+    };
+    StoredDraft stored;
+    WorkingCopyInfo& draft = stored.info;
     draft.id = id;
     draft.projectId = nextField("project");
     draft.branchId = nextField("branch");
@@ -665,65 +840,52 @@ WorkingCopyInfo readWorkingCopy(const std::filesystem::path& path) {
     check(dirty == "0" || dirty == "1", "invalid draft dirty state");
     draft.dirty = dirty == "1";
     check(nextField("validation") == "unvalidated", "invalid draft validation state");
-    {
-        const std::string owner = nextField("lease-session");
-        const std::string token = nextField("lease-token");
-        draft.leaseExpiresAtMs = decimalField(nextField("lease-expires"));
-        check((owner == "-" && token == "-" && draft.leaseExpiresAtMs == 0) ||
-              (UuidV7::parse(owner).has_value() && UuidV7::parse(token).has_value() &&
-               draft.leaseExpiresAtMs != 0), "invalid draft lease record");
-        if (owner != "-") {
-            draft.leaseSessionId = owner;
-            draft.leaseToken = token;
-        }
+    const std::string owner = nextField("lease-session");
+    const std::string token = nextField("lease-token");
+    draft.leaseExpiresAtMs = decimalField(nextField("lease-expires"));
+    check((owner == "-" && token == "-" && draft.leaseExpiresAtMs == 0) ||
+          (UuidV7::parse(owner).has_value() && UuidV7::parse(token).has_value() &&
+           draft.leaseExpiresAtMs != 0), "invalid draft lease record");
+    if (owner != "-") {
+        draft.leaseSessionId = owner;
+        draft.leaseToken = token;
     }
-    const std::uint64_t count = decimalField(nextField("changes"));
-    check(count <= workingCopyMaxChanges, "draft contains too many changes");
-    std::optional<Key> lastKey;
-    for (std::uint64_t i = 0; i < count; ++i) {
-        const std::string value = nextField("change");
-        const std::size_t tab = value.find('\t');
-        check(tab == 32 && value.find('\t', tab + 1) == std::string::npos,
-              "invalid draft change record");
-        const Bytes keyBytes = unhexBytes(std::string_view(value).substr(0, tab));
-        check(keyBytes.size() == Key{}.size(), "invalid draft change UUID");
-        ModelChange change;
-        std::copy(keyBytes.begin(), keyBytes.end(), change.key.begin());
-        check(!lastKey || *lastKey < change.key, "unsorted or duplicate draft changes");
-        lastKey = change.key;
-        const std::string_view payload = std::string_view(value).substr(tab + 1);
-        if (payload != "-") change.record = decodeModelRecord(unhexBytes(payload));
-        draft.candidateChanges.push_back(std::move(change));
-    }
-    {
-        const std::uint64_t events = decimalField(nextField("events"));
-        check(events <= workingCopyMaxEvents, "too many saved draft events");
-        std::set<std::string> eventIds;
-        for (std::uint64_t i = 0; i < events; ++i) {
-            const std::string field = nextField("event");
-            const std::size_t tab = field.find('\t');
-            check(tab == 36 && field.find('\t', tab + 1) == std::string::npos,
-                  "malformed draft journal event");
-            const WorkingCopyEvent event = verifiedEditEvent(
-                unhexBytes(std::string_view(field).substr(tab + 1)));
-            check(field.substr(0, tab) == event.id && eventIds.insert(event.id).second,
-                  "invalid or duplicate draft journal event");
-            draft.journal.push_back(event);
-        }
-        const std::string fingerprint = nextField("last-save");
-        if (fingerprint != "-") {
-            check(fingerprint.size() == 64 &&
-                  std::all_of(fingerprint.begin(), fingerprint.end(), [](char ch) {
-                      return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
-                  }), "invalid last-save fingerprint");
-            draft.lastSaveFingerprint = fingerprint;
-        }
-        check((draft.journal.empty() && !draft.lastSaveFingerprint) ||
-              (!draft.journal.empty() && draft.lastSaveFingerprint && draft.generation > 0),
-              "inconsistent draft journal metadata");
+    const std::vector<std::string> candidate = split(nextField("candidate"));
+    check(candidate.size() == 4 && fileReference(candidate[0], "candidate-"),
+          "invalid draft candidate reference");
+    stored.files.candidate = candidate[0];
+    stored.files.candidateCount = decimalField(candidate[1]);
+    stored.files.candidateBytes = decimalField(candidate[2]);
+    stored.files.candidateDigest = candidate[3];
+    check(stored.files.candidateCount <= workingCopyMaxChanges &&
+          stored.files.candidateBytes <= workingCopyMaxBytes &&
+          ((candidate[0] == "-" && stored.files.candidateCount == 0 &&
+            stored.files.candidateBytes == 0 && candidate[3] == "-") ||
+           (candidate[0] != "-" && stored.files.candidateCount > 0 && hexDigest(candidate[3]))),
+          "invalid draft candidate reference");
+    const std::vector<std::string> journal = split(nextField("journal"));
+    check(journal.size() == 4 && fileReference(journal[0], "journal-"),
+          "invalid draft journal reference");
+    stored.files.journal = journal[0];
+    draft.journalCount = decimalField(journal[1]);
+    stored.files.journalBytes = decimalField(journal[2]);
+    stored.files.journalDigest = journal[3];
+    check(draft.journalCount <= workingCopyMaxEvents &&
+          stored.files.journalBytes <= workingCopyMaxBytes &&
+          ((journal[0] == "-" && draft.journalCount == 0 && stored.files.journalBytes == 0 &&
+            journal[3] == "-") ||
+           (journal[0] != "-" && draft.journalCount > 0 && hexDigest(journal[3]))),
+          "invalid draft journal reference");
+    const std::string fingerprint = nextField("last-save");
+    if (fingerprint != "-") {
+        check(hexDigest(fingerprint), "invalid last-save fingerprint");
+        draft.lastSaveFingerprint = fingerprint;
     }
     std::string extra;
     check(!std::getline(lines, extra) && lines.eof(), "trailing working-copy record content");
+    check((draft.journalCount == 0 && !draft.lastSaveFingerprint) ||
+          (draft.journalCount > 0 && draft.lastSaveFingerprint && draft.generation > 0),
+          "inconsistent draft journal metadata");
     check(ProjectId::parse(draft.projectId).has_value() &&
           BranchId::parse(draft.branchId).has_value() &&
           UuidV7::parse(draft.sessionId).has_value(),
@@ -732,49 +894,212 @@ WorkingCopyInfo readWorkingCopy(const std::filesystem::path& path) {
         draft.baseRevision = RevisionId::parse(base);
         check(draft.baseRevision.has_value(), "invalid working-copy base revision");
     }
-    check(draft.dirty == !draft.candidateChanges.empty(), "invalid draft dirty/change mismatch");
-    return draft;
+    check(draft.dirty == (stored.files.candidateCount != 0), "invalid draft dirty/change mismatch");
+    return stored;
 }
 
-// Stage, fsync, rename and fsync the parent. A crash yields either the old
-// complete record or the new complete record, never an acknowledged half-save.
-void replaceWorkingCopyRecord(const std::filesystem::path& root,
-                              const WorkingCopyInfo& draft) {
-    const std::filesystem::path directory = workingCopyDirectory(root);
-    const std::filesystem::path published = directory / draft.id;
-    const std::filesystem::path stage = directory / (".updating-" + UuidV7::generate().toString());
-    const std::string body = draftBody(draft);
-    const int fd = ::open(stage.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-    syscallChecked(fd >= 0, "stage draft update");
-    try {
-        std::size_t offset = 0;
-        while (offset < body.size()) {
-            const ssize_t amount = ::write(fd, body.data() + offset, body.size() - offset);
-            if (amount < 0 && errno == EINTR) continue;
-            syscallChecked(amount > 0, "write draft update");
-            offset += static_cast<std::size_t>(amount);
+// Event UUIDs of the acknowledged journal prefix (frame headers only).
+std::vector<std::string> journalEventIds(const std::filesystem::path& directory,
+                                         const StoredDraft& stored, std::optional<Bytes>& bytes) {
+    std::vector<std::string> ids;
+    if (stored.files.journal == "-") return ids;
+    bytes = readPrefix(directory / stored.files.journal, stored.files.journalBytes);
+    if (!bytes) return ids;
+    std::size_t offset = 0;
+    std::set<std::string> seen;
+    while (offset < bytes->size()) {
+        check(bytes->size() - offset >= 20, "truncated draft journal frame");
+        UuidV7 uuid;
+        std::copy_n(bytes->begin() + static_cast<std::ptrdiff_t>(offset), uuid.bytes.size(),
+                    uuid.bytes.begin());
+        const std::uint32_t size = big32(bytes->data() + offset + 16);
+        check(bytes->size() - offset - 20 >= size, "truncated draft journal frame");
+        ids.push_back(uuid.toString());
+        check(seen.insert(ids.back()).second, "duplicate draft journal event");
+        offset += 20 + static_cast<std::size_t>(size);
+    }
+    check(ids.size() == stored.info.journalCount, "draft journal event count mismatch");
+    return ids;
+}
+
+// Reads a draft at the requested depth. Full verifies every journal frame and
+// the chained digest. Retries if a concurrent writer replaced a file between
+// reading meta and opening it.
+std::optional<StoredDraft> readDraft(const std::filesystem::path& directory, DraftLoad load,
+                                     std::vector<std::string>* eventIds = nullptr) {
+    for (unsigned attempt = 0; attempt < 32; ++attempt) {
+        std::optional<StoredDraft> stored = readDraftMeta(directory);
+        if (!stored || load == DraftLoad::Meta) return stored;
+        if (stored->files.candidate != "-") {
+            const std::optional<Bytes> bytes =
+                readPrefix(directory / stored->files.candidate, stored->files.candidateBytes);
+            if (!bytes) continue;
+            const Hash digest = sha256(*bytes);
+            check(hexBytes(digest.data(), digest.size()) == stored->files.candidateDigest,
+                  "draft candidate file digest mismatch");
+            stored->info.candidateChanges = decodeCandidate(*bytes, stored->files.candidateCount);
         }
-        syscallChecked(::fsync(fd) == 0, "sync draft update");
+        if (eventIds || load == DraftLoad::Full) {
+            std::optional<Bytes> journal;
+            const std::vector<std::string> ids = journalEventIds(directory, *stored, journal);
+            if (stored->files.journal != "-" && !journal) continue;
+            if (eventIds) *eventIds = ids;
+            if (load == DraftLoad::Full && journal) {
+                std::size_t offset = 0;
+                for (const std::string& id : ids) {
+                    const std::uint32_t size = big32(journal->data() + offset + 16);
+                    const WorkingCopyEvent event = verifiedEditEvent(Bytes(
+                        journal->begin() + static_cast<std::ptrdiff_t>(offset + 20),
+                        journal->begin() + static_cast<std::ptrdiff_t>(offset + 20 + size)));
+                    check(event.id == id, "draft journal frame UUID mismatch");
+                    stored->info.journal.push_back(event);
+                    offset += 20 + static_cast<std::size_t>(size);
+                }
+                const Hash chain = chainJournal(Hash{}, stored->info.journal);
+                check(hexBytes(chain.data(), chain.size()) == stored->files.journalDigest,
+                      "draft journal digest mismatch");
+            }
+        }
+        return stored;
+    }
+    throw StorageError(StorageErrorKind::Busy, "draft changed repeatedly while reading");
+}
+
+WorkingCopyInfo readWorkingCopy(const std::filesystem::path& directory,
+                                DraftLoad load = DraftLoad::Full) {
+    std::optional<StoredDraft> stored = readDraft(directory, load);
+    if (!stored) throw ProjectError(ProjectErrorKind::NotFound, "working copy not found");
+    return std::move(stored->info);
+}
+
+// Writes `bytes` to a new file and fsyncs it.
+void writeNewFile(const std::filesystem::path& path, const Bytes& bytes) {
+    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    syscallChecked(fd >= 0, "create draft file");
+    try {
+        std::size_t done = 0;
+        while (done < bytes.size()) {
+            const ssize_t amount = ::write(fd, bytes.data() + done, bytes.size() - done);
+            if (amount < 0 && errno == EINTR) continue;
+            syscallChecked(amount > 0, "write draft file");
+            done += static_cast<std::size_t>(amount);
+        }
+        syscallChecked(::fsync(fd) == 0, "sync draft file");
     } catch (...) {
         ::close(fd);
-        ::unlink(stage.c_str());
+        ::unlink(path.c_str());
         throw;
     }
-    syscallChecked(::close(fd) == 0, "close draft update");
+    syscallChecked(::close(fd) == 0, "close draft file");
+}
+
+void publishMeta(const std::filesystem::path& directory, const WorkingCopyInfo& draft,
+                 const DraftFiles& files) {
+    const std::string body = metaBody(draft, files);
+    const std::filesystem::path stage = directory / (".meta-" + UuidV7::generate().toString());
+    writeNewFile(stage, Bytes(body.begin(), body.end()));
     try {
-        syscallChecked(::rename(stage.c_str(), published.c_str()) == 0,
-                       "publish draft update");
+        syscallChecked(::rename(stage.c_str(), (directory / draftMetaName).c_str()) == 0,
+                       "publish draft meta");
         syncDirectory(directory);
     } catch (...) {
-        // A rename may have succeeded even if the final directory fsync did not.
-        // Callers must mark publication uncertain and require a restart.
-        ::unlink(stage.c_str());
+        // The rename may have happened even if the directory fsync failed.
+        // Callers mark publication uncertain and require a restart.
+        (void)::unlink(stage.c_str());
         throw;
     }
 }
 
-void createWorkingCopyRecord(const std::filesystem::path& root,
-                             const WorkingCopyInfo& draft) {
+// What a draft update changes besides its meta fields. prepareDraftUpdate
+// encodes and checks every limit before anything is written, so a rejected
+// Save never reaches the disk.
+struct DraftUpdate {
+    std::optional<std::vector<ModelChange>> candidate; // replaces the overlay when set
+    std::vector<WorkingCopyEvent> appended;            // appended to the journal
+    bool resetJournal = false;                         // starts an empty journal
+    Bytes candidateBytes;                              // filled by prepareDraftUpdate
+    Bytes frames;                                      // filled by prepareDraftUpdate
+};
+
+void prepareDraftUpdate(const StoredDraft& stored, DraftUpdate& update) {
+    if (update.candidate && !update.candidate->empty())
+        update.candidateBytes = encodeCandidate(*update.candidate);
+    if (!update.appended.empty()) {
+        update.frames = encodeJournalFrames(update.appended);
+        const std::uint64_t kept = update.resetJournal ? 0 : stored.files.journalBytes;
+        check(kept + update.frames.size() <= workingCopyMaxBytes,
+              "draft event journal exceeds the 8 MiB storage limit",
+              StorageErrorKind::LimitExceeded);
+    }
+}
+
+void appendJournal(const std::filesystem::path& path, std::uint64_t committed, const Bytes& frames) {
+    const int fd = ::open(path.c_str(), O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+    syscallChecked(fd >= 0, "open draft journal");
+    try {
+        // Bytes past the acknowledged length belong to an interrupted, never
+        // acknowledged append; they are overwritten.
+        syscallChecked(::ftruncate(fd, static_cast<off_t>(committed)) == 0,
+                       "truncate draft journal tail");
+        std::size_t done = 0;
+        while (done < frames.size()) {
+            const ssize_t amount = ::pwrite(fd, frames.data() + done, frames.size() - done,
+                                            static_cast<off_t>(committed + done));
+            if (amount < 0 && errno == EINTR) continue;
+            syscallChecked(amount > 0, "append draft journal");
+            done += static_cast<std::size_t>(amount);
+        }
+        syscallChecked(::fsync(fd) == 0, "sync draft journal");
+    } catch (...) { ::close(fd); throw; }
+    syscallChecked(::close(fd) == 0, "close draft journal");
+}
+
+// Publishes `next` (whose journalCount the caller has set) after
+// prepareDraftUpdate. Data files are durable before the meta that references
+// them; superseded files are removed only after the new meta is durable.
+void updateDraft(const std::filesystem::path& directory, StoredDraft& stored,
+                 const WorkingCopyInfo& next, const DraftUpdate& update) {
+    DraftFiles files = stored.files;
+    std::vector<std::filesystem::path> superseded;
+    if (update.candidate) {
+        if (stored.files.candidate != "-") superseded.push_back(directory / stored.files.candidate);
+        files = DraftFiles{"-", 0, 0, "-", files.journal, files.journalBytes, files.journalDigest};
+        if (!update.candidate->empty()) {
+            files.candidate = "candidate-" + UuidV7::generate().toString();
+            writeNewFile(directory / files.candidate, update.candidateBytes);
+            const Hash digest = sha256(update.candidateBytes);
+            files.candidateCount = update.candidate->size();
+            files.candidateBytes = update.candidateBytes.size();
+            files.candidateDigest = hexBytes(digest.data(), digest.size());
+        }
+    }
+    if (update.resetJournal) {
+        if (stored.files.journal != "-") superseded.push_back(directory / stored.files.journal);
+        files.journal = "-";
+        files.journalBytes = 0;
+        files.journalDigest = "-";
+    }
+    if (!update.appended.empty()) {
+        const Hash chain = chainJournal(digestFromHex(files.journalDigest), update.appended);
+        if (files.journal == "-") {
+            files.journal = "journal-" + UuidV7::generate().toString();
+            writeNewFile(directory / files.journal, update.frames);
+        } else {
+            appendJournal(directory / files.journal, files.journalBytes, update.frames);
+        }
+        files.journalBytes += update.frames.size();
+        files.journalDigest = hexBytes(chain.data(), chain.size());
+    }
+    publishMeta(directory, next, files);
+    stored.info = next;
+    stored.files = files;
+    for (const std::filesystem::path& path : superseded) (void)::unlink(path.c_str());
+}
+
+// Creates a new draft directory with an empty overlay and journal. The
+// directory is assembled under a staged name and renamed into place, so a
+// crash never leaves a published draft without its meta.
+void createDraft(const std::filesystem::path& root, const WorkingCopyInfo& draft) {
     const std::filesystem::path directory = workingCopyDirectory(root);
     if (!std::filesystem::exists(directory)) {
         syscallChecked(std::filesystem::create_directory(directory), "create working-copy directory");
@@ -784,36 +1109,91 @@ void createWorkingCopyRecord(const std::filesystem::path& root,
           "invalid working-copy directory");
     const std::filesystem::path published = directory / draft.id;
     const std::filesystem::path staging = directory / (".creating-" + draft.id);
-    const std::string body = draftBody(draft);
-    const int fd = ::open(staging.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-    syscallChecked(fd >= 0, "stage working-copy record");
+    std::error_code ignored;
+    std::filesystem::remove_all(staging, ignored);
+    syscallChecked(::mkdir(staging.c_str(), 0700) == 0, "stage working-copy directory");
     try {
-        std::size_t offset = 0;
-        while (offset < body.size()) {
-            const ssize_t amount = ::write(fd, body.data() + offset, body.size() - offset);
-            if (amount < 0 && errno == EINTR) continue;
-            syscallChecked(amount > 0, "write working-copy record");
-            offset += static_cast<std::size_t>(amount);
-        }
-        syscallChecked(::fsync(fd) == 0, "sync working-copy record");
-    } catch (...) {
-        ::close(fd);
-        ::unlink(staging.c_str());
-        throw;
-    }
-    syscallChecked(::close(fd) == 0, "close working-copy record");
-    try {
-        syscallChecked(::link(staging.c_str(), published.c_str()) == 0,
+        const std::string body = metaBody(draft, DraftFiles{});
+        writeNewFile(staging / draftMetaName, Bytes(body.begin(), body.end()));
+        syncDirectory(staging);
+        // A published draft directory always contains meta, so renaming onto
+        // an existing draft fails (ENOTEMPTY/EEXIST) instead of replacing it.
+        syscallChecked(::rename(staging.c_str(), published.c_str()) == 0,
                        "publish working-copy record");
         syncDirectory(directory);
-        syscallChecked(::unlink(staging.c_str()) == 0, "remove staged working copy");
-        syncDirectory(directory);
     } catch (...) {
-        // The staged name is never authoritative; drop it whether or not the
-        // published link exists, so a failed publication leaves no remnant.
-        (void)::unlink(staging.c_str());
+        std::filesystem::remove_all(staging, ignored);
         throw;
     }
+}
+
+// Removes a published draft: an atomic rename out of the published namespace,
+// then best-effort deletion (a crash leaves a .deleting-* remnant).
+void deleteDraft(const std::filesystem::path& root, std::string_view draftId) {
+    const std::filesystem::path directory = workingCopyDirectory(root);
+    const std::filesystem::path doomed = directory / (".deleting-" + UuidV7::generate().toString());
+    syscallChecked(::rename((directory / std::string(draftId)).c_str(), doomed.c_str()) == 0,
+                   "discard working-copy record");
+    syncDirectory(directory);
+    std::error_code ignored;
+    std::filesystem::remove_all(doomed, ignored);
+}
+
+// Removes files a crash left inside a published draft: staged metas and
+// candidate or journal files the current meta does not reference.
+void tidyDraftDirectory(const std::filesystem::path& directory) {
+    const std::optional<StoredDraft> stored = readDraftMeta(directory);
+    if (!stored) return;
+    bool removed = false;
+    for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(directory)) {
+        const std::string name = entry.path().filename().string();
+        const bool unreferenced =
+            (name.starts_with("candidate-") && name != stored->files.candidate) ||
+            (name.starts_with("journal-") && name != stored->files.journal);
+        if (!(name.starts_with(".meta-") || unreferenced) || entry.is_symlink() ||
+            !entry.is_regular_file())
+            continue;
+        syscallChecked(::unlink(entry.path().c_str()) == 0 || errno == ENOENT,
+                       "remove stale draft file");
+        removed = true;
+    }
+    if (removed) syncDirectory(directory);
+}
+
+// Draft crash remnants: unpublished (.creating-*) and half-deleted
+// (.deleting-*) draft directories, and unreferenced files inside published
+// drafts. Runs once at open, under the exclusive catalogue lock.
+void removeDraftRemnants(const std::filesystem::path& root) {
+    const std::filesystem::path directory = workingCopyDirectory(root);
+    if (removePrefixed(directory, {".creating-", ".deleting-"}, true)) syncDirectory(directory);
+    for (const std::string& id : publishedDraftIds(directory)) {
+        // A damaged draft must not keep the whole root from opening; it
+        // reports its corruption when it is accessed.
+        try { tidyDraftDirectory(directory / id); }
+        catch (const StorageError&) {}
+    }
+}
+
+StoredDraft loadDraft(const std::filesystem::path& root, std::string_view draftId, DraftLoad load,
+                      std::vector<std::string>* eventIds = nullptr) {
+    std::optional<StoredDraft> stored =
+        readDraft(workingCopyDirectory(root) / std::string(draftId), load, eventIds);
+    if (!stored) throw ProjectError(ProjectErrorKind::NotFound, "working copy not found");
+    return std::move(*stored);
+}
+
+std::vector<ModelChange> mergedCandidate(const std::vector<ModelChange>& current,
+                                         const std::vector<ModelChange>& changes) {
+    std::map<Key, std::optional<ModelRecord>> merged;
+    for (const ModelChange& change : current) merged.emplace(change.key, change.record);
+    for (const ModelChange& change : changes) merged[change.key] = change.record;
+    if (merged.size() > workingCopyMaxChanges)
+        throw StorageError(StorageErrorKind::LimitExceeded, "draft candidate has too many changes");
+    std::vector<ModelChange> result;
+    result.reserve(merged.size());
+    for (const std::pair<const Key, std::optional<ModelRecord>>& entry : merged)
+        result.push_back(ModelChange{entry.first, entry.second});
+    return result;
 }
 
 // One durable private-local operation record owns its UUIDv7, request
@@ -1081,6 +1461,7 @@ ProjectService::ProjectService(std::filesystem::path root, std::size_t maxPendin
         // This process owns catalogue.lock exclusively for its lifetime, so
         // no staged catalogue, draft, ledger or project entry can be in use.
         removeCatalogueRemnants(this->root_);
+        removeDraftRemnants(this->root_);
         this->repository_id_ = loadRepositoryIdentity(this->root_);
         const TrackingStateOnDisk tracking = loadTrackingState(this->root_, this->repository_id_);
         this->repository_role_ = tracking.role;
@@ -1465,7 +1846,7 @@ WorkingCopyInfo ProjectService::createWorkingCopyForBranch(
     if (draftId && (std::filesystem::exists(existing) || std::filesystem::is_symlink(existing))) {
         // Repeated request (e.g. a transport resent the POST after a lost
         // response): answer with the draft it created, in its current state.
-        const WorkingCopyInfo stored = readWorkingCopy(existing);
+        const WorkingCopyInfo stored = readWorkingCopy(existing, DraftLoad::Candidate);
         if (stored.projectId != draft.projectId || stored.branchId != draft.branchId ||
             stored.baseRevision != draft.baseRevision || stored.sessionId != draft.sessionId)
             throw ProjectError(ProjectErrorKind::Conflict,
@@ -1475,19 +1856,17 @@ WorkingCopyInfo ProjectService::createWorkingCopyForBranch(
     if (branch->revision != baseRevision)
         throw ProjectError(ProjectErrorKind::Conflict,
                            "working-copy base must match current local HEAD");
-    try { createWorkingCopyRecord(this->root_, draft); }
+    try { createDraft(this->root_, draft); }
     catch (...) { markUncertain(); throw; }
     return draft;
 }
 
-WorkingCopyInfo ProjectService::workingCopy(std::string_view draftId) const {
+WorkingCopyInfo ProjectService::workingCopy(std::string_view draftId, bool includeJournal) const {
     if (!UuidV7::parse(draftId).has_value())
         throw ProjectError(ProjectErrorKind::InvalidInput, "invalid working-copy UUIDv7");
     checkHealthy();
-    const std::filesystem::path path = workingCopyDirectory(this->root_) / std::string(draftId);
-    if (!std::filesystem::exists(path) && !std::filesystem::is_symlink(path))
-        throw ProjectError(ProjectErrorKind::NotFound, "working copy not found");
-    return readWorkingCopy(path);
+    return loadDraft(this->root_, draftId,
+                     includeJournal ? DraftLoad::Full : DraftLoad::Candidate).info;
 }
 
 std::vector<WorkingCopyInfo> ProjectService::listWorkingCopies() const {
@@ -1495,7 +1874,7 @@ std::vector<WorkingCopyInfo> ProjectService::listWorkingCopies() const {
     std::vector<WorkingCopyInfo> result;
     const std::filesystem::path directory = workingCopyDirectory(this->root_);
     for (const std::string& id : publishedDraftIds(directory))
-        result.push_back(readWorkingCopy(directory / id));
+        result.push_back(readWorkingCopy(directory / id, DraftLoad::Meta));
     return result;
 }
 
@@ -1515,8 +1894,10 @@ WorkingCopyPage ProjectService::listWorkingCopies(std::optional<std::string_view
             page.next = page.workingCopies.back().id;
             break;
         }
-        WorkingCopyInfo draft = readWorkingCopy(directory / id);
-        if (projectId && draft.projectId != *projectId) continue;
+        // A draft discarded since the directory scan is simply not listed.
+        std::optional<StoredDraft> stored = readDraft(directory / id, DraftLoad::Meta);
+        if (!stored || (projectId && stored->info.projectId != *projectId)) continue;
+        WorkingCopyInfo& draft = stored->info;
         page.workingCopies.push_back(std::move(draft));
     }
     return page;
@@ -1531,19 +1912,13 @@ void ProjectService::discardWorkingCopy(std::string_view draftId, std::string_vi
     const std::shared_ptr<std::mutex> lock = draftLock(draftId);
     std::lock_guard<std::mutex> guard(*lock);
     requirePrivateRepository("draft requires a private repository");
-    const std::filesystem::path directory = workingCopyDirectory(this->root_);
-    const std::filesystem::path path = directory / std::string(draftId);
-    if (!std::filesystem::exists(path) && !std::filesystem::is_symlink(path))
-        throw ProjectError(ProjectErrorKind::NotFound, "working copy not found");
-    const WorkingCopyInfo draft = readWorkingCopy(path);
+    const WorkingCopyInfo draft = loadDraft(this->root_, draftId, DraftLoad::Meta).info;
     if (!draft.leaseSessionId || *draft.leaseSessionId != sessionId ||
         !draft.leaseToken || *draft.leaseToken != fencingToken ||
         !workingCopyLeaseLive(draft) || draft.generation != expectedGeneration)
         throw ProjectError(ProjectErrorKind::Conflict, "draft lease, fencing token or generation changed");
-    try {
-        syscallChecked(::unlink(path.c_str()) == 0, "discard working-copy record");
-        syncDirectory(directory);
-    } catch (...) { markUncertain(); throw; }
+    try { deleteDraft(this->root_, draftId); }
+    catch (...) { markUncertain(); throw; }
     forgetLease(draftId);
 }
 
@@ -1555,17 +1930,16 @@ WorkingCopyLease ProjectService::acquireWorkingCopyLease(
     const std::shared_ptr<std::mutex> lock = draftLock(draftId);
     std::lock_guard<std::mutex> guard(*lock);
     requirePrivateRepository("draft requires a private repository");
-    const std::filesystem::path path = workingCopyDirectory(this->root_) / std::string(draftId);
-    if (!std::filesystem::exists(path) && !std::filesystem::is_symlink(path))
-        throw ProjectError(ProjectErrorKind::NotFound, "working copy not found");
-    WorkingCopyInfo draft = readWorkingCopy(path);
+    // A lease touches only the draft's small meta record.
+    StoredDraft stored = loadDraft(this->root_, draftId, DraftLoad::Meta);
+    WorkingCopyInfo draft = stored.info;
     const std::uint64_t now = wallClockMs();
     if (workingCopyLeaseLive(draft) && *draft.leaseSessionId != sessionId)
         throw ProjectError(ProjectErrorKind::Conflict, "draft held by another writer session");
     draft.leaseSessionId = std::string(sessionId);
     draft.leaseToken = UuidV7::generate().toString();
     draft.leaseExpiresAtMs = now + static_cast<std::uint64_t>(seconds) * 1000;
-    try { replaceWorkingCopyRecord(this->root_, draft); }
+    try { updateDraft(workingCopyDirectory(this->root_) / draft.id, stored, draft, DraftUpdate{}); }
     catch (...) { markUncertain(); throw; }
     rememberLease(draft, seconds);
     return WorkingCopyLease{*draft.leaseToken, draft.leaseExpiresAtMs, draft.generation};
@@ -1581,11 +1955,9 @@ WorkingCopyInfo ProjectService::saveWorkingCopyChanges(
     const std::shared_ptr<std::mutex> lock = draftLock(draftId);
     std::lock_guard<std::mutex> guard(*lock);
     requirePrivateRepository("draft requires a private repository");
-    const std::filesystem::path path = workingCopyDirectory(this->root_) / std::string(draftId);
-    if (!std::filesystem::exists(path) && !std::filesystem::is_symlink(path))
-        throw ProjectError(ProjectErrorKind::NotFound, "working copy not found");
-    WorkingCopyInfo draft = readWorkingCopy(path);
-    if (!draft.journal.empty())
+    StoredDraft stored = loadDraft(this->root_, draftId, DraftLoad::Candidate);
+    WorkingCopyInfo draft = stored.info;
+    if (draft.journalCount != 0)
         throw ProjectError(ProjectErrorKind::Conflict,
                            "journalled draft requires atomic event saves");
     if (!draft.leaseSessionId || *draft.leaseSessionId != sessionId ||
@@ -1594,24 +1966,17 @@ WorkingCopyInfo ProjectService::saveWorkingCopyChanges(
         throw ProjectError(ProjectErrorKind::Conflict, "draft lease, fencing token or generation changed");
     if (draft.generation == std::numeric_limits<std::uint64_t>::max())
         throw ProjectError(ProjectErrorKind::Conflict, "draft generation exhausted");
-    std::map<Key, std::optional<ModelRecord>> merged;
-    for (const ModelChange& change : draft.candidateChanges) merged.emplace(change.key, change.record);
     std::set<Key> seen;
-    for (const ModelChange& change : changes) {
+    for (const ModelChange& change : changes)
         if (!seen.insert(change.key).second)
             throw ProjectError(ProjectErrorKind::InvalidInput, "duplicate key in draft save batch");
-        merged[change.key] = change.record;
-    }
-    if (merged.size() > workingCopyMaxChanges)
-        throw StorageError(StorageErrorKind::LimitExceeded, "draft candidate has too many changes");
-    draft.candidateChanges.clear();
-    for (const std::pair<const Key, std::optional<ModelRecord>>& entry : merged)
-        draft.candidateChanges.push_back(ModelChange{entry.first, entry.second});
+    draft.candidateChanges = mergedCandidate(draft.candidateChanges, changes);
     draft.dirty = !draft.candidateChanges.empty();
     ++draft.generation;
-    // Serialization and size/record validation is done BEFORE publishing.
-    (void)draftBody(draft);
-    try { replaceWorkingCopyRecord(this->root_, draft); }
+    DraftUpdate update;
+    update.candidate = draft.candidateChanges;
+    prepareDraftUpdate(stored, update); // Limits are checked BEFORE publishing.
+    try { updateDraft(workingCopyDirectory(this->root_) / draft.id, stored, draft, update); }
     catch (...) { markUncertain(); throw; }
     return draft;
 }
@@ -1645,46 +2010,50 @@ WorkingCopyInfo ProjectService::saveWorkingCopyTransactions(
     const std::shared_ptr<std::mutex> lock = draftLock(draftId);
     std::lock_guard<std::mutex> guard(*lock);
     requirePrivateRepository("draft requires a private repository");
-    const std::filesystem::path path = workingCopyDirectory(this->root_) / std::string(draftId);
-    if (!std::filesystem::exists(path) && !std::filesystem::is_symlink(path))
-        throw ProjectError(ProjectErrorKind::NotFound, "working copy not found");
-    WorkingCopyInfo draft = readWorkingCopy(path);
+    // Reads the overlay and the journal's event UUIDs (frame headers), never
+    // the complete journal: a Save appends only its own events.
+    std::vector<std::string> journalIds;
+    StoredDraft stored = loadDraft(this->root_, draftId, DraftLoad::Candidate, &journalIds);
+    WorkingCopyInfo draft = stored.info;
     if (!draft.leaseSessionId || *draft.leaseSessionId != sessionId ||
         !draft.leaseToken || *draft.leaseToken != fencingToken ||
         !workingCopyLeaseLive(draft))
         throw ProjectError(ProjectErrorKind::Conflict, "stale draft writer lease");
-    // Lost HTTP acknowledgements are resolved without repeating a Save.
+    // Lost HTTP acknowledgements are resolved without repeating a Save. The
+    // replayed Save's events are the journal's last ones.
     if (expectedGeneration < std::numeric_limits<std::uint64_t>::max() &&
         draft.generation == expectedGeneration + 1 &&
-        draft.lastSaveFingerprint == fingerprint)
-        return draft;
+        draft.lastSaveFingerprint == fingerprint) {
+        WorkingCopyInfo replayed = loadDraft(this->root_, draftId, DraftLoad::Full).info;
+        if (replayed.generation != draft.generation || replayed.journal.size() < events.size())
+            throw ProjectError(ProjectErrorKind::Conflict, "draft generation changed");
+        replayed.journal.erase(replayed.journal.begin(),
+            replayed.journal.end() - static_cast<std::ptrdiff_t>(events.size()));
+        return replayed;
+    }
     if (draft.generation != expectedGeneration ||
         draft.generation == std::numeric_limits<std::uint64_t>::max())
         throw ProjectError(ProjectErrorKind::Conflict, "draft generation changed");
-    std::set<std::string> applied;
-    for (const WorkingCopyEvent& event : draft.journal) applied.insert(event.id);
+    const std::set<std::string> applied(journalIds.begin(), journalIds.end());
     for (const WorkingCopyEvent& event : events)
         if (applied.contains(event.id))
             throw ProjectError(ProjectErrorKind::Conflict, "edit event already saved");
     // A local Commit empties the journal; until then a full journal is a
     // limit (413), not a client error.
-    if (draft.journal.size() + events.size() > workingCopyMaxEvents)
+    if (draft.journalCount + events.size() > workingCopyMaxEvents)
         throw StorageError(StorageErrorKind::LimitExceeded,
                            "draft event journal is full; commit or discard the draft");
-    std::map<Key, std::optional<ModelRecord>> merged;
-    for (const ModelChange& change : draft.candidateChanges) merged.emplace(change.key, change.record);
-    for (const ModelChange& change : changes) merged[change.key] = change.record;
-    if (merged.size() > workingCopyMaxChanges)
-        throw StorageError(StorageErrorKind::LimitExceeded, "draft candidate has too many changes");
-    draft.candidateChanges.clear();
-    for (const std::pair<const Key, std::optional<ModelRecord>>& entry : merged)
-        draft.candidateChanges.push_back(ModelChange{entry.first, entry.second});
-    draft.journal.insert(draft.journal.end(), events.begin(), events.end());
+    draft.candidateChanges = mergedCandidate(draft.candidateChanges, changes);
+    draft.journal = events;
+    draft.journalCount += events.size();
     draft.dirty = !draft.candidateChanges.empty();
     draft.lastSaveFingerprint = fingerprint;
     ++draft.generation;
-    (void)draftBody(draft); // Validate complete overlay + journal before publishing.
-    try { replaceWorkingCopyRecord(this->root_, draft); }
+    DraftUpdate update;
+    if (!changes.empty()) update.candidate = draft.candidateChanges;
+    update.appended = events;
+    prepareDraftUpdate(stored, update); // Limits are checked BEFORE publishing.
+    try { updateDraft(workingCopyDirectory(this->root_) / draft.id, stored, draft, update); }
     catch (...) { markUncertain(); throw; }
     return draft;
 }
@@ -1700,8 +2069,9 @@ void rebaseCommittedDraft(const std::filesystem::path& root, const PersistedLoca
                           const std::function<void()>& markUncertain) {
     if (operation.info.state != LocalCommitState::Succeeded) return;
     const std::filesystem::path path = workingCopyDirectory(root) / operation.info.draftId;
-    if (!std::filesystem::exists(path) && !std::filesystem::is_symlink(path)) return; // discarded
-    WorkingCopyInfo draft = readWorkingCopy(path);
+    std::optional<StoredDraft> stored = readDraft(path, DraftLoad::Meta);
+    if (!stored) return; // discarded
+    WorkingCopyInfo draft = stored->info;
     const std::optional<RevisionId> committed = RevisionId::parse(operation.info.reservedRevisionId);
     if (!committed || draft.projectId != operation.info.projectId ||
         draft.branchId != operation.info.branchId ||
@@ -1712,10 +2082,14 @@ void rebaseCommittedDraft(const std::filesystem::path& root, const PersistedLoca
     draft.baseRevision = committed;
     draft.candidateChanges.clear();
     draft.journal.clear();
+    draft.journalCount = 0;
     draft.lastSaveFingerprint.reset();
     draft.dirty = false;
     ++draft.generation;
-    try { replaceWorkingCopyRecord(root, draft); }
+    DraftUpdate update;
+    update.candidate = std::vector<ModelChange>{};
+    update.resetJournal = true;
+    try { updateDraft(path, *stored, draft, update); }
     catch (...) { markUncertain(); throw; }
 }
 
@@ -1771,11 +2145,7 @@ LocalCommitInfo ProjectService::commitWorkingCopy(
     if (std::filesystem::exists(operationPath) || std::filesystem::is_symlink(operationPath)) {
         projectId = readLocalCommit(operationPath).info.projectId;
     } else {
-        const std::filesystem::path draftPath = workingCopyDirectory(this->root_) /
-            std::string(draftId);
-        if (!std::filesystem::exists(draftPath) && !std::filesystem::is_symlink(draftPath))
-            throw ProjectError(ProjectErrorKind::NotFound, "working copy not found");
-        projectId = readWorkingCopy(draftPath).projectId;
+        projectId = loadDraft(this->root_, draftId, DraftLoad::Meta).info.projectId;
     }
     const std::string requestDigest = localRequestDigest(
         this->repository_id_, draftId, sessionId, fencingToken,
@@ -1800,11 +2170,9 @@ LocalCommitInfo ProjectService::commitWorkingCopy(
                 throw ProjectError(ProjectErrorKind::Conflict,
                                    "local Commit UUIDv7 reused with a different request");
         } else {
-            const std::filesystem::path draftPath = workingCopyDirectory(this->root_) /
-                std::string(draftId);
-            if (!std::filesystem::exists(draftPath) && !std::filesystem::is_symlink(draftPath))
-                throw ProjectError(ProjectErrorKind::NotFound, "working copy not found");
-            const WorkingCopyInfo draft = readWorkingCopy(draftPath);
+            // The journal is history for undo and is not part of a Commit.
+            const WorkingCopyInfo draft =
+                loadDraft(this->root_, draftId, DraftLoad::Candidate).info;
             // Authorized by the live lease and its fencing token, exactly as
             // a Save is: a session that took over an expired lease may also
             // Commit, and the creating session's stale token may not.
@@ -1918,10 +2286,8 @@ void ProjectService::releaseWorkingCopyLease(
     const std::shared_ptr<std::mutex> lock = draftLock(draftId);
     std::lock_guard<std::mutex> guard(*lock);
     checkHealthy();
-    const std::filesystem::path path = workingCopyDirectory(this->root_) / std::string(draftId);
-    if (!std::filesystem::exists(path) && !std::filesystem::is_symlink(path))
-        throw ProjectError(ProjectErrorKind::NotFound, "working copy not found");
-    WorkingCopyInfo draft = readWorkingCopy(path);
+    StoredDraft stored = loadDraft(this->root_, draftId, DraftLoad::Meta);
+    WorkingCopyInfo draft = stored.info;
     // No holder at all: the lease is already released, e.g. by this same
     // request before a transport resent it. Releasing is idempotent; a
     // lease held by anyone else is still never released with a stale token.
@@ -1932,7 +2298,7 @@ void ProjectService::releaseWorkingCopyLease(
     draft.leaseSessionId.reset();
     draft.leaseToken.reset();
     draft.leaseExpiresAtMs = 0;
-    try { replaceWorkingCopyRecord(this->root_, draft); }
+    try { updateDraft(workingCopyDirectory(this->root_) / draft.id, stored, draft, DraftUpdate{}); }
     catch (...) { markUncertain(); throw; }
     forgetLease(draftId);
 }

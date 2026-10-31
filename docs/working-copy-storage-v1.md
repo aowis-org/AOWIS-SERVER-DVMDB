@@ -11,9 +11,9 @@ or permissions.
 
 ## Native lifecycle
 
-`ProjectService` provides `createWorkingCopyV1`, `workingCopyV1`,
-`listWorkingCopiesV1`, `acquireWorkingCopyLeaseV1`,
-`saveWorkingCopyChangesV1` and `releaseWorkingCopyLeaseV1`.
+`ProjectService` provides `createWorkingCopy`, `workingCopy`,
+`listWorkingCopies`, `acquireWorkingCopyLease`,
+`saveWorkingCopyChanges` and `releaseWorkingCopyLease`.
 
 An editor must explicitly acquire an exclusive writer lease, providing its
 session UUIDv7 and a duration of 1–120 seconds. The result contains a fresh
@@ -24,7 +24,7 @@ session may take over **only after expiry or explicit release**. Expiration
 never deletes an unsaved or saved working copy. A stale token, expired lease
 or old generation is rejected with Conflict before any candidate is modified.
 
-`saveWorkingCopyChangesV1` accepts a batch of typed `ModelChange` objects:
+`saveWorkingCopyChanges` accepts a batch of typed `ModelChange` objects:
 entity UUID key, optional `ModelRecord` for create/update, or null for delete.
 The batch must not contain duplicate entity keys. A Save merges the entire
 batch into the accumulated candidate overlay, stores the new generation and
@@ -36,14 +36,29 @@ complete model from the pinned base still require integration with the editor.
 
 ## On-disk format
 
-Each published draft has one record named `working-copies/<draft-uuidv7>`.
-All new drafts use `AOWIS-WORKING-COPY-3`, including unborn drafts with no
-lease. Earlier experimental formats are not supported.
+Each published draft is a directory `working-copies/<draft-uuidv7>/` holding
+at most three files. Earlier pre-release formats (including the single-file
+`AOWIS-WORKING-COPY-3` record) are rejected as unsupported, never migrated.
 
-The canonical fields, in strict order, use UTF-8/ASCII tab-separated records:
+* `meta` — a small text record, the only authoritative file. It is replaced
+  atomically on every change: written to `.meta-<uuidv7>`, fsynced, renamed
+  over `meta`, then the draft directory is fsynced.
+* `candidate-<uuidv7>` — the candidate overlay, an immutable binary file.
+  A Save that changes the overlay writes a new file before publishing the
+  meta that names it; the superseded file is removed afterwards.
+* `journal-<uuidv7>` — the MODEL event journal, append-only. A Save appends
+  its own frames (after truncating any unacknowledged tail), fsyncs, then
+  publishes the meta with the new length and digest. Earlier frames are
+  never rewritten.
+
+A lease, a release, a discard check and a listing touch only `meta`. A Save
+writes the candidate only when the overlay changes and appends only its own
+events, so the cost of a Save no longer grows with the journal.
+
+`meta` fields, in strict order, tab-separated:
 
 ```text
-AOWIS-WORKING-COPY-3
+AOWIS-WORKING-COPY-4
 project\t<project-uuidv7>
 branch\t<branch-uuidv7>
 base\t<revision-uuidv7-or-dash>
@@ -54,29 +69,31 @@ validation\tunvalidated
 lease-session\t<session-uuidv7-or-dash>
 lease-token\t<token-uuidv7-or-dash>
 lease-expires\t<decimal-unix-epoch-ms-or-zero>
-changes\t<count>
-change\t<16-byte-key-as-32-lowercase-hex>\t<model-envelope-hex-or-dash>
-...
-events\t<count>
-event\t<transaction-uuidv7>\t<MODEL-binary-frame-as-hex>
-...
+candidate\t<file-or-dash>\t<changes>\t<bytes>\t<sha256-of-file-or-dash>
+journal\t<file-or-dash>\t<events>\t<acknowledged-bytes>\t<chain-digest-or-dash>
 last-save\t<last-batch-sha256-or-dash>
 ```
 
-The change records are strictly sorted by entity UUID key. The model envelope
-uses the existing native typed-record encoding (`AOMD` version 1), not a
-new codec. Draft records are bounded to 8 MiB and 20,000 changed keys.
-Deleted values remain explicit in the overlay. The original pinned base is
-immutable, independent of later branch HEAD movement.
+Candidate file: `AOWC` 0x01, then per change, strictly sorted by entity key:
+the 16-byte key, a big-endian u32 length (`0xffffffff` = deletion), and the
+native typed-record encoding (`AOMD` version 1). Journal file: per event, the
+16-byte event UUIDv7, a big-endian u32 length and the exact MODEL frame. The
+journal digest chains SHA-256 over the frames: `d0` is 32 zero bytes and
+`d(i) = SHA-256(d(i-1) || frame(i))`. Readers check the candidate digest, and
+a full read verifies every frame and the chain. The candidate and the journal
+are each bounded to 8 MiB; a draft holds at most 20,000 changed keys and 4,096
+events. Exceeding a bound is `LimitExceeded` (HTTP 413) and changes nothing.
 
-Updates are written to a fresh exclusive `.updating-<uuidv7>` staging file,
-fsynced, renamed atomically over the previous record, then the working-copy
-directory is fsynced. On crash, readers see either the old complete record
-or the new complete record. Any unpublished `.creating-` or `.updating-`
-staging file is ignored but checked for safe type/name. If publication is
-uncertain, the service refuses further writes until restart and inspection.
-Offline backup/restore verifies the current record format and preserves its
-exact bytes, candidate data, edit journal and lease generation.
+Readers take no lock. A data file named by a meta stays in place until a
+newer meta is durable, so a reader sees one complete Save; if a file was
+replaced in between, the reader rereads `meta`. On crash, the old or the new
+meta is authoritative and bytes past the acknowledged journal length are
+ignored. Creation stages `.creating-<uuidv7>/` with its meta and renames it
+into place; discard renames the draft to `.deleting-<uuidv7>` before removing
+it. Opening the catalogue removes those directories, stray `.meta-*` files and
+unreferenced data files. If publication is uncertain, the service refuses
+further writes until restart and inspection. Offline backup/restore verifies
+every meta, candidate and journal and compares their acknowledged content.
 
 ## Private HTTP draft operations
 
@@ -108,12 +125,12 @@ changes a committed HEAD or creates a revision.
 
 ## Durable local Commit coordinator (VC-05 native foundation)
 
-`ProjectService::commitWorkingCopyV1(operationId, draftId, sessionId,
+`ProjectService::commitWorkingCopy(operationId, draftId, sessionId,
 fencingToken, expectedGeneration, expectedLocalHead)` snapshots a saved,
 nonempty candidate from a private repository only. It requires the exact
 fenced writer, generation and pinned draft base (including explicit null for
 an unborn branch). The target branch is resolved by its **UUIDv7**, not its
-renamable label. `localCommitStatusV1(operationId)` reads the authoritative
+renamable label. `localCommitStatus(operationId)` reads the authoritative
 result and reconciles an interrupted publication against actual committed
 ancestry. This is a **native C++ API**, not yet an HTTP route or GUI button.
 
@@ -137,11 +154,12 @@ status recovery checks that the reserved revision is in the **target branch's
 committed ancestry**. An orphan immutable revision is not mistaken for a
 successful Commit. If HEAD has advanced in an ambiguous way, the operation
 remains pending and requires manual resolution rather than a blind replay.
-No pending operation is silently discarded. Success leaves the saved draft
-intact; stale or rejected Commit likewise never destroys the candidate.
+No pending operation is silently discarded. Success rebases the draft onto the
+committed revision (empty candidate and journal, generation + 1, lease kept);
+a stale or rejected Commit never changes the candidate.
 
 **Remaining integration gate:** the native coordinator currently checks the
-MODEL record/index constraints enforced by `Repository::commitModelV2`, but
+MODEL record/index constraints enforced by `Repository::commitModel`, but
 does **not yet run the complete canonical hydraulic-network/domain validator**
 on the assembled candidate. It must not be wired directly to GUI Commit until
 full hydraulic validation is implemented, the HTTP transport exposes the
@@ -151,8 +169,9 @@ status/retry contract, and end-to-end GUI/Standalone acceptance passes.
 
 The native and HTTP Save paths are durable and fenced, but do not yet implement
 historical checkout, materialization/verification of the entire base model,
-semantic validation of the assembled hydraulic candidate, candidate discard,
-or the GUI editor workflow. The native local Commit coordinator and durable
+semantic validation of the assembled hydraulic candidate, or the GUI editor
+workflow. A draft can be discarded (`POST /working-copies/{draftId}/discard`,
+fenced like a Save). The native local Commit coordinator and durable
 operation recovery exist, but full hydraulic validation, HTTP transport and
 GUI acceptance have not yet been completed.
 
@@ -176,14 +195,11 @@ an explicit UUID-preserving unborn-branch operation.
 writer session and fencing token, decimal-string `expectedGeneration`, one or
 more base64-encoded canonical MODEL editing transactions in `events`, and the
 corresponding typed `changes` array. The existing candidate and new journal
-entries are written as **one fsynced working-copy update**. A successful
-response acknowledges both; it does not create a revision or move HEAD.
+entries are published by **one fsynced meta replacement**. A successful
+response acknowledges both; it does not create a revision or move HEAD. The
+response lists the accepted event UUIDs of this Save and the new `eventCount`.
 
-Draft records use only `AOWIS-WORKING-COPY-3`; previous experimental V1/V2
-records are intentionally unsupported. Existing development drafts must be
-recreated; no pre-release migration or compatibility decoder is maintained.
-The current format stores the combined journal and materialized
-candidate. Each event preserves its MODEL UUIDv7 and original bytes, in user
+Each event preserves its MODEL UUIDv7 and original bytes, in user
 operation order. `GET` returns both the candidate overlay and the journal;
 `GET` list returns only metadata including `eventCount`. The last event-save
 request is fingerprinted for an idempotent retry at its original generation.
@@ -195,9 +211,8 @@ the Qt-enabled HTTP route additionally runs MODEL's complete transaction
 decoder. The native C++ caller must supply MODEL-validated event bytes and
 model-record changes that correspond to those events. The membership-aware HTTP path validates canonical member record payloads
 and event before/after bytes for insertion and deletion; this is **not** a
-complete field-by-field reconciliation of all ordinary update events. The working-copy record remains
-bounded to 8 MiB including the accumulated journal; segment/pack storage is
-needed before long-running heavy edit histories are supported. This is the
+complete field-by-field reconciliation of all ordinary update events. The journal
+is bounded to 8 MiB and 4,096 events; a local Commit empties it. This is the
 first atomic acknowledgement boundary, not the complete undo/redo subsystem.
 
 ## Hydraulic membership in atomic event saves
@@ -215,7 +230,7 @@ candidate's existing entity. It computes the native membership-chunk and root
 updates itself. Only affected collections are read, and only modified chunks
 and necessary root metadata are placed into the resulting candidate overlay.
 All generated records, original transactions and entity changes are published
-in a **single generation-checked durable draft replacement**. A failed
+in a **single generation-checked durable draft update**. A failed
 materialization leaves the draft unchanged. The request fingerprint is derived
 from canonical JSON of the original logical request, not the derived chunk
 records, so the immediately preceding identical request can be acknowledged
@@ -227,7 +242,7 @@ removed entity`) before the draft is read; only attribute updates may omit
 it. Otherwise the candidate could hold an entity record that no membership
 chunk lists, or a chunk that still lists a removed entity. This check needs
 the MODEL decoder and therefore exists in the hydraulic-enabled HTTP build;
-native C++ callers of `saveWorkingCopyTransactionsV1` must uphold it
+native C++ callers of `saveWorkingCopyTransactions` must uphold it
 themselves until a native membership-aware draft API exists.
 
 This endpoint intentionally requires the owning hydraulic network to exist in

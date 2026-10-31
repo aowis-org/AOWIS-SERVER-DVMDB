@@ -149,118 +149,146 @@ def tracking_metadata(root):
 
 
 def working_copy_records(root):
-    """Verify every published private draft and preserve exact bytes on restore."""
+    """Verify every published private draft (AOWIS-WORKING-COPY-4).
+
+    Returns {draft id: (meta, candidate bytes, acknowledged journal prefix)}
+    so a copy can be compared with its source. Unreferenced files that a
+    crash left behind are allowed and ignored, exactly as the service does.
+    """
     directory = root / "working-copies"
     if not directory.exists() and not directory.is_symlink():
         return {}
     safe_directory(directory)
     records = {}
-    hex_digits = set(b"0123456789abcdef")
+    hex_digits = set("0123456789abcdef")
+    limit = 8 * 1024 * 1024
 
     def decimal(value):
-        require(value.isdigit() and (value == b"0" or not value.startswith(b"0"))
+        require(value.isdigit() and (value == "0" or not value.startswith("0"))
                 and len(value) <= 20 and int(value) <= (1 << 64) - 1,
                 "invalid draft generation/lease/count")
         return int(value)
 
     def uuid(value):
-        return UUID7.fullmatch(value.decode("ascii", errors="replace")) is not None
+        return UUID7.fullmatch(value) is not None
 
-    def valid_model_record(encoded):
-        require(len(encoded) % 2 == 0 and all(ch in hex_digits for ch in encoded),
-                "invalid draft model record hex")
-        record = bytes.fromhex(encoded.decode("ascii"))
+    def digest(value):
+        return len(value) == 64 and all(ch in hex_digits for ch in value)
+
+    def valid_model_record(record, path):
         require(len(record) >= 15 and record[:5] == b"AOMD\x01" and
-                int.from_bytes(record[5:7], "big") != 0, "invalid draft model record header")
+                int.from_bytes(record[5:7], "big") != 0, f"invalid draft model record header: {path}")
         count = int.from_bytes(record[7:11], "big")
         offset = 11 + count * 16
         require(offset + 4 <= len(record) and
                 int.from_bytes(record[offset:offset + 4], "big") == len(record) - offset - 4,
-                "invalid draft model record length")
+                f"invalid draft model record length: {path}")
 
-    for path in sorted(directory.iterdir()):
-        if path.name.startswith((".creating-", ".updating-")):
-            prefix = ".creating-" if path.name.startswith(".creating-") else ".updating-"
-            require(UUID7.fullmatch(path.name[len(prefix):]) is not None
-                    and path.is_file() and not path.is_symlink(),
-                    f"unsafe working-copy staging record: {path}")
+    def reference(value, prefix, path):
+        parts = value.split("\t")
+        require(len(parts) == 4 and (parts[0] == "-" or
+                (parts[0].startswith(prefix) and uuid(parts[0][len(prefix):]))),
+                f"invalid draft {prefix[:-1]} reference: {path}")
+        name, count, size, hashed = parts[0], decimal(parts[1]), decimal(parts[2]), parts[3]
+        require(size <= limit and ((name == "-" and count == 0 and size == 0 and hashed == "-") or
+                                   (name != "-" and count > 0 and digest(hashed))),
+                f"inconsistent draft {prefix[:-1]} reference: {path}")
+        return name, count, size, hashed
+
+    def prefix_of(path, size):
+        require(path.is_file() and not path.is_symlink() and path.stat().st_size >= size,
+                f"missing or short draft data file: {path}")
+        with open(path, "rb") as stream:
+            return stream.read(size)
+
+    for entry in sorted(directory.iterdir()):
+        if entry.name.startswith((".creating-", ".deleting-")):
+            require(uuid(entry.name[10:]) and entry.is_dir() and not entry.is_symlink(),
+                    f"unsafe working-copy staging directory: {entry}")
             continue
-        require(UUID7.fullmatch(path.name) is not None
-                and path.is_file() and not path.is_symlink()
-                and path.stat().st_size <= 8 * 1024 * 1024,
-                f"invalid working-copy record: {path}")
-        body = path.read_bytes()
-        lines = body.splitlines(keepends=True)
-        require(lines and lines[0] == b"AOWIS-WORKING-COPY-3\n" and
-                all(line.endswith(b"\n") for line in lines),
-                f"invalid working-copy record format: {path}")
-        fields = [b"project", b"branch", b"base", b"session", b"generation",
-                  b"dirty", b"validation"]
-        fields += [b"lease-session", b"lease-token", b"lease-expires"]
-        fields += [b"changes"]
-        require(len(lines) >= 1 + len(fields), f"truncated working-copy record: {path}")
+        require(uuid(entry.name) and entry.is_dir() and not entry.is_symlink(),
+                f"invalid working-copy entry (expected a draft directory): {entry}")
+        names = {}
+        for item in entry.iterdir():
+            require(item.is_file() and not item.is_symlink() and
+                    (item.name == "meta" or
+                     any(item.name.startswith(p) and uuid(item.name[len(p):])
+                         for p in (".meta-", "candidate-", "journal-"))),
+                    f"unexpected entry in draft directory: {item}")
+            names[item.name] = item
+        meta_path = entry / "meta"
+        require("meta" in names and meta_path.stat().st_size <= 4096,
+                f"missing or oversized draft meta: {meta_path}")
+        meta = meta_path.read_bytes()
+        require(meta.startswith(b"AOWIS-WORKING-COPY-4\n") and meta.endswith(b"\n"),
+                f"invalid working-copy record format: {meta_path}")
+        lines = meta.decode("ascii", errors="replace").split("\n")[1:-1]
+        fields = ["project", "branch", "base", "session", "generation", "dirty", "validation",
+                  "lease-session", "lease-token", "lease-expires", "candidate", "journal",
+                  "last-save"]
+        require(len(lines) == len(fields), f"invalid working-copy field count: {meta_path}")
         values = []
-        for line, field in zip(lines[1:], fields):
-            parts = line[:-1].split(b"\t")
-            require(len(parts) == 2 and parts[0] == field,
-                    f"invalid working-copy field: {path}")
-            values.append(parts[1])
+        for line, field in zip(lines, fields):
+            require(line.startswith(field + "\t"), f"invalid working-copy field: {meta_path}")
+            values.append(line[len(field) + 1:])
         require(uuid(values[0]) and uuid(values[1]) and
-                (values[2] == b"-" or uuid(values[2])) and uuid(values[3]),
-                f"invalid draft identity: {path}")
+                (values[2] == "-" or uuid(values[2])) and uuid(values[3]),
+                f"invalid draft identity: {meta_path}")
         generation = decimal(values[4])
-        require(values[5] in (b"0", b"1") and values[6] == b"unvalidated",
-                f"invalid draft dirty/validation state: {path}")
+        require(values[5] in ("0", "1") and values[6] == "unvalidated",
+                f"invalid draft dirty/validation state: {meta_path}")
         owner, token = values[7:9]
         expires = decimal(values[9])
-        require((owner == b"-" and token == b"-" and expires == 0) or
+        require((owner == "-" and token == "-" and expires == 0) or
                 (uuid(owner) and uuid(token) and expires != 0),
-                f"invalid draft lease state: {path}")
-        count = decimal(values[-1])
-        require(count <= 20000 and len(lines) >= len(fields) + 1 + count,
-                f"invalid draft change count: {path}")
-        require((values[5] == b"1") == (count != 0),
-                f"invalid draft dirty/change mismatch: {path}")
-        previous = None
-        for line in lines[len(fields) + 1: len(fields) + 1 + count]:
-            parts = line[:-1].split(b"\t")
-            require(len(parts) == 3 and parts[0] == b"change" and
-                    len(parts[1]) == 32 and all(ch in hex_digits for ch in parts[1]) and
-                    (previous is None or previous < parts[1]),
-                    f"invalid draft change key: {path}")
-            previous = parts[1]
-            if parts[2] != b"-":
-                valid_model_record(parts[2])
-        tail = lines[len(fields) + 1 + count:]
-        require(len(tail) >= 2 and tail[0].startswith(b"events\t"),
-                f"missing draft journal count: {path}")
-        event_count = decimal(tail[0][7:-1])
-        require(event_count <= 4096 and len(tail) == event_count + 2,
-                f"invalid draft journal count: {path}")
-        seen_events = set()
-        for line in tail[1:-1]:
-            parts = line[:-1].split(b"\t")
-            require(len(parts) == 3 and parts[0] == b"event" and
-                    UUID7.fullmatch(parts[1].decode("ascii", "replace")) and
-                    parts[1] not in seen_events,
-                    f"invalid duplicate or named journal event: {path}")
-            seen_events.add(parts[1])
-            require(len(parts[2]) % 2 == 0 and
-                    all(ch in hex_digits for ch in parts[2]),
-                    f"invalid event hex: {path}")
-            encoded = bytes.fromhex(parts[2].decode("ascii"))
-            require(len(encoded) >= 9 + 16 + 32 and encoded[:5] == b"AOWE\x01" and
-                    int.from_bytes(encoded[5:9], "big") == len(encoded) - 9 - 32 and
-                    hashlib.sha256(encoded[9:-32]).digest() == encoded[-32:] and
-                    bytes.fromhex(parts[1].replace(b"-", b"").decode("ascii")) == encoded[9:25],
-                    f"invalid journal frame/digest/id: {path}")
-        require(tail[-1].startswith(b"last-save\t"), f"missing last-save hash: {path}")
-        last = tail[-1][10:-1]
-        require((event_count == 0 and last == b"-") or
-                (event_count > 0 and generation > 0 and len(last) == 64 and
-                 all(ch in hex_digits for ch in last)),
-                f"invalid last-save hash: {path}")
-        records[path.name] = body
+                f"invalid draft lease state: {meta_path}")
+        candidate, changes, candidate_size, candidate_hash = reference(values[10], "candidate-", meta_path)
+        journal, events, journal_size, journal_hash = reference(values[11], "journal-", meta_path)
+        require(changes <= 20000 and events <= 4096 and (values[5] == "1") == (changes != 0),
+                f"invalid draft change/event counts: {meta_path}")
+        last = values[12]
+        require((events == 0 and last == "-") or (events > 0 and generation > 0 and digest(last)),
+                f"invalid last-save hash: {meta_path}")
+
+        candidate_bytes = b""
+        if candidate != "-":
+            candidate_bytes = prefix_of(entry / candidate, candidate_size)
+            require(hashlib.sha256(candidate_bytes).hexdigest() == candidate_hash and
+                    candidate_bytes[:5] == b"AOWC\x01", f"invalid draft candidate file: {entry / candidate}")
+            offset, previous = 5, None
+            for _ in range(changes):
+                require(len(candidate_bytes) - offset >= 20, f"truncated draft candidate: {entry / candidate}")
+                key = candidate_bytes[offset:offset + 16]
+                size = int.from_bytes(candidate_bytes[offset + 16:offset + 20], "big")
+                require(previous is None or previous < key, f"unsorted draft candidate: {entry / candidate}")
+                previous, offset = key, offset + 20
+                if size != 0xffffffff:
+                    require(len(candidate_bytes) - offset >= size,
+                            f"truncated draft candidate: {entry / candidate}")
+                    valid_model_record(candidate_bytes[offset:offset + size], entry / candidate)
+                    offset += size
+            require(offset == len(candidate_bytes), f"trailing draft candidate bytes: {entry / candidate}")
+
+        journal_bytes = b""
+        if journal != "-":
+            journal_bytes = prefix_of(entry / journal, journal_size)
+            offset, chain, seen = 0, bytes(32), set()
+            while offset < len(journal_bytes):
+                require(len(journal_bytes) - offset >= 20, f"truncated draft journal: {entry / journal}")
+                event_id = journal_bytes[offset:offset + 16]
+                size = int.from_bytes(journal_bytes[offset + 16:offset + 20], "big")
+                frame = journal_bytes[offset + 20:offset + 20 + size]
+                require(len(frame) == size and len(frame) >= 9 + 16 + 32 and frame[:5] == b"AOWE\x01" and
+                        int.from_bytes(frame[5:9], "big") == len(frame) - 9 - 32 and
+                        hashlib.sha256(frame[9:-32]).digest() == frame[-32:] and
+                        frame[9:25] == event_id and event_id not in seen,
+                        f"invalid journal frame/digest/id: {entry / journal}")
+                seen.add(event_id)
+                chain = hashlib.sha256(chain + frame).digest()
+                offset += 20 + size
+            require(len(seen) == events and chain.hex() == journal_hash,
+                    f"draft journal count or digest mismatch: {entry / journal}")
+        records[entry.name] = (meta, candidate_bytes, journal_bytes)
     return records
 
 

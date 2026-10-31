@@ -77,8 +77,12 @@ struct WorkingCopyInfo {
     std::string sessionId;
     std::uint64_t generation = 0;
     bool dirty = false;
-    std::vector<ModelChange> candidateChanges;
+    std::vector<ModelChange> candidateChanges; // Not filled by listings.
+    // Saved MODEL events. Filled only where documented: workingCopy() with
+    // includeJournal, and the events of the Save that saveWorkingCopyTransactions
+    // just persisted (or replayed). journalCount is always the full count.
     std::vector<WorkingCopyEvent> journal;
+    std::uint64_t journalCount = 0;
     std::optional<std::string> lastSaveFingerprint; // Last journalled batch for idempotency.
     std::optional<std::string> leaseSessionId;
     std::optional<std::string> leaseToken;
@@ -249,12 +253,16 @@ public:
         std::string_view projectId, std::string_view branchId,
         std::optional<RevisionId> baseRevision, std::string_view sessionId,
         std::optional<std::string_view> draftId = std::nullopt);
-    WorkingCopyInfo workingCopy(std::string_view draftId) const;
-    // Every draft of the root (offline tools and tests).
+    // The draft with its candidate overlay and, with includeJournal, its
+    // verified event journal (otherwise only journalCount).
+    WorkingCopyInfo workingCopy(std::string_view draftId, bool includeJournal = true) const;
+    // Every draft of the root (offline tools and tests). Like the bounded
+    // listing, reads only each draft's small meta record: no candidate
+    // changes, no journal.
     std::vector<WorkingCopyInfo> listWorkingCopies() const;
     // Bounded listing: at most `limit` (1..1000) drafts after the draft UUID
-    // `after`, optionally only those of one project. Reads only the records
-    // it returns plus, with a project filter, the records it skips.
+    // `after`, optionally only those of one project. Reads only the meta
+    // records it returns plus, with a project filter, those it skips.
     WorkingCopyPage listWorkingCopies(std::optional<std::string_view> projectId,
                                       std::size_t limit,
                                       std::optional<std::string_view> after) const;
@@ -272,15 +280,17 @@ public:
     WorkingCopyLease acquireWorkingCopyLease(
         std::string_view draftId, std::string_view sessionId, std::uint32_t seconds);
     // All changes are applied atomically to the draft's candidate overlay.
-    // The full resulting record is fsynced before this returns; Save never
-    // touches committed HEADs or immutable revisions.
+    // The new overlay is fsynced before this returns; Save never touches
+    // committed HEADs or immutable revisions.
     WorkingCopyInfo saveWorkingCopyChanges(
         std::string_view draftId, std::string_view sessionId,
         std::string_view fencingToken, std::uint64_t expectedGeneration,
         const std::vector<ModelChange>& changes);
     // Atomically persist MODEL transaction frames and the corresponding candidate
     // model changes. Original event UUIDs are retained across retries. A replay
-    // of the immediately preceding identical batch is idempotent.
+    // of the immediately preceding identical batch is idempotent. The result's
+    // journal holds the events of this (or the replayed) Save only; the new
+    // events are appended to the stored journal, which is never rewritten.
     WorkingCopyInfo saveWorkingCopyTransactions(
         std::string_view draftId, std::string_view sessionId,
         std::string_view fencingToken, std::uint64_t expectedGeneration,

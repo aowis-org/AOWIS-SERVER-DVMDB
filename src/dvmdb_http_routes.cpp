@@ -324,7 +324,7 @@ QJsonObject workingCopyJson(const WorkingCopyInfo& draft, bool includeChanges = 
         {"leaseExpiresAtMs", QString::number(static_cast<qulonglong>(draft.leaseExpiresAtMs))}
     };
     result.insert(QStringLiteral("eventCount"),
-                  QString::number(static_cast<qulonglong>(draft.journal.size())));
+                  QString::number(static_cast<qulonglong>(draft.journalCount)));
     if (includeChanges) {
         result.insert(QStringLiteral("changes"), changes);
         QJsonArray events;
@@ -1285,7 +1285,8 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
     server.Get("/dvmdb/v1/working-copies/:draft/networks/:network",
                [&service](const httplib::Request& request, httplib::Response& response) {
         guarded(response, [&]() {
-            const WorkingCopyInfo draft = service.workingCopy(pathParam(request, "draft"));
+            // The candidate only: the event journal is not needed to hydrate.
+            const WorkingCopyInfo draft = service.workingCopy(pathParam(request, "draft"), false);
             const std::string networkText = pathParam(request, "network");
             requireInput(UuidV7::parse(networkText).has_value(), "networkId must be UUIDv7");
             const QUuid network(QString::fromStdString(networkText));
@@ -1376,7 +1377,7 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             const ModelChange initial = hydraulic::emptyDraftHydraulicNetworkRoot(
                 QUuid(QString::fromStdString(networkId)), name);
             const std::string draftId = pathParam(request, "draft");
-            const WorkingCopyInfo draft = service.workingCopy(draftId);
+            const WorkingCopyInfo draft = service.workingCopy(draftId, false);
             requireInput(!draft.baseRevision.has_value(),
                          "first-network initialization requires an unborn working copy");
             // A successful response may be lost. Only the same still-leased
@@ -1387,7 +1388,7 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 draft.generation == expected + 1 &&
                 draft.leaseSessionId == std::optional<std::string>(session) &&
                 draft.leaseToken == std::optional<std::string>(token) &&
-                draft.journal.empty() && draft.candidateChanges.size() == 1 &&
+                draft.journalCount == 0 && draft.candidateChanges.size() == 1 &&
                 draft.candidateChanges.front().key == initial.key &&
                 draft.candidateChanges.front().record.has_value() &&
                 initial.record.has_value() &&
@@ -1397,7 +1398,7 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 return Reply{200, workingCopyJson(draft)};
             }
             if (draft.generation != expected || !draft.candidateChanges.empty() ||
-                !draft.journal.empty())
+                draft.journalCount != 0)
                 throw ProjectError(ProjectErrorKind::Conflict,
                                    "first network requires an untouched working copy");
             const WorkingCopyInfo saved = service.saveWorkingCopyChanges(
@@ -1464,7 +1465,7 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
             // One read of the draft serves both image checks. A concurrent
             // Save changes the generation, which the Save below rejects.
-            const WorkingCopyInfo current = service.workingCopy(pathParam(request, "draft"));
+            const WorkingCopyInfo current = service.workingCopy(pathParam(request, "draft"), false);
             if (current.generation == strictUint64(body, "expectedGeneration"))
                 verifyEditImages(service, current, transactions, changes);
 #endif
@@ -1600,15 +1601,15 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 requiredString(body, "fencingToken"), strictUint64(body, "expectedGeneration"),
                 materialized, events, logicalRequestFingerprint);
             // Small ACK for weak connections. Full candidate/journal is fetched
-            // explicitly only for recovery or undo history inspection.
+            // explicitly only for recovery or undo history inspection. The
+            // result's journal holds exactly this (or the replayed) Save's events.
             QJsonArray confirmedIds;
-            const std::size_t beginning = saved.journal.size() - events.size();
-            for (std::size_t i = beginning; i < saved.journal.size(); ++i)
-                confirmedIds.append(QString::fromStdString(saved.journal[i].id));
+            for (const WorkingCopyEvent& event : saved.journal)
+                confirmedIds.append(QString::fromStdString(event.id));
             return Reply{200, QJsonObject{
                 {"id", QString::fromStdString(saved.id)},
                 {"generation", QString::number(static_cast<qulonglong>(saved.generation))},
-                {"eventCount", QString::number(static_cast<qulonglong>(saved.journal.size()))},
+                {"eventCount", QString::number(static_cast<qulonglong>(saved.journalCount))},
                 {"acceptedEventIds", confirmedIds}
             }};
         });
