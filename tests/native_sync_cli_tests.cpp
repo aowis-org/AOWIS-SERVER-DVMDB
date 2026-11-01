@@ -1,3 +1,4 @@
+#include "commit_metadata_fixture.h"
 #include "aowis/dvmdb/native_store.h"
 
 #include <cerrno>
@@ -11,6 +12,8 @@
 
 #include <sys/wait.h>
 #include <unistd.h>
+
+using aowis::dvmdb::test::commitMetadata;
 
 namespace {
 
@@ -75,7 +78,7 @@ void exerciseRevision(const std::filesystem::path& cli) {
     std::optional<aowis::dvmdb::BranchId> identity;
     {
         Repository repository(source);
-        (void)repository.createBranch(project, "main");
+        (void)repository.createRootBranch(project, "main", commitMetadata());
         base = repository.head(project, "main");
         identity = repository.branchId("main");
     }
@@ -104,7 +107,7 @@ void exerciseRevision(const std::filesystem::path& cli) {
     }
     {
         Repository repository(source);
-        tip = repository.commit(project, "main", {{key, Bytes{7, 8, 9}}}, base);
+        tip = repository.commit(project, "main", {{key, Bytes{7, 8, 9}}}, commitMetadata(), base);
     }
     expect(run(cli, {"export-incremental", source.string(), project.toString(), "main",
                      base.toString(), delta.string()}) == 0,

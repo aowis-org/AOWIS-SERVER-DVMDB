@@ -130,18 +130,21 @@ local Commit records are unaffected. Repeating it after success answers `404`.
 ## Local Commit
 
 `ProjectService::commitWorkingCopy(operationId, draftId, sessionId,
-fencingToken, expectedGeneration, expectedLocalHead)` turns a saved, dirty
+fencingToken, expectedGeneration, expectedLocalHead, metadata)` turns a saved, dirty
 candidate into one new revision on the draft's branch in the same private
 repository. It is a **native API**; the HTTP route and the GUI action are not
 built yet (see the [roadmap](roadmap.md)).
 
 1. The caller chooses the operation UUIDv7. The request (draft, writer,
-   generation, expected HEAD — explicit null for the first commit) is
-   fingerprinted; reusing the ID with a different request is a conflict.
+   generation, expected HEAD — explicit null for the first commit — and the
+   author and message) is fingerprinted; reusing the ID with a different
+   request is a conflict.
 2. The draft must be dirty, its base must equal `expectedLocalHead`, and the
    writer must hold the live lease and token at that generation.
-3. A `pending` ledger record with the frozen candidate and a reserved revision
-   UUIDv7 is fsynced **before** any revision object is written.
+3. A `pending` ledger record with the frozen candidate, a reserved revision
+   UUIDv7 and commit time, and the author and message is fsynced **before**
+   any revision object is written. A retry therefore publishes a byte-identical
+   revision record, whenever it runs.
 4. The revision is published with an exact compare-and-swap on the branch
    HEAD (null is a real expectation, not "any"), and the outcome
    (`succeeded`, or `rejected` with `conflict`, `invalid-input` or

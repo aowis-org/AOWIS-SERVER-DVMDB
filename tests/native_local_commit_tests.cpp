@@ -1,3 +1,4 @@
+#include "commit_metadata_fixture.h"
 #include "aowis/dvmdb/project_service.h"
 #include "aowis/dvmdb/object_id.h"
 #include "aowis/dvmdb/storage_error.h"
@@ -24,6 +25,8 @@
 #include <sys/file.h>
 #include <sys/resource.h>
 #include <unistd.h>
+
+using aowis::dvmdb::test::commitMetadata;
 
 namespace {
 using aowis::dvmdb::Key;
@@ -117,7 +120,7 @@ void testLocalCommitRecovery() {
         require(service.revisionGraph(projectId).revisions.empty(),
                 "draft autosaves unexpectedly committed a revision");
         const LocalCommitInfo committed = service.commitWorkingCopy(
-            operationId, firstDraft, session, firstToken, 1, std::nullopt);
+            operationId, firstDraft, session, firstToken, 1, std::nullopt, commitMetadata());
         require(committed.state == LocalCommitState::Succeeded &&
                 committed.expectedHead == std::nullopt &&
                 committed.repositoryId == service.repositoryId() &&
@@ -135,17 +138,17 @@ void testLocalCommitRecovery() {
         const aowis::dvmdb::RevisionGraphRevision revision = service.revision(projectId, *saved);
         require(revision.parents.empty(), "first Commit must have zero parents");
         const LocalCommitInfo replay = service.commitWorkingCopy(
-            operationId, firstDraft, session, firstToken, 1, std::nullopt);
+            operationId, firstDraft, session, firstToken, 1, std::nullopt, commitMetadata());
         require(replay.state == LocalCommitState::Succeeded &&
                 replay.reservedRevisionId == firstRevision &&
                 service.revisionGraph(projectId).revisions.size() == 1,
                 "operation replay duplicated the first Commit");
         expectConflict([&]() {
             (void)service.commitWorkingCopy(operationId, staleDraft, secondSession,
-                                               staleToken, 1, std::nullopt);
+                                               staleToken, 1, std::nullopt, commitMetadata());
         });
         const LocalCommitInfo stale = service.commitWorkingCopy(
-            staleOperationId, staleDraft, secondSession, staleToken, 1, std::nullopt);
+            staleOperationId, staleDraft, secondSession, staleToken, 1, std::nullopt, commitMetadata());
         require(stale.state == LocalCommitState::Rejected &&
                 stale.rejection == "conflict" &&
                 service.localCommitStatus(staleOperationId).state == LocalCommitState::Rejected,
@@ -177,7 +180,7 @@ void testLocalCommitRecovery() {
                 recovered.reservedRevisionId == firstRevision,
                 "restart failed to recover committed operation from branch ancestry");
         const LocalCommitInfo retry = reopened.commitWorkingCopy(
-            operationId, firstDraft, session, firstToken, 1, std::nullopt);
+            operationId, firstDraft, session, firstToken, 1, std::nullopt, commitMetadata());
         require(retry.state == LocalCommitState::Succeeded &&
                 reopened.revisionGraph(projectId).revisions.size() == 1,
                 "recovery retry created a duplicate revision");
@@ -190,7 +193,7 @@ void testLocalCommitRecovery() {
         reopened.saveWorkingCopyChanges(draftId, session, lease.token, 0, {changed});
         const std::string secondOperationId = UuidV7::generate().toString();
         const LocalCommitInfo result = reopened.commitWorkingCopy(
-            secondOperationId, draftId, session, lease.token, 1, parent);
+            secondOperationId, draftId, session, lease.token, 1, parent, commitMetadata());
         require(result.state == LocalCommitState::Succeeded &&
                 result.reservedRevisionId != firstRevision,
                 "subsequent Commit did not allocate a new revision UUID");
@@ -234,12 +237,12 @@ void testConcurrentFirstCommitIsSerialized() {
     std::exception_ptr secondError;
     std::thread left([&]() {
         try { first = service.commitWorkingCopy(firstOperation, firstDraft,
-                                                   firstSession, firstToken, 1, std::nullopt); }
+                                                   firstSession, firstToken, 1, std::nullopt, commitMetadata()); }
         catch (...) { firstError = std::current_exception(); }
     });
     std::thread right([&]() {
         try { second = service.commitWorkingCopy(secondOperation, secondDraft,
-                                                    secondSession, secondToken, 1, std::nullopt); }
+                                                    secondSession, secondToken, 1, std::nullopt, commitMetadata()); }
         catch (...) { secondError = std::current_exception(); }
     });
     left.join();
@@ -281,13 +284,13 @@ void testRejectedOperationIsDurable() {
         invalid.record->references.push_back(absent);
         service.saveWorkingCopyChanges(draftId, session, token, 0, {invalid});
         const LocalCommitInfo rejected = service.commitWorkingCopy(
-            operationId, draftId, session, token, 1, std::nullopt);
+            operationId, draftId, session, token, 1, std::nullopt, commitMetadata());
         require(rejected.state == LocalCommitState::Rejected &&
                 rejected.rejection == "invalid-input" &&
                 !service.optionalHead(projectId, "main"),
                 "invalid model commit was not rejected without changing HEAD");
         const LocalCommitInfo retry = service.commitWorkingCopy(
-            operationId, draftId, session, token, 1, std::nullopt);
+            operationId, draftId, session, token, 1, std::nullopt, commitMetadata());
         require(retry.state == LocalCommitState::Rejected &&
                 retry.reservedRevisionId == rejected.reservedRevisionId,
                 "rejected operation was retried instead of returning outcome");
@@ -322,10 +325,10 @@ void testLeaseTakeoverCanCommit() {
             "lease successor could not save");
     expectConflict([&]() {
         (void)service.commitWorkingCopy(UuidV7::generate().toString(), draftId, creator,
-                                        staleToken, 1, std::nullopt);
+                                        staleToken, 1, std::nullopt, commitMetadata());
     });
     const LocalCommitInfo committed = service.commitWorkingCopy(
-        UuidV7::generate().toString(), draftId, successor, token, 1, std::nullopt);
+        UuidV7::generate().toString(), draftId, successor, token, 1, std::nullopt, commitMetadata());
     require(committed.state == LocalCommitState::Succeeded &&
             service.optionalHead(projectId, "main") ==
                 RevisionId::parse(committed.reservedRevisionId),
@@ -340,7 +343,7 @@ LocalCommitInfo commitFreshDraft(ProjectService& service, const std::string& pro
     const std::string draftId = service.createWorkingCopy(projectId, "main", head, session).id;
     const std::string token = service.acquireWorkingCopyLease(draftId, session, 120).token;
     service.saveWorkingCopyChanges(draftId, session, token, 0, {change});
-    return service.commitWorkingCopy(operationId, draftId, session, token, 1, head);
+    return service.commitWorkingCopy(operationId, draftId, session, token, 1, head, commitMetadata());
 }
 
 // R5: a Commit that failed with an I/O error before HEAD publication stays
@@ -382,7 +385,7 @@ void testFailedCommitIsRejectedOnceHeadMoves() {
         require(::setrlimit(RLIMIT_FSIZE, &limited) == 0, "setrlimit failed");
         bool failed = false;
         try {
-            (void)service.commitWorkingCopy(operationId, draftId, session, token, 1, base);
+            (void)service.commitWorkingCopy(operationId, draftId, session, token, 1, base, commitMetadata());
         } catch (const std::exception&) {
             failed = true;
         }
@@ -402,7 +405,7 @@ void testFailedCommitIsRejectedOnceHeadMoves() {
         require(status.state == LocalCommitState::Rejected && status.rejection == "conflict",
                 "status of an undecidable-no-longer Commit did not converge to Rejected");
         const LocalCommitInfo retry = service.commitWorkingCopy(
-            operationId, draftId, session, token, 1, base);
+            operationId, draftId, session, token, 1, base, commitMetadata());
         require(retry.state == LocalCommitState::Rejected &&
                 retry.reservedRevisionId == status.reservedRevisionId,
                 "retry of a decided Commit did not return its rejected outcome");
@@ -466,7 +469,7 @@ void testCommitDoesNotHoldCatalogue() {
 
     RepositoryLockHold hold(root.path / "projects" / a / "repository");
     std::future<void> commit = std::async(std::launch::async, [&]() {
-        require(service.commitWorkingCopy(operationId, committing, session, token, 1, head).state ==
+        require(service.commitWorkingCopy(operationId, committing, session, token, 1, head, commitMetadata()).state ==
                     LocalCommitState::Succeeded, "blocked Commit did not succeed after release");
     });
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -529,7 +532,7 @@ void testCommitRebasesDraft() {
     service.saveWorkingCopyTransactions(draftId, session, token, 0, {first},
         {aowis::dvmdb::test::editEvent(UuidV7::generate(), entity)});
     const LocalCommitInfo one = service.commitWorkingCopy(
-        UuidV7::generate().toString(), draftId, session, token, 1, std::nullopt);
+        UuidV7::generate().toString(), draftId, session, token, 1, std::nullopt, commitMetadata());
     require(one.state == LocalCommitState::Succeeded, "first Commit failed");
     const RevisionId firstRevision = *RevisionId::parse(one.reservedRevisionId);
     const WorkingCopyInfo rebased = service.workingCopy(draftId);
@@ -538,7 +541,7 @@ void testCommitRebasesDraft() {
             rebased.leaseToken == token,
             "successful Commit did not rebase its draft onto the new HEAD");
     // Replaying the same Commit request must not rebase a second time.
-    require(service.commitWorkingCopy(one.id, draftId, session, token, 1, std::nullopt).state ==
+    require(service.commitWorkingCopy(one.id, draftId, session, token, 1, std::nullopt, commitMetadata()).state ==
                 LocalCommitState::Succeeded &&
             service.workingCopy(draftId).generation == 2,
             "replayed Commit changed the rebased draft");
@@ -546,7 +549,7 @@ void testCommitRebasesDraft() {
     require(service.saveWorkingCopyChanges(draftId, session, token, 2, {second}).generation == 3,
             "save after Commit failed on the rebased draft");
     const LocalCommitInfo two = service.commitWorkingCopy(
-        UuidV7::generate().toString(), draftId, session, token, 3, firstRevision);
+        UuidV7::generate().toString(), draftId, session, token, 3, firstRevision, commitMetadata());
     require(two.state == LocalCommitState::Succeeded, "second Commit from the same draft failed");
     const aowis::dvmdb::RevisionGraphRevision child =
         service.revision(projectId, *RevisionId::parse(two.reservedRevisionId));
@@ -587,7 +590,7 @@ void testFullJournalIsALimitAndCommitClearsIt() {
     require(limited && service.workingCopy(draftId).generation == generation,
             "a full journal was not reported as LimitExceeded without changing the draft");
     const LocalCommitInfo committed = service.commitWorkingCopy(
-        UuidV7::generate().toString(), draftId, session, token, generation, std::nullopt);
+        UuidV7::generate().toString(), draftId, session, token, generation, std::nullopt, commitMetadata());
     require(committed.state == LocalCommitState::Succeeded, "Commit of a full-journal draft failed");
     require(service.saveWorkingCopyTransactions(draftId, session, token, generation + 1,
                                                 {changeWithValue(3)}, batch(1)).journal.size() == 1,
@@ -612,7 +615,7 @@ void testDiscardWorkingCopy() {
         const std::string token = service.acquireWorkingCopyLease(draftId, session, 120).token;
         service.saveWorkingCopyChanges(draftId, session, token, 0, {changeWithValue(7)});
         require(service.commitWorkingCopy(operationId, draftId, session, token, 1,
-                                          std::nullopt).state == LocalCommitState::Succeeded,
+                                          std::nullopt, commitMetadata()).state == LocalCommitState::Succeeded,
                 "fixture Commit failed");
         expectConflict([&]() {
             service.discardWorkingCopy(draftId, session, token, 1); // stale generation
@@ -681,6 +684,104 @@ void testDraftListPaging() {
 }
 }
 
+// A local Commit records the request's author and message. The commit time is
+// reserved with the operation: a retry after a failed publication writes a
+// byte-identical revision, and the same operation ID with another author or
+// message is a different request.
+void testCommitRecordsAuthorMessageAndReservedTime() {
+    TempRoot root;
+    std::atomic<std::uint64_t> wall{1'800'000'000'000ULL};
+    const aowis::dvmdb::LeaseClock clock{[&wall]() { return wall.load(); }, {}};
+    const std::string session = UuidV7::generate().toString();
+    const std::string operationId = UuidV7::generate().toString();
+    const aowis::dvmdb::CommitMetadata metadata{
+        *UuidV7::parse("018f84c0-0000-7000-8000-00000000c001"), "Carla",
+        "Close valve V12\n\nfor maintenance"};
+    ProjectService service(root.path, 4, clock);
+    const std::string projectId = service.createUnbornProject("authored commits").id;
+    service.configureRepositoryRole(RepositoryRole::Private);
+    ModelChange large = changeWithValue(1);
+    large.key[15] = 1;
+    large.record->payload.assign(256 * 1024, 0x5a);
+    require(commitFreshDraft(service, projectId, UuidV7::generate().toString(), large).state ==
+                LocalCommitState::Succeeded, "base Commit failed");
+    const std::optional<RevisionId> base = service.optionalHead(projectId, "main");
+    const std::string draftId = service.createWorkingCopy(projectId, "main", base, session).id;
+    const std::string token = service.acquireWorkingCopyLease(draftId, session, 120).token;
+    ModelChange small = changeWithValue(2);
+    small.record->payload.assign(64 * 1024, 0x33);
+    service.saveWorkingCopyChanges(draftId, session, token, 0, {small});
+
+    // Invalid metadata is refused before a ledger record exists.
+    aowis::dvmdb::CommitMetadata invalid = metadata;
+    invalid.message.clear();
+    bool refused = false;
+    try { (void)service.commitWorkingCopy(operationId, draftId, session, token, 1, base, invalid); }
+    catch (const ProjectError& error) { refused = error.kind() == ProjectErrorKind::InvalidInput; }
+    require(refused && !std::filesystem::exists(root.path / "local-commits" / operationId),
+            "a Commit without a message was not refused before it was recorded");
+
+    // The first attempt fails while appending to the pack and stays pending.
+    const std::uint64_t reservedAt = wall.load();
+    const std::filesystem::path pack =
+        root.path / "projects" / projectId / "repository" / "objects.pack";
+    struct rlimit previous{};
+    require(::getrlimit(RLIMIT_FSIZE, &previous) == 0, "getrlimit failed");
+    void (*const oldHandler)(int) = std::signal(SIGXFSZ, SIG_IGN);
+    struct rlimit limited = previous;
+    limited.rlim_cur = static_cast<rlim_t>(std::filesystem::file_size(pack) + 1024);
+    require(::setrlimit(RLIMIT_FSIZE, &limited) == 0, "setrlimit failed");
+    bool failed = false;
+    try { (void)service.commitWorkingCopy(operationId, draftId, session, token, 1, base, metadata); }
+    catch (const std::exception&) { failed = true; }
+    require(::setrlimit(RLIMIT_FSIZE, &previous) == 0, "restoring RLIMIT_FSIZE failed");
+    std::signal(SIGXFSZ, oldHandler);
+    require(failed && service.localCommitStatus(operationId).state == LocalCommitState::Pending,
+            "file-size limit did not leave the Commit pending");
+    {
+        std::ifstream input(root.path / "local-commits" / operationId, std::ios::binary);
+        const std::string body((std::istreambuf_iterator<char>(input)), {});
+        require(body.starts_with("AOWIS-LOCAL-COMMIT-2\n") &&
+                body.find("committed-at\t" + std::to_string(reservedAt) + "\n") != std::string::npos &&
+                body.find("author-id\t" + metadata.authorId.toString() + "\n") != std::string::npos,
+                "the pending ledger record lacks the reserved time or the author");
+    }
+
+    // Another author or message under the same operation ID is another request.
+    aowis::dvmdb::CommitMetadata other = metadata;
+    other.message = "Something else";
+    expectConflict([&] {
+        (void)service.commitWorkingCopy(operationId, draftId, session, token, 1, base, other);
+    });
+    other = metadata;
+    other.authorName = "Mallory";
+    expectConflict([&] {
+        (void)service.commitWorkingCopy(operationId, draftId, session, token, 1, base, other);
+    });
+
+    // The retry, later, publishes the revision with the reserved time.
+    wall += 60'000;
+    const LocalCommitInfo committed =
+        service.commitWorkingCopy(operationId, draftId, session, token, 1, base, metadata);
+    require(committed.state == LocalCommitState::Succeeded, "retry of the pending Commit failed");
+    const aowis::dvmdb::RevisionGraphRevision revision =
+        service.revision(projectId, *RevisionId::parse(committed.reservedRevisionId));
+    require(revision.metadata.authorId == metadata.authorId &&
+            revision.metadata.authorName == metadata.authorName &&
+            revision.metadata.message == metadata.message &&
+            revision.committedAtMs == reservedAt,
+            "the committed revision lost its author or message, or took the retry's time");
+    const std::vector<aowis::dvmdb::RevisionGraphRevision> history =
+        service.history(projectId, "main", 10);
+    require(!history.empty() && history.front().metadata.message == metadata.message,
+            "history does not show the commit message");
+    const LocalCommitInfo replay =
+        service.commitWorkingCopy(operationId, draftId, session, token, 1, base, metadata);
+    require(replay.state == LocalCommitState::Succeeded &&
+            replay.reservedRevisionId == committed.reservedRevisionId,
+            "replay did not return the recorded outcome");
+}
+
 int main() {
     try {
         testLocalCommitRecovery();
@@ -693,6 +794,7 @@ int main() {
         testFullJournalIsALimitAndCommitClearsIt();
         testDiscardWorkingCopy();
         testDraftListPaging();
+        testCommitRecordsAuthorMessageAndReservedTime();
         std::cout << "VC-05 durable local Commit tests passed\n";
     } catch (const std::exception& error) {
         std::cerr << "VC-05 durable local Commit tests failed: " << error.what() << '\n';

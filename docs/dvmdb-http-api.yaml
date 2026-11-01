@@ -369,8 +369,10 @@ paths:
       description: |
         With unborn:true (what clients should always send) creates main with a
         durable UUIDv7 branch identity, explicit null HEAD and zero revisions.
-        Without it, main still gets an empty first revision; that deviation
-        from the version-control contract will be removed.
+        Without it, main still gets an empty first revision, which needs
+        `author` (the message defaults to "Create project <name>"); that
+        deviation from the version-control contract will be removed. With
+        unborn:true there is no revision, so author and message are rejected.
         A caller-chosen `id` (requires unborn:true) makes creation idempotent:
         repeating the request returns the same project with 201; the same id
         with another name is 409.
@@ -386,6 +388,8 @@ paths:
                 id: {type: string, format: uuid, description: Caller-chosen project UUIDv7 (retry-safe creation)}
                 name: {type: string, minLength: 1, maxLength: 200}
                 unborn: {type: boolean, default: false}
+                author: {$ref: '#/components/schemas/CommitAuthor'}
+                message: {$ref: '#/components/schemas/CommitMessage'}
       responses:
         '201':
           description: Project and initial main branch published (optionally unborn), or the existing project for a repeated id
@@ -641,7 +645,15 @@ paths:
       operationId: getBranchHistory
       description: First-parent history, newest-first, using an exclusive UUIDv7 revision cursor. Unborn branches return an empty array.
       responses:
-        '200': {description: Revision objects with UUIDv7 IDs, ordered parent UUIDs, integrity hashes}
+        '200':
+          description: '{revisions: [Revision]}, newest first'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [revisions]
+                properties:
+                  revisions: {type: array, items: {$ref: '#/components/schemas/Revision'}}
         '400': {$ref: '#/components/responses/BadRequest'}
   /projects/{projectId}/revisions/{revision}:
     parameters:
@@ -651,7 +663,11 @@ paths:
       operationId: getRevision
       description: Immutable revision UUIDv7 lookup authenticated against its canonical record SHA-256 and parent ancestry.
       responses:
-        '200': {description: UUIDv7 revision, recordHash and ordered parent UUID/hash pairs}
+        '200':
+          description: The immutable revision with its author, message and commit time
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Revision'}
         '404': {$ref: '#/components/responses/NotFound'}
   /projects/{projectId}/revision-graph:
     parameters:
@@ -667,7 +683,8 @@ paths:
         include `originBranchId` and `forkRevisionId` (UUIDv7 or null),
         immutable creation provenance distinct from revision ancestry. Revisions contain id,
         recordHash, snapshot roots, modelIndexed, parents (revision UUID array),
-        and parentRecordHashes (corresponding SHA-256 array).
+        parentRecordHashes (corresponding SHA-256 array), author, message and
+        committedAtMs.
         Unborn HEADs have explicit null revision and recordHash, and do not
         contribute revision ancestry. HEAD snapshots are pinned into authenticated cursors across refreshes.
         Cursors are invalid after server restart or when used for another project.
@@ -675,7 +692,11 @@ paths:
         250000 traversed revisions. The complete boolean and nextCursor are
         always explicit.
       responses:
-        '200': {description: Pinned, paginated UUIDv7 revision DAG with heads, revisions, complete and nextCursor}
+        '200':
+          description: Pinned, paginated UUIDv7 revision DAG with heads, revisions, complete and nextCursor
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/RevisionGraphPage'}
         '400': {$ref: '#/components/responses/BadRequest'}
         '413': {description: Graph traversal or response budget exceeded}
   /projects/{projectId}/branches/{branch}/model-commits:
@@ -699,8 +720,10 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              required: [expectedHead, changes]
+              required: [expectedHead, changes, author, message]
               properties:
+                author: {$ref: '#/components/schemas/CommitAuthor'}
+                message: {$ref: '#/components/schemas/CommitMessage'}
                 expectedHead: {type: string, format: uuid, description: Revision UUIDv7}
                 changes:
                   type: array
@@ -739,8 +762,12 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              required: [target, source, expectedTargetHead, expectedSourceHead]
+              required: [target, source, expectedTargetHead, expectedSourceHead, author]
               properties:
+                author: {$ref: '#/components/schemas/CommitAuthor'}
+                message:
+                  allOf: [{$ref: '#/components/schemas/CommitMessage'}]
+                  description: 'Optional; default "Merge <source> into <target>"'
                 target: {type: string}
                 source: {type: string}
                 expectedTargetHead: {type: string, format: uuid}
@@ -770,8 +797,12 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              required: [target, source, expectedTargetHead, expectedSourceHead]
+              required: [target, source, expectedTargetHead, expectedSourceHead, author]
               properties:
+                author: {$ref: '#/components/schemas/CommitAuthor'}
+                message:
+                  allOf: [{$ref: '#/components/schemas/CommitMessage'}]
+                  description: 'Optional; default "Merge <source> into <target>"'
                 target: {type: string}
                 source: {type: string}
                 expectedTargetHead: {type: string, format: uuid}
@@ -836,8 +867,10 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              required: [expectedHead, payloadBase64]
+              required: [expectedHead, payloadBase64, author, message]
               properties:
+                author: {$ref: '#/components/schemas/CommitAuthor'}
+                message: {$ref: '#/components/schemas/CommitMessage'}
                 expectedHead: {type: string, format: uuid, description: UUIDv7 revision}
                 payloadBase64: {type: string, contentEncoding: base64, description: Canonical NetworkHydraulic model bytes}
       responses:
@@ -902,8 +935,10 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              required: [expectedHead, changes]
+              required: [expectedHead, changes, author, message]
               properties:
+                author: {$ref: '#/components/schemas/CommitAuthor'}
+                message: {$ref: '#/components/schemas/CommitMessage'}
                 expectedHead: {type: string, format: uuid}
                 changes:
                   type: array
@@ -923,7 +958,7 @@ components:
       type: object
       required: [revision, uuid, payloadBase64]
       properties:
-        revision: {$ref: '#/components/schemas/RevisionHash'}
+        revision: {$ref: '#/components/schemas/RevisionId'}
         uuid: {type: string, format: uuid}
         type: {type: integer, minimum: 0, maximum: 17}
         payloadBase64: {type: string, contentEncoding: base64}
@@ -932,7 +967,7 @@ components:
       required: [status, head, objectsImported]
       properties:
         status: {type: string, enum: [created, fast_forward, up_to_date]}
-        head: {$ref: '#/components/schemas/RevisionHash'}
+        head: {$ref: '#/components/schemas/RevisionId'}
         objectsImported: {type: integer, minimum: 0}
     RevisionGraphPage:
       type: object
@@ -943,10 +978,17 @@ components:
           description: Sorted branch HEAD snapshot, identical on each page
           items:
             type: object
-            required: [branch, revision]
+            required: [branch, branchId, revision, recordHash, originBranchId, forkRevisionId]
             properties:
               branch: {type: string}
-              revision: {$ref: '#/components/schemas/RevisionHash'}
+              branchId: {type: string, format: uuid}
+              revision: {type: [string, 'null'], format: uuid, description: Null for an unborn branch}
+              recordHash:
+                oneOf:
+                  - {$ref: '#/components/schemas/RevisionHash'}
+                  - {type: 'null'}
+              originBranchId: {type: [string, 'null'], format: uuid}
+              forkRevisionId: {type: [string, 'null'], format: uuid}
         revisions:
           type: array
           description: Deduplicated immutable revisions, deterministic DFS order
@@ -958,7 +1000,24 @@ components:
             - {type: string}
             - {type: 'null'}
           description: Null exactly when complete is true
-    RevisionHash: {type: string, pattern: '^[a-f0-9]{64}$'}
+    RevisionHash: {type: string, pattern: '^[a-f0-9]{64}$', description: SHA-256 (integrity, never an identity)}
+    RevisionId: {type: string, format: uuid, description: Revision UUIDv7}
+    CommitAuthor:
+      type: object
+      additionalProperties: false
+      required: [id, name]
+      description: Self-reported author of a revision; not authenticated.
+      properties:
+        id: {type: string, format: uuid, description: Author UUIDv7}
+        name: {type: string, minLength: 1, description: '1..200 bytes of UTF-8 without control characters'}
+    CommitMessage:
+      type: string
+      minLength: 1
+      description: '1..65536 bytes of UTF-8; tab and newline are the only allowed control characters'
+    CommittedAt:
+      type: string
+      pattern: '^[0-9]{1,20}$'
+      description: Time the repository published the revision, Unix epoch milliseconds (UTC), as a decimal string
     Project:
       type: object
       required: [id, name]
@@ -967,15 +1026,26 @@ components:
         name: {type: string}
     Revision:
       type: object
-      required: [id, root, referencesRoot, modelIndexed, parents]
+      required: [id, recordHash, root, referencesRoot, modelIndexed, parents, parentRecordHashes,
+                 author, message, committedAtMs]
       properties:
-        id: {$ref: '#/components/schemas/RevisionHash'}
+        id: {$ref: '#/components/schemas/RevisionId'}
+        recordHash: {$ref: '#/components/schemas/RevisionHash'}
         root: {$ref: '#/components/schemas/RevisionHash'}
         referencesRoot: {$ref: '#/components/schemas/RevisionHash'}
         modelIndexed: {type: boolean}
         parents:
           type: array
+          maxItems: 2
+          description: Ordered parent revision UUIDv7s (target first for a merge)
+          items: {$ref: '#/components/schemas/RevisionId'}
+        parentRecordHashes:
+          type: array
+          maxItems: 2
           items: {$ref: '#/components/schemas/RevisionHash'}
+        author: {$ref: '#/components/schemas/CommitAuthor'}
+        message: {$ref: '#/components/schemas/CommitMessage'}
+        committedAtMs: {$ref: '#/components/schemas/CommittedAt'}
     Error:
       type: object
       description: >-
@@ -1009,7 +1079,7 @@ components:
       in: query
       required: false
       description: Explicit immutable revision snapshot; must be the branch head or one of its ancestors (otherwise 404). Defaults to the branch head captured once
-      schema: {$ref: '#/components/schemas/RevisionHash'}
+      schema: {$ref: '#/components/schemas/RevisionId'}
     ProjectId:
       name: projectId
       in: path

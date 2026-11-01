@@ -23,6 +23,8 @@
 #include <unistd.h>
 #include <vector>
 
+using aowis::dvmdb::test::commitMetadata;
+
 namespace {
 using aowis::dvmdb::Bytes;
 using aowis::dvmdb::Change;
@@ -158,7 +160,7 @@ ProjectId projectOf(const std::string& id) { return *ProjectId::parse(id); }
 
 // Projects start unborn; give one a first committed revision.
 RevisionId seed(ProjectService& service, const std::string& id, std::uint8_t value = 1) {
-    return service.commitModel(id, "main", {ModelChange{key(value), ModelRecord{1, {}, Bytes{value}}}});
+    return service.commitModel(id, "main", {ModelChange{key(value), ModelRecord{1, {}, Bytes{value}}}}, commitMetadata());
 }
 
 void testProjectsIndependent() {
@@ -174,7 +176,7 @@ void testProjectsIndependent() {
         expect(service.project(a).name == "A", "project lookup failed");
         (void)service.createUnbornProject("C");
         service.withRepository(b, [&](Repository& repository) {
-            repository.commit(projectOf(b), "main", {Change{key(1), Bytes{1}}});
+            repository.commit(projectOf(b), "main", {Change{key(1), Bytes{1}}}, commitMetadata());
         });
         expect(service.createBranch(b, "feature", std::string_view("main")) == service.head(b, "main"),
                "branch of the other project failed");
@@ -274,7 +276,7 @@ void testExpectedHeadRace() {
                 service.withRepository(a, [&](Repository& repository) {
                     repository.commitModel(projectOf(a), "main",
                                              {ModelChange{key(static_cast<std::uint8_t>(10 + i)),
-                                                          ModelRecord{1, {}, Bytes{i}}}}, expected);
+                                                          ModelRecord{1, {}, Bytes{i}}}}, commitMetadata(), expected);
                 });
                 ++succeeded;
             } catch (const StorageError& error) {

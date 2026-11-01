@@ -29,6 +29,12 @@ QUuid uuid(std::uint32_t value) {
     return hydraulic::uuidFromKey(key);
 }
 
+// Every benchmark revision records the same author and message.
+native::CommitMetadata benchmarkMetadata() {
+    return native::CommitMetadata{*native::UuidV7::parse("018f84c0-0000-7000-8000-0000000be001"),
+                                  "DVMDB benchmark", "benchmark revision"};
+}
+
 std::uint64_t peakResidentKiB() {
     std::ifstream status("/proc/self/status");
     std::string line;
@@ -107,10 +113,10 @@ int main(int argc, char** argv) {
         network.links_valves.append(physicalValve);
         native::Repository repository(directory);
         const native::ProjectId project = native::ProjectId::generate();
-        const native::RevisionId genesis = repository.createBranch(project, "main");
+        const native::RevisionId genesis = repository.createRootBranch(project, "main", benchmarkMetadata());
         const std::chrono::steady_clock::time_point importStart = std::chrono::steady_clock::now();
         native::RevisionId mainHead = hydraulic::saveHydraulicNetwork(
-            repository, project, "main", network, genesis);
+            repository, project, "main", network, genesis, benchmarkMetadata());
         const double importMs = elapsedMs(importStart);
         // Keep the precise expected HEAD after each indexed write, rather
         // than reading a moving branch reference as part of each timed call.
@@ -120,7 +126,7 @@ int main(int argc, char** argv) {
             [&](const std::vector<hydraulic::HydraulicEntityChange>& changes,
                 hydraulic::HydraulicEditDiagnostics* diagnostics) -> native::RevisionId {
                 mainHead = hydraulic::editHydraulicNetwork(
-                    repository, project, "main", network.uuid, changes, mainHead, diagnostics);
+                    repository, project, "main", network.uuid, changes, mainHead, benchmarkMetadata(), diagnostics);
                 return mainHead;
             };
         const std::uint64_t importPackBytes = repository.packSize();
@@ -370,7 +376,7 @@ int main(int argc, char** argv) {
         editMain(
             {{targetPipe.uuid, hydraulic::HydraulicEntity{targetPipe}}}, nullptr);
         featureHead = hydraulic::editHydraulicNetwork(repository, project, "feature", network.uuid,
-            {{featurePipe.uuid, hydraulic::HydraulicEntity{featurePipe}}}, featureHead);
+            {{featurePipe.uuid, hydraulic::HydraulicEntity{featurePipe}}}, featureHead, benchmarkMetadata());
         const std::chrono::steady_clock::time_point diffStart =
             std::chrono::steady_clock::now();
         const std::vector<native::Difference> differences =
@@ -382,7 +388,7 @@ int main(int argc, char** argv) {
             std::chrono::steady_clock::now();
         const native::MergeResult merged = hydraulic::mergeHydraulicBranches(
             repository, project, "main", "feature",
-            hydraulic::HydraulicMergeSelections{mainHead, featureHead, {}, {}});
+            hydraulic::HydraulicMergeSelections{mainHead, featureHead, {}, {}}, benchmarkMetadata());
         const double mergeMs = elapsedMs(mergeStart);
         if (merged.status != native::MergeStatus::Merged || !merged.resultHead ||
             repository.head(project, "feature") != featureHead)

@@ -33,6 +33,14 @@
 namespace aowis::dvmdb {
 namespace {
 
+// The commit time a new revision records: Unix epoch milliseconds, UTC.
+std::uint64_t epochMillisecondsNow() {
+    const std::int64_t millis = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    if (millis <= 0) throw StorageError(StorageErrorKind::Unavailable, "system clock is before 1970");
+    return static_cast<std::uint64_t>(millis);
+}
+
 constexpr std::uint64_t bundleEntryBytes = 40;  // hash, big-endian size
 
 constexpr std::size_t headerSize = 45;
@@ -2829,9 +2837,10 @@ BranchCreationResult Repository::createBranchAtRevisionLocked(
 }
 
 MergeResult Repository::mergeBranches(const ProjectId& project,
-        std::string_view target, std::string_view source,
+        std::string_view target, std::string_view source, const CommitMetadata& metadata,
         std::optional<RevisionId> expectedTarget, std::optional<RevisionId> expectedSource,
         const MergeOptions& options) {
+    validateCommitMetadata(metadata);
     std::lock_guard<std::mutex> guarded(this->mutex_);
     ScopedFileLock locked(this->lockFd_);
     refreshIndex();
@@ -3315,7 +3324,7 @@ MergeResult Repository::mergeBranches(const ProjectId& project,
         newRoot = applyEncodedChangesLocked(targetHead.root, rawChanges);
     }
     const RevisionId merged = writeRevisionLocked(project, newRoot, referencesRoot,
-                      targetHead.modelIndexed, {targetHead.id, sourceHead.id});
+                      targetHead.modelIndexed, {targetHead.id, sourceHead.id}, metadata);
     const std::optional<ResolvedRevision> saved = resolver.resolve(merged, reader);
     require(Err::Internal, saved.has_value(), "merge record was not persisted");
     const std::optional<StoredBranch> stored = findStoredBranch(this->directory_, target);
@@ -3331,17 +3340,20 @@ MergeResult Repository::mergeBranches(const ProjectId& project,
 
 RevisionId Repository::writeRevision(const ProjectId& project, const Hash& root,
                                        const Hash& referencesRoot, bool modelIndexed,
+                                       const CommitMetadata& metadata,
                                        const std::vector<RevisionId>& parents) {
     std::lock_guard<std::mutex> guarded(this->mutex_);
     ScopedFileLock locked(this->lockFd_);
     refreshIndex();
-    return writeRevisionLocked(project, root, referencesRoot, modelIndexed, parents);
+    return writeRevisionLocked(project, root, referencesRoot, modelIndexed, parents, metadata);
 }
 
 RevisionId Repository::writeRevisionLocked(const ProjectId& project, const Hash& root,
                                              const Hash& referencesRoot, bool modelIndexed,
                                              const std::vector<RevisionId>& parents,
-                                             std::optional<RevisionId> reservedRevisionId) {
+                                             const CommitMetadata& metadata,
+                                             std::optional<ReservedRevision> reserved) {
+    validateCommitMetadata(metadata);
     require(Err::InvalidInput, modelIndexed || isZero(referencesRoot),
             "raw revision cannot contain a reference index");
     require(Err::InvalidInput, parents.size() <= 2, "revision has too many parents");
@@ -3354,8 +3366,9 @@ RevisionId Repository::writeRevisionLocked(const ProjectId& project, const Hash&
         if (!containsIndex(digest)) return std::nullopt;
         return load(digest);
     };
-    RevisionRecord record{(reservedRevisionId ? *reservedRevisionId : RevisionId::generate()),
-                            project, root, referencesRoot, modelIndexed, {}};
+    RevisionRecord record{(reserved ? reserved->id : RevisionId::generate()),
+                            project, root, referencesRoot, modelIndexed, {}, metadata,
+                            reserved ? reserved->committedAtMs : epochMillisecondsNow()};
     for (const RevisionId& parentId : parents) {
         const std::optional<ResolvedRevision> parent = resolver.resolve(parentId, readObject);
         require(Err::NotFound, parent.has_value(), "parent revision UUID was not found");
@@ -3464,7 +3477,8 @@ RevisionId Repository::head(const ProjectId& project, std::string_view branch) {
 static RevisionGraphRevision graphRevision(const ResolvedRevision& resolved) {
     RevisionGraphRevision result{resolved.record.id, resolved.recordHash,
         resolved.record.root, resolved.record.referencesRoot,
-        resolved.record.modelIndexed, {}};
+        resolved.record.modelIndexed, {}, resolved.record.metadata,
+        resolved.record.committedAtMs};
     for (const RevisionParent& parent : resolved.record.parents)
         result.parents.push_back({parent.id, parent.expectedRecordHash});
     return result;
@@ -3644,9 +3658,20 @@ BranchCreationResult Repository::createBranchWithIdentity(
     return createBranchLocked(project, name, from, BranchId::generate());
 }
 
+RevisionId Repository::createRootBranch(const ProjectId& project, std::string_view name,
+                                          const CommitMetadata& metadata) {
+    validateCommitMetadata(metadata);
+    std::lock_guard<std::mutex> guarded(this->mutex_);
+    ScopedFileLock locked(this->lockFd_);
+    refreshIndex();
+    return createBranchLocked(project, name, std::nullopt, BranchId::generate(), &metadata)
+        .revisionId;
+}
+
 BranchCreationResult Repository::createBranchLocked(
         const ProjectId& project, std::string_view name,
-        std::optional<std::string_view> from, const BranchId& createdId) {
+        std::optional<std::string_view> from, const BranchId& createdId,
+        const CommitMetadata* rootMetadata) {
     checkBranch(name);
     require(Err::Conflict, !findStoredBranch(this->directory_, name), "branch already exists");
     const std::vector<StoredBranch> branches = readStoredBranches(this->directory_);
@@ -3657,9 +3682,11 @@ BranchCreationResult Repository::createBranchLocked(
         id = source.id;
         checksum = hashRevisionRecord(source);
     } else {
+        require(Err::InvalidInput, rootMetadata != nullptr,
+                "a new branch needs a source branch; the first branch is created unborn");
         require(Err::InvalidInput, branches.empty(),
                 "new branch requires a source once project has a root revision");
-        id = writeRevisionLocked(project, Hash{}, Hash{}, false, {});
+        id = writeRevisionLocked(project, Hash{}, Hash{}, false, {}, *rootMetadata);
         RevisionResolver resolver(this->directory_, project);
         const RevisionObjectReader reader = [this](const Hash& digest) -> std::optional<Bytes> {
             if (!containsIndex(digest)) return std::nullopt;
@@ -3768,8 +3795,9 @@ Hash Repository::applyEncodedChangesLocked(const Hash& original,
 
 
 RevisionId Repository::commit(const ProjectId& project, std::string_view branch,
-                                const std::vector<Change>& changes,
+                                const std::vector<Change>& changes, const CommitMetadata& metadata,
                                 std::optional<RevisionId> expectedHead) {
+    validateCommitMetadata(metadata);
     std::lock_guard<std::mutex> guarded(this->mutex_);
     ScopedFileLock locked(this->lockFd_);
     refreshIndex();
@@ -3783,7 +3811,8 @@ RevisionId Repository::commit(const ProjectId& project, std::string_view branch,
     require(Err::InvalidInput, !previous || !previous->modelIndexed,
             "raw edits cannot modify a model-indexed revision");
     const Hash newRoot = applyEncodedChangesLocked(previous ? previous->root : Hash{}, changes);
-    const RevisionId newId = writeRevisionLocked(project, newRoot, Hash{}, false, previous ? std::vector<RevisionId>{previous->id} : std::vector<RevisionId>{});
+    const RevisionId newId = writeRevisionLocked(project, newRoot, Hash{}, false,
+        previous ? std::vector<RevisionId>{previous->id} : std::vector<RevisionId>{}, metadata);
     RevisionResolver resolver(this->directory_, project);
     const RevisionObjectReader reader = [this](const Hash& digest) -> std::optional<Bytes> {
         if (!containsIndex(digest)) return std::nullopt;
@@ -3807,9 +3836,13 @@ std::vector<Key> Repository::readReferrers(const Hash& root, const Key& target) 
 
 RevisionId Repository::commitModel(const ProjectId& project, std::string_view branch,
                                       std::vector<ModelChange> changes,
+                                      const CommitMetadata& metadata,
                                       std::optional<RevisionId> expectedHead,
                                       bool requireExactHead,
-                                      std::optional<RevisionId> reservedRevisionId) {
+                                      std::optional<ReservedRevision> reserved) {
+    validateCommitMetadata(metadata);
+    require(Err::InvalidInput, !reserved || reserved->committedAtMs != 0,
+            "a reserved revision needs its commit time");
     std::lock_guard<std::mutex> guarded(this->mutex_);
     ScopedFileLock locked(this->lockFd_);
     refreshIndex();
@@ -3838,7 +3871,7 @@ RevisionId Repository::commitModel(const ProjectId& project, std::string_view br
     const RevisionId revisionId = writeRevisionLocked(
         project, newRoot, prepared.referencesRoot, true,
         previous ? std::vector<RevisionId>{previous->id} : std::vector<RevisionId>{},
-        reservedRevisionId);
+        metadata, reserved);
     RevisionResolver resolver(this->directory_, project);
     const RevisionObjectReader reader = [this](const Hash& digest) -> std::optional<Bytes> {
         if (!containsIndex(digest)) return std::nullopt;
@@ -4555,7 +4588,7 @@ void Repository::exportRevisionBundleLocked(const ProjectId& project,
         require(Err::LimitExceeded, bytes.size() <= maxObjectBytes &&
                 (limits.maxObjectBytes == 0 || bytes.size() <= limits.maxObjectBytes),
                 "bundle object is larger than configured limit");
-        if (bytes.size() >= 2 && bytes[0] == 'T' && bytes[1] == 2) {
+        if (bytes.size() >= 2 && bytes[0] == 'T' && bytes[1] == 3) {
             const RevisionRecord record = decodeRevisionRecord(bytes);
             require(Err::Corruption, record.project == project,
                     "export revision belongs to another project");
@@ -4574,7 +4607,7 @@ void Repository::exportRevisionBundleLocked(const ProjectId& project,
         // full source graph. It can load from the pack without a payload map.
         const std::function<Bytes(const Hash&)> verifiedObject = [&](const Hash& hash) {
             const Bytes bytes = load(hash);
-            if (bytes.size() >= 2 && bytes[0] == 'T' && bytes[1] == 2)
+            if (bytes.size() >= 2 && bytes[0] == 'T' && bytes[1] == 3)
                 return logicalRevisionFrom(bytes, project);
             return bytes;
         };
@@ -4783,7 +4816,7 @@ RevisionBundleImport Repository::importRevisionBundle(const ProjectId& expectedP
         if (length >= 2) {
             std::array<std::uint8_t, 2> prefix{};
             readExact(fd, prefix.data(), prefix.size(), offset);
-            if (prefix[0] == 'T' && prefix[1] == 2) {
+            if (prefix[0] == 'T' && prefix[1] == 3) {
                 Bytes bytes(static_cast<std::size_t>(length));
                 readExact(fd, bytes.data(), bytes.size(), offset);
                 RevisionRecord record = decodeRevisionRecord(bytes);
@@ -4825,7 +4858,7 @@ RevisionBundleImport Repository::importRevisionBundle(const ProjectId& expectedP
         Bytes bytes = entries.find(hash) ? readBundle(hash) :
                       (incremental ? readLocal(hash) : Bytes{});
         require(Err::Corruption, !bytes.empty(), "bundle omits reachable object");
-        if (bytes.size() >= 2 && bytes[0] == 'T' && bytes[1] == 2)
+        if (bytes.size() >= 2 && bytes[0] == 'T' && bytes[1] == 3)
             return logicalRevisionFrom(bytes, *project);
         return bytes;
     };

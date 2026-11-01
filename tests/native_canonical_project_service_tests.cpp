@@ -1,3 +1,4 @@
+#include "commit_metadata_fixture.h"
 #include "aowis/dvmdb/project_service.h"
 #include "aowis/dvmdb/revision_record.h"
 
@@ -10,6 +11,8 @@
 #include <vector>
 
 #include <unistd.h>
+
+using aowis::dvmdb::test::commitMetadata;
 
 namespace {
 using aowis::dvmdb::BranchId;
@@ -96,7 +99,7 @@ void exerciseRemoteTracking() {
     {
         ProjectService second(otherSharedRoot.path);
         secondRemoteId = second.repositoryId();
-        committed = second.commitModel(projectId, "main", {change(61)});
+        committed = second.commitModel(projectId, "main", {change(61)}, commitMetadata());
     }
     {
         ProjectService local(localRoot.path);
@@ -129,7 +132,7 @@ void exerciseRemoteTracking() {
         expectError([&]() { local.recordRemoteTrackingRef(unborn, std::nullopt); },
                     ProjectErrorKind::Conflict);
         ProjectService shared(sharedRoot.path);
-        sharedTip = shared.commitModel(projectId, "main", {change(62)});
+        sharedTip = shared.commitModel(projectId, "main", {change(62)}, commitMetadata());
         const RemoteTrackingRef firstCommit{remoteId, projectId, branchId, sharedTip};
         local.recordRemoteTrackingRef(firstCommit,
             std::optional<std::optional<RevisionId>>(std::optional<RevisionId>{}));
@@ -140,7 +143,7 @@ void exerciseRemoteTracking() {
                 !local.listProjects().empty() &&
                 !local.optionalHead(projectId, "main").has_value(),
                 "remote tracking unexpectedly moved the local unborn branch HEAD");
-        const RevisionId localTip = local.commitModel(projectId, "main", {change(63)});
+        const RevisionId localTip = local.commitModel(projectId, "main", {change(63)}, commitMetadata());
         require(localTip != sharedTip && localTip != committed &&
                 shared.optionalHead(projectId, "main") == sharedTip,
                 "local commit moved shared repository HEAD");
@@ -196,9 +199,9 @@ void exercise() {
                 "new repository root has no UUIDv7 identity");
         require(service.repositoryId() == savedRepositoryId,
                 "repository UUID changed during the service lifetime");
-        const ProjectInfo project = service.createProject("canonical native UUIDv7");
+        const ProjectInfo project = service.createProject("canonical native UUIDv7", commitMetadata());
         projectName = project.id;
-        const ProjectInfo other = service.createProject("another project");
+        const ProjectInfo other = service.createProject("another project", commitMetadata());
         const ProjectInfo unborn = service.createUnbornProject("unborn project");
         const ProjectInfo pending = service.createUnbornProject("persistently unborn project");
         pendingUnbornProject = pending.id;
@@ -212,7 +215,7 @@ void exercise() {
                 "unborn project has a nonempty revision history");
         require(service.revisionGraph(unborn.id).revisions.empty(),
                 "unborn project has graph revisions");
-        const RevisionId firstUnborn = service.commitModel(unborn.id, "main", {change(9)});
+        const RevisionId firstUnborn = service.commitModel(unborn.id, "main", {change(9)}, commitMetadata());
         require(service.optionalHead(unborn.id, "main") == firstUnborn,
                 "first unborn commit did not publish the HEAD");
         require(service.revision(unborn.id, firstUnborn).parents.empty(),
@@ -231,12 +234,12 @@ void exercise() {
                 "fork must share HEAD revision identity");
         const std::optional<BranchId> branch = service.branchId(project.id, "feature");
         require(branch.has_value(), "canonical branch has no UUIDv7 identity");
-        const RevisionId mainTip = service.commitModel(project.id, "main", {change(1)}, initial);
-        featureTip = service.commitModel(project.id, "feature", {change(2)}, initial);
+        const RevisionId mainTip = service.commitModel(project.id, "main", {change(1)}, commitMetadata(), initial);
+        featureTip = service.commitModel(project.id, "feature", {change(2)}, commitMetadata(), initial);
         require(mainTip != initial && mainTip != featureTip,
                 "distinct commits must create distinct revisions");
         const aowis::dvmdb::MergeResult result = service.mergeBranches(
-            project.id, "main", "feature", mainTip, featureTip);
+            project.id, "main", "feature", commitMetadata(), mainTip, featureTip);
         require(result.status == MergeStatus::Merged && result.resultHead.has_value(),
                 "disjoint native merge must produce a new revision");
         merged = *result.resultHead;
@@ -270,7 +273,7 @@ void exercise() {
                 "rename changed branch identity or HEAD");
         expectError([&]() { service.renameBranch(project.id, "develop", "wrong", initial); },
                     ProjectErrorKind::Conflict);
-        expectError([&]() { (void)service.commitModel(project.id, "main", {change(3)}, initial); },
+        expectError([&]() { (void)service.commitModel(project.id, "main", {change(3)}, commitMetadata(), initial); },
                     ProjectErrorKind::Conflict);
         expectError([&]() { (void)service.revision(project.id, service.head(other.id, "main")); },
                     ProjectErrorKind::NotFound);
@@ -351,7 +354,7 @@ void exerciseCloneTargetProvision() {
         RevisionId sourceHead = RevisionId::generate();
         std::optional<BranchId> sourceBranch;
         source.withRepository(logicalProject, [&](aowis::dvmdb::Repository& repository) {
-            sourceHead = repository.createBranch(*ProjectId::parse(logicalProject), "main");
+            sourceHead = repository.createRootBranch(*ProjectId::parse(logicalProject), "main", commitMetadata());
             sourceBranch = repository.branchId("main");
         });
         aowis::dvmdb::ScratchFile bundle = source.createScratchFile(logicalProject);

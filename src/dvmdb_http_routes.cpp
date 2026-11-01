@@ -397,7 +397,34 @@ QJsonObject revisionJson(const RevisionGraphRevision& revision) {
                        {"root", QString::fromStdString(toHex(revision.root))},
                        {"referencesRoot", QString::fromStdString(toHex(revision.referencesRoot))},
                        {"modelIndexed", revision.modelIndexed}, {"parents", parents},
-                       {"parentRecordHashes", parentHashes}};
+                       {"parentRecordHashes", parentHashes},
+                       {"author", QJsonObject{
+                           {"id", QString::fromStdString(revision.metadata.authorId.toString())},
+                           {"name", QString::fromStdString(revision.metadata.authorName)}}},
+                       {"message", QString::fromStdString(revision.metadata.message)},
+                       {"committedAtMs",
+                        QString::number(static_cast<qulonglong>(revision.committedAtMs))}};
+}
+
+// The author and message of a request that creates a revision:
+// "author": {"id": UUIDv7, "name": text} and "message": text. Merges and
+// project creation may omit the message and get `defaultMessage`.
+CommitMetadata parseCommitMetadata(const QJsonObject& object,
+                                   std::optional<std::string> defaultMessage = std::nullopt) {
+    requireInput(object.value("author").isObject(), "missing author object");
+    const QJsonObject author = object.value("author").toObject();
+    requireKeys(author, {"id", "name"});
+    const std::optional<UuidV7> id = UuidV7::parse(requiredString(author, "id"));
+    requireInput(id.has_value(), "author id must be a UUIDv7");
+    CommitMetadata metadata{*id, requiredString(author, "name"), {}};
+    if (object.contains("message")) {
+        metadata.message = requiredString(object, "message");
+    } else {
+        requireInput(defaultMessage.has_value(), "missing commit message");
+        metadata.message = *defaultMessage;
+    }
+    validateCommitMetadata(metadata);
+    return metadata;
 }
 
 QString hashString(const Hash& hash) {
@@ -689,7 +716,7 @@ void requireModelIndexed(Repository& repository, const ProjectId& project,
 }
 
 std::vector<hydraulic::HydraulicEntityChange> parseHydraulicChanges(const QJsonObject& object) {
-    requireKeys(object, {"expectedHead", "changes"});
+    requireKeys(object, {"expectedHead", "changes", "author", "message"});
     requireInput(object.value("changes").isArray(), "missing changes array");
     const QJsonArray input = object.value("changes").toArray();
     requireInput(input.size() <= 128, "hydraulic edit batch exceeds 128 entities");
@@ -939,10 +966,12 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
             const ProjectId project = requestProject(request);
             const QJsonObject object = parseBody(request, maxJsonMergeBytes);
             requireKeys(object, {"target", "source", "expectedTargetHead", "expectedSourceHead",
-                                 "fieldChoices", "objectChoices"});
+                                 "fieldChoices", "objectChoices", "author", "message"});
             const std::string target = requiredString(object, "target");
             const std::string source = requiredString(object, "source");
             requireInput(target != source, "hydraulic merge requires different branches");
+            const CommitMetadata metadata =
+                parseCommitMetadata(object, "Merge " + source + " into " + target);
             hydraulic::HydraulicMergeSelections selections{
                 parseRevisionId(requiredString(object, "expectedTargetHead")),
                 parseRevisionId(requiredString(object, "expectedSourceHead")), {}, {}};
@@ -975,7 +1004,7 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
             MergeResult result;
             service.withRepository(pathParam(request, "id"), [&](Repository& repository) {
                 result = hydraulic::mergeHydraulicBranches(
-                    repository, project, target, source, selections);
+                    repository, project, target, source, selections, metadata);
             });
             return Reply{result.status == MergeStatus::Conflicts ? 409 : 200, mergeJson(result)};
         });
@@ -1006,8 +1035,9 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
         guarded(response, [&]() {
             const ProjectId project = requestProject(request);
             const QJsonObject object = parseBody(request, maxJsonModelBytes);
-            requireKeys(object, {"expectedHead", "payloadBase64"});
+            requireKeys(object, {"expectedHead", "payloadBase64", "author", "message"});
             const RevisionId expected = parseRevisionId(requiredString(object, "expectedHead"));
+            const CommitMetadata metadata = parseCommitMetadata(object);
             QString error;
             const std::optional<NetworkHydraulic> network = ModelCodec<NetworkHydraulic>::decode(
                 decodePayload(object, "payloadBase64"), &error);
@@ -1018,7 +1048,8 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
             service.withRepository(pathParam(request, "id"), [&](Repository& repository) {
                 const std::string branch = pathParam(request, "branch");
                 requireBranch(repository, branch);
-                committed = hydraulic::saveHydraulicNetwork(repository, project, branch, *network, expected);
+                committed = hydraulic::saveHydraulicNetwork(repository, project, branch, *network,
+                                                            expected, metadata);
             });
             return Reply{201, QJsonObject{{"id", revisionIdString(committed)}}};
         });
@@ -1077,12 +1108,13 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
             const QJsonObject object = parseBody(request, maxJsonModelBytes);
             const RevisionId expected = parseRevisionId(requiredString(object, "expectedHead"));
             const std::vector<hydraulic::HydraulicEntityChange> changes = parseHydraulicChanges(object);
+            const CommitMetadata metadata = parseCommitMetadata(object);
             RevisionId committed = expected;
             service.withRepository(pathParam(request, "id"), [&](Repository& repository) {
                 const std::string branch = pathParam(request, "branch");
                 requireBranch(repository, branch);
                 committed = hydraulic::editHydraulicNetwork(repository, project, branch, networkUuid,
-                                                               changes, expected);
+                                                               changes, expected, metadata);
             });
             return Reply{200, QJsonObject{{"id", revisionIdString(committed)}}};
         });
@@ -1647,10 +1679,14 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                                           httplib::Response& response) {
         guarded(response, [&]() {
             const QJsonObject object = parseBody(request, maxJsonSmallBytes);
-            requireKeys(object, {"name", "unborn", "id"});
+            requireKeys(object, {"name", "unborn", "id", "author", "message"});
             const QJsonValue unborn = object.value("unborn");
             requireInput(unborn.isUndefined() || unborn.isBool(), "unborn must be a boolean");
             const std::string name = requiredString(object, "name");
+            // An unborn project has no revision, so nothing has an author.
+            requireInput(!unborn.toBool(false) ||
+                         (!object.contains("author") && !object.contains("message")),
+                         "an unborn project has no first revision to give an author or message");
             // A caller-chosen UUIDv7 makes the creation idempotent: a resent
             // request (lost response, transport retry) gets the same 201
             // answer instead of creating a second project.
@@ -1659,8 +1695,9 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 return Reply{201, projectJson(service.createUnbornProject(
                     name, requiredString(object, "id")))};
             }
-            return Reply{201, projectJson(unborn.toBool(false)
-                ? service.createUnbornProject(name) : service.createProject(name))};
+            if (unborn.toBool(false)) return Reply{201, projectJson(service.createUnbornProject(name))};
+            return Reply{201, projectJson(service.createProject(
+                name, parseCommitMetadata(object, "Create project " + name)))};
         });
     });
     server.Post("/dvmdb/v1/projects/clone-target", [&service](const httplib::Request& request,
@@ -1814,7 +1851,8 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             if (!record) throw ProjectError(ProjectErrorKind::NotFound, "revision not found");
             const Hash digest = hashRevisionRecord(*record);
             RevisionGraphRevision described{record->id, digest, record->root,
-                                              record->referencesRoot, record->modelIndexed, {}};
+                                              record->referencesRoot, record->modelIndexed, {},
+                                              record->metadata, record->committedAtMs};
             for (const RevisionParent& parent : record->parents)
                 described.parents.push_back({parent.id, parent.expectedRecordHash});
             return Reply{200, revisionJson(described)};
@@ -1854,11 +1892,13 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                                                  httplib::Response& response) {
         guarded(response, [&]() {
             const QJsonObject object = parseBody(request, maxJsonModelBytes);
-            requireKeys(object, {"expectedHead", "changes"});
+            requireKeys(object, {"expectedHead", "changes", "author", "message"});
             const RevisionId expected = parseRevisionId(requiredString(object, "expectedHead"));
+            const CommitMetadata metadata = parseCommitMetadata(object);
             std::vector<ModelChange> changes = parseModelChanges(object, true);
             const RevisionId saved = service.commitModel(pathParam(request, "id"),
-                                           pathParam(request, "branch"), std::move(changes), expected);
+                                           pathParam(request, "branch"), std::move(changes),
+                                           metadata, expected);
             return Reply{201, QJsonObject{{"id", revisionIdString(saved)}}};
         });
     });
@@ -1866,14 +1906,17 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                                           httplib::Response& response) {
         guarded(response, [&]() {
             const QJsonObject object = parseBody(request, maxJsonMergeBytes);
-            requireKeys(object, {"target", "source", "expectedTargetHead", "expectedSourceHead"});
+            requireKeys(object, {"target", "source", "expectedTargetHead", "expectedSourceHead",
+                                 "author", "message"});
             const std::string target = requiredString(object, "target");
             const std::string source = requiredString(object, "source");
             requireInput(target != source, "merge branches must differ");
+            const CommitMetadata metadata =
+                parseCommitMetadata(object, "Merge " + source + " into " + target);
             const RevisionId expectedTarget = parseRevisionId(requiredString(object, "expectedTargetHead"));
             const RevisionId expectedSource = parseRevisionId(requiredString(object, "expectedSourceHead"));
             const MergeResult result = service.mergeBranches(pathParam(request, "id"),
-                                             target, source, expectedTarget, expectedSource);
+                                             target, source, metadata, expectedTarget, expectedSource);
             return Reply{result.status == MergeStatus::Conflicts ? 409 : 200, mergeJson(result)};
         });
     });

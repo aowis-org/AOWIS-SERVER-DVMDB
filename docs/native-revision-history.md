@@ -7,9 +7,20 @@ HTTP. The rules are in the [version-control contract](version-control-semantics.
 
 A revision is a finalized, immutable whole-model snapshot. Each committed
 revision has a UUIDv7, project UUIDv7, zero/one/two ordered parent revision
-UUIDv7s bound to their record hashes, snapshot Merkle roots and a SHA-256
-digest of its canonical record ([layout](storage-formats.md#revision-record-t-2)). UUIDv7 is the object's identity;
-SHA-256 proves content integrity. There is no mutable revision state.
+UUIDv7s bound to their record hashes, snapshot Merkle roots, its author
+(UUIDv7 and display name), message and commit time, and a SHA-256 digest of
+its canonical record ([layout](storage-formats.md#revision-record-t-3)). UUIDv7
+is the object's identity; SHA-256 proves content integrity. There is no
+mutable revision state.
+
+Every write that creates a revision takes a `CommitMetadata` (author ID, author
+name, message): `Repository::commit`, `commitModel`, `mergeBranches`,
+`createRootBranch`, the hydraulic save, edit and merge, and the local Commit of
+a draft. The repository adds the commit time when it publishes. Invalid
+metadata (empty or overlong name or message, control characters, invalid UTF-8,
+non-UUIDv7 author) is `InvalidInput` and writes nothing. History, revision
+reads and the revision graph return author, message and commit time with
+every revision.
 
 Parent references form a DAG. Commits from multiple branches can share
 ancestors without copying immutable revision objects. A two-parent merge
@@ -72,6 +83,7 @@ session state. See [merge semantics](native-branch-merging.md) and
 | Operation | `Repository` | HTTP (`/dvmdb/v1/projects/{id}`) |
 |---|---|---|
 | Create the first, unborn branch | `createUnbornBranch` | `POST /projects` with `unborn: true` creates `main` |
+| Create the first branch with an empty first revision | `createRootBranch(…, metadata)` | `POST /projects` without `unborn` (needs `author`; roadmap VC-01) |
 | Create a branch from a branch UUID, at HEAD or a reachable revision | `createBranchFromId` (retry-safe with a caller-chosen UUID) | `POST …/branches` (`fromBranchId`, optional `revision`, optional `id`) |
 | Rename (keeps UUID, HEAD, provenance) | `renameBranch(…, expectedHead)` | `PATCH …/branches/{branch}` |
 | Branch by UUID | `branchById` | `GET …/branch-ids/{branchId}` |

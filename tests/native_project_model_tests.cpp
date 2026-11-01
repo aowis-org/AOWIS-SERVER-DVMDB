@@ -1,3 +1,4 @@
+#include "commit_metadata_fixture.h"
 #include "aowis/dvmdb/project_service.h"
 #include "aowis/dvmdb/revision_record.h"
 
@@ -7,6 +8,8 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+
+using aowis::dvmdb::test::commitMetadata;
 
 namespace {
 namespace fs = std::filesystem;
@@ -59,7 +62,7 @@ void testModelWorkflow() {
     BranchId featureBranch = BranchId::generate();
     {
         ProjectService service(temp.path);
-        const ProjectInfo info = service.createProject("New UUID model project");
+        const ProjectInfo info = service.createProject("New UUID model project", commitMetadata());
         project = *ProjectId::parse(info.id);
         root = service.head(info.id, "main");
         check(service.optionalHead(info.id, "main") == std::optional<RevisionId>{root},
@@ -73,7 +76,7 @@ void testModelWorkflow() {
             const RevisionRecord initial = decodeRevisionRecord(*repo.readRevision(project, root));
             check(initial.parents.empty() && !initial.modelIndexed, "initial revision not raw empty");
         });
-        first = service.commitModel(info.id, "main", {{a, record(11)}}, root);
+        first = service.commitModel(info.id, "main", {{a, record(11)}}, commitMetadata(), root);
         check(first != root && service.head(info.id, "main") == first,
               "model commit did not advance UUID HEAD");
         check(service.getModelAtRevision(info.id, first, a)->payload == Bytes{11},
@@ -94,8 +97,8 @@ void testModelWorkflow() {
             featureBranch = *repo.branchId("feature");
         });
         check(mainBranch != featureBranch, "branch UUIDs are not unique");
-        second = service.commitModel(info.id, "main", {{b, record(22, {a, a})}}, first);
-        feature = service.commitModel(info.id, "feature", {{b, record(33)}}, first);
+        second = service.commitModel(info.id, "main", {{b, record(22, {a, a})}}, commitMetadata(), first);
+        feature = service.commitModel(info.id, "feature", {{b, record(33)}}, commitMetadata(), first);
         check(second != feature && service.head(info.id, "main") == second &&
               service.head(info.id, "feature") == feature,
               "forked UUID revisions did not advance independently");
@@ -113,11 +116,11 @@ void testModelWorkflow() {
         check(service.getModelAtRevision(info.id, second, b)->payload == Bytes{22} &&
               service.getModelAtRevision(info.id, feature, b)->payload == Bytes{33},
               "branch snapshots not isolated");
-        rejects([&] { (void)service.commitModel(info.id, "main", {}, first); },
+        rejects([&] { (void)service.commitModel(info.id, "main", {}, commitMetadata(), first); },
                 ProjectErrorKind::Conflict, "stale HEAD was accepted");
-        rejects([&] { (void)service.commitModel(info.id, "main", {{a, std::nullopt}}, second); },
+        rejects([&] { (void)service.commitModel(info.id, "main", {{a, std::nullopt}}, commitMetadata(), second); },
                 ProjectErrorKind::InvalidInput, "deletion of referenced model was accepted");
-        rejects([&] { (void)service.commitModel(info.id, "main", {{key(3), record(44, {key(9)})}}, second); },
+        rejects([&] { (void)service.commitModel(info.id, "main", {{key(3), record(44, {key(9)})}}, commitMetadata(), second); },
                 ProjectErrorKind::InvalidInput, "dangling reference was accepted");
         check(service.head(info.id, "main") == second,
               "rejected commit advanced HEAD");
@@ -162,12 +165,12 @@ void testStrictLocalCommitHeadPin() {
               "new project must start with unborn HEAD");
         rejects([&] {
             (void)service.commitModelAtExpectedHead(projectId, "main",
-                    {{created, record(1)}}, std::nullopt);
+                    {{created, record(1)}}, commitMetadata(), std::nullopt);
         }, ProjectErrorKind::Conflict, "local commit accepted an unconfigured repository");
         service.configureRepositoryRole(RepositoryRole::Private);
         rejects([&] {
             (void)service.commitModelAtExpectedHead(projectId, "main",
-                    {{created, record(1)}}, RevisionId::generate());
+                    {{created, record(1)}}, commitMetadata(), RevisionId::generate());
         }, ProjectErrorKind::Conflict, "born expected HEAD accepted on unborn branch");
         check(!service.optionalHead(projectId, "main") &&
               service.revisionGraph(projectId).revisions.empty(),
@@ -181,7 +184,7 @@ void testStrictLocalCommitHeadPin() {
         const auto attempt = [&]() {
             try {
                 (void)service.commitModelAtExpectedHead(projectId, "main",
-                         {{created, record(42)}}, std::nullopt);
+                         {{created, record(42)}}, commitMetadata(), std::nullopt);
                 ++successes;
             } catch (const ProjectError& error) {
                 if (error.kind() == ProjectErrorKind::Conflict) ++conflicts;
@@ -201,16 +204,16 @@ void testStrictLocalCommitHeadPin() {
         first = *committed;
         rejects([&] {
             (void)service.commitModelAtExpectedHead(projectId, "main",
-                     {{later, record(43)}}, std::nullopt);
+                     {{later, record(43)}}, commitMetadata(), std::nullopt);
         }, ProjectErrorKind::Conflict, "stale explicit-null commit advanced born HEAD");
         rejects([&] {
             (void)service.commitModelAtExpectedHead(projectId, "main",
-                     {{later, record(43)}}, RevisionId::generate());
+                     {{later, record(43)}}, commitMetadata(), RevisionId::generate());
         }, ProjectErrorKind::Conflict, "wrong committed HEAD pin was accepted");
         check(service.optionalHead(projectId, "main") == first,
               "rejected local commit moved HEAD");
         second = service.commitModelAtExpectedHead(projectId, "main",
-                     {{later, record(43)}}, first);
+                     {{later, record(43)}}, commitMetadata(), first);
         check(second != first && service.optionalHead(projectId, "main") == second,
               "correct expected HEAD did not advance local branch");
         const ProjectId nativeProject = *ProjectId::parse(projectId);

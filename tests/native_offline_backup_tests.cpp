@@ -1,3 +1,4 @@
+#include "commit_metadata_fixture.h"
 #include "model_edit_event_fixture.h"
 #include "aowis/dvmdb/project_service.h"
 
@@ -15,6 +16,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <vector>
+
+using aowis::dvmdb::test::commitMetadata;
 
 namespace {
 using aowis::dvmdb::RevisionId;
@@ -135,7 +138,7 @@ void tests(const std::string& python, const std::string& script, const std::stri
               ProjectId::generate().toString(), aowis::dvmdb::BranchId::generate().toString(),
               std::nullopt}, std::nullopt);
         for (int index = 0; index < 3; ++index) {
-            const ProjectInfo info = service.createProject("Hydraulic project " + std::to_string(index));
+            const ProjectInfo info = service.createProject("Hydraulic project " + std::to_string(index), commitMetadata());
             const RevisionId before = service.head(info.id, "main");
             const std::string secondary = index == 1 ? "Scénario Süd 2026" : "design";
             service.createBranchAtRevision(info.id, secondary, "main", before);
@@ -147,7 +150,7 @@ void tests(const std::string& python, const std::string& script, const std::stri
             std::optional<RevisionId> after;
             service.withRepository(info.id, [&](Repository& repository) {
                 const ProjectId project = *ProjectId::parse(info.id);
-                after = repository.commitModel(project, "main", {{key, value}}, before);
+                after = repository.commitModel(project, "main", {{key, value}}, commitMetadata(), before);
             });
             expected.push_back({info.id, info.name, secondary, *after, before,
                                 service.branchId(info.id, "main")->toString(),

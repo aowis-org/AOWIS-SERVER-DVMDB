@@ -45,7 +45,7 @@ concurrency checks, immutable revision records and durable publication.
 
 ## API
 
-`Repository::mergeBranches(project, target, source, expectedTarget,
+`Repository::mergeBranches(project, target, source, metadata, expectedTarget,
 expectedSource, options)` is the generic record-level three-way merge: domain
 callbacks in `MergeOptions` can choose conflict sides, resolve records and
 validate the candidate; both pins are checked under the publication lock, and

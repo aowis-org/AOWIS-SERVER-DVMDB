@@ -2,6 +2,7 @@
 // impossible number is ever stored or read. Covers the codec (both
 // directions), the value rules (AOWIS-SERVER-MODEL/docs/model-value-rules.md) and every
 // hydraulic save and edit path, including the indexed fast paths.
+#include "commit_metadata_fixture.h"
 #include "aowis/dvmdb/hydraulic_network_persistence.h"
 
 #include <aowis/dvmdb/model_codec.h>
@@ -26,6 +27,8 @@
 // The generated table the codec uses; included here to check its content.
 template<typename T> struct ModelEnumValues;
 #include "model_enum_values.inc"
+
+using aowis::dvmdb::test::commitMetadata;
 
 namespace {
 namespace native = aowis::dvmdb;
@@ -453,7 +456,7 @@ void testPersistencePaths() {
     try {
         native::Repository repository(directory / "repo");
         const native::ProjectId project = native::ProjectId::generate();
-        const native::RevisionId unbornHead = repository.createBranch(project, "main");
+        const native::RevisionId unbornHead = repository.createRootBranch(project, "main", commitMetadata());
         NetworkHydraulic network;
         network.uuid = QUuid::createUuid();
         HydraulicNodeReservoir reservoir; reservoir.uuid = QUuid::createUuid(); reservoir.hydraulic_head_m = 120;
@@ -484,13 +487,13 @@ void testPersistencePaths() {
         NetworkHydraulic broken = network;
         broken.links_pipes[0].diameter_mm = -5;
         expectInvalidInput("save with negative diameter",
-                           [&] { (void)hydraulic::saveHydraulicNetwork(repository, project, "main", broken, unbornHead); });
+                           [&] { (void)hydraulic::saveHydraulicNetwork(repository, project, "main", broken, unbornHead, commitMetadata()); });
         broken = network;
         broken.options_hydraulic.accuracy = 0;
         expectInvalidInput("save with zero accuracy",
-                           [&] { (void)hydraulic::saveHydraulicNetwork(repository, project, "main", broken, unbornHead); });
+                           [&] { (void)hydraulic::saveHydraulicNetwork(repository, project, "main", broken, unbornHead, commitMetadata()); });
         const native::RevisionId saved = hydraulic::saveHydraulicNetwork(
-            repository, project, "main", network, unbornHead);
+            repository, project, "main", network, unbornHead, commitMetadata());
 
         const std::function<void(const std::string&, hydraulic::HydraulicEntity)> rejected =
             [&](const std::string& label, hydraulic::HydraulicEntity entity) {
@@ -498,7 +501,7 @@ void testPersistencePaths() {
                 hydraulic::HydraulicEditDiagnostics diagnostics;
                 expectInvalidInput(label, [&] {
                     (void)hydraulic::editHydraulicNetwork(repository, project, "main", network.uuid,
-                        {{id, std::move(entity)}}, saved, &diagnostics);
+                        {{id, std::move(entity)}}, saved, commitMetadata(), &diagnostics);
                 });
                 expect(repository.head(project, "main") == saved,
                        label + ": repository changed");
@@ -532,7 +535,7 @@ void testPersistencePaths() {
         hydraulic::HydraulicEditDiagnostics diagnostics;
         const native::RevisionId edited = hydraulic::editHydraulicNetwork(
             repository, project, "main", network.uuid,
-            {{goodValve.uuid, hydraulic::HydraulicEntity{goodValve}}}, saved, &diagnostics);
+            {{goodValve.uuid, hydraulic::HydraulicEntity{goodValve}}}, saved, commitMetadata(), &diagnostics);
         expect(edited != saved && diagnostics.indexedPhysicalFastPath &&
                    repository.head(project, "main") == edited,
                "valid physical edit not on its fast path");

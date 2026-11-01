@@ -41,6 +41,11 @@ current functional roadmap. See also
   as effective protection at the REST boundary.
 - UUIDv7 and SHA-256 provide identity and integrity, **not** authorization,
   confidentiality, source authentication or non-repudiation.
+- A revision's author (UUIDv7 and name) is whatever the client sent. The
+  record hash proves the author field was not changed later, not that the
+  named person made the revision. A security design must bind the author to an
+  authenticated identity (and possibly sign records) before authorship can be
+  trusted.
 - Credentials/secrets must not be stored in plaintext shared application
   configuration, debug logs or URLs. Define a secure credential provider.
 

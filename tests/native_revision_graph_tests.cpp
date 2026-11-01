@@ -1,3 +1,4 @@
+#include "commit_metadata_fixture.h"
 #include "aowis/dvmdb/project_service.h"
 
 #include <filesystem>
@@ -5,6 +6,8 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+
+using aowis::dvmdb::test::commitMetadata;
 
 namespace {
 using namespace aowis::dvmdb;
@@ -55,13 +58,13 @@ void runRepository() {
     Temporary tmp;
     const ProjectId project = ProjectId::generate();
     Repository repo(tmp.path / "repository");
-    const RevisionId root = repo.createBranch(project, "main");
-    const RevisionId first = repo.commit(project, "main", {{key(1), Bytes{1}}}, root);
+    const RevisionId root = repo.createRootBranch(project, "main", commitMetadata());
+    const RevisionId first = repo.commit(project, "main", {{key(1), Bytes{1}}}, commitMetadata(), root);
     check(repo.createBranch(project, "feature", "main") == first, "fork HEAD should be shared");
     check(repo.createBranch(project, "alias", "main") == first, "alias HEAD should be shared");
-    const RevisionId main = repo.commit(project, "main", {{key(2), Bytes{2}}}, first);
-    const RevisionId feature = repo.commit(project, "feature", {{key(3), Bytes{3}}}, first);
-    const MergeResult merged = repo.mergeBranches(project, "main", "feature", main, feature);
+    const RevisionId main = repo.commit(project, "main", {{key(2), Bytes{2}}}, commitMetadata(), first);
+    const RevisionId feature = repo.commit(project, "feature", {{key(3), Bytes{3}}}, commitMetadata(), first);
+    const MergeResult merged = repo.mergeBranches(project, "main", "feature", commitMetadata(), main, feature);
     check(merged.status == MergeStatus::Merged && merged.resultHead.has_value(),
           "expected divergent merge");
     const RevisionId merge = *merged.resultHead;
@@ -83,7 +86,7 @@ void runRepository() {
           start.revisions[0].id == merge, "unexpected first graph node");
     // After first page, HEAD moves; the old cursor still represents the
     // immutable earlier snapshot, and a new first page sees the descendant.
-    const RevisionId newer = repo.commit(project, "main", {{key(4), Bytes{4}}}, merge);
+    const RevisionId newer = repo.commit(project, "main", {{key(4), Bytes{4}}}, commitMetadata(), merge);
     std::set<RevisionId> observed;
     std::optional<RevisionGraphCursor> cursor = start.next;
     for (const RevisionGraphRevision& item : start.revisions) observed.insert(item.id);
@@ -155,14 +158,14 @@ void runBranchOriginsAndNames() {
     RevisionId featureRevision = RevisionId::generate();
     {
         Repository repository(temp.path / "repository");
-        const RevisionId root = repository.createBranch(project, "main");
+        const RevisionId root = repository.createRootBranch(project, "main", commitMetadata());
         mainId = *repository.branchId("main");
         check(repository.createBranch(project, unicodeLabel, "main") == root,
               "branch names with spaces and UTF-8 were rejected");
         featureId = *repository.branchId(unicodeLabel);
         check(repository.createBranch(project, "Feature Follow Up", unicodeLabel) == root,
               "second-level branch creation failed");
-        (void)repository.commit(project, "main", {{key(10), Bytes{10}}}, root);
+        (void)repository.commit(project, "main", {{key(10), Bytes{10}}}, commitMetadata(), root);
         const RevisionGraphPage initial = repository.revisionGraph(project, 1);
         check(initial.heads.size() == 3 && initial.next.has_value(),
               "branch ancestry fixture did not produce a pinned cursor");
@@ -174,7 +177,7 @@ void runBranchOriginsAndNames() {
               "pinned pagination lost branch origin");
         repository.renameBranch(project, unicodeLabel, "Renamed Feature Branch", root);
         featureRevision = repository.commit(project, "Renamed Feature Branch",
-                                               {{key(11), Bytes{11}}}, root);
+                                               {{key(11), Bytes{11}}}, commitMetadata(), root);
         const RevisionGraphPage changed = repository.revisionGraph(project, 100);
         check(changed.heads[1].name == "Renamed Feature Branch" &&
               changed.heads[1].branchId == featureId &&
@@ -209,9 +212,9 @@ void runImmutableForkProvenance() {
     RevisionId later = RevisionId::generate();
     {
         Repository repository(temp.path / "repository");
-        original = repository.createBranch(project, sourceName);
+        original = repository.createRootBranch(project, sourceName, commitMetadata());
         sourceId = *repository.branchId(sourceName);
-        later = repository.commit(project, sourceName, {{key(20), Bytes{20}}}, original);
+        later = repository.commit(project, sourceName, {{key(20), Bytes{20}}}, commitMetadata(), original);
         const std::size_t before = repository.revisionGraph(project).revisions.size();
         const BranchCreationResult createdFork = repository.createBranchAtRevisionWithIdentity(
             project, forkName, sourceName, original);
@@ -237,8 +240,8 @@ void runImmutableForkProvenance() {
         }
         check(found, "historical fork is missing from revision graph");
         repository.renameBranch(project, sourceName, "Renamed Source", later);
-        (void)repository.commit(project, "Renamed Source", {{key(21), Bytes{21}}}, later);
-        (void)repository.commit(project, forkName, {{key(22), Bytes{22}}}, original);
+        (void)repository.commit(project, "Renamed Source", {{key(21), Bytes{21}}}, commitMetadata(), later);
+        (void)repository.commit(project, forkName, {{key(22), Bytes{22}}}, commitMetadata(), original);
     }
     {
         Repository reopened(temp.path / "repository");
@@ -260,7 +263,7 @@ void runImmutableForkProvenance() {
 void runService() {
     Temporary tmp;
     ProjectService service(tmp.path);
-    const ProjectInfo project = service.createProject("first");
+    const ProjectInfo project = service.createProject("first", commitMetadata());
     const RevisionId root = service.head(project.id, "main");
     const BranchId sourceId = *service.branchId(project.id, "main");
     const BranchCreationResult created = service.createBranchWithIdentity(
@@ -275,7 +278,7 @@ void runService() {
           "ProjectService graph adapter not correct");
     check(service.history(project.id, "second").size() == 1,
           "ProjectService first-parent reader missing");
-    const ProjectInfo other = service.createProject("second");
+    const ProjectInfo other = service.createProject("second", commitMetadata());
     const RevisionId otherRoot = service.head(other.id, "main");
     check(root != otherRoot, "two empty projects received same UUIDv7 revision");
     check(service.revisionGraph(other.id).revisions.front().id == otherRoot,

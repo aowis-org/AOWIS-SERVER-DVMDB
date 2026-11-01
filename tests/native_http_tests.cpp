@@ -1,3 +1,4 @@
+#include "commit_metadata_fixture.h"
 #include "model_edit_event_fixture.h"
 #include "aowis/dvmdb/dvmdb_http_routes.h"
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
@@ -8,6 +9,7 @@
 #include <httplib.h>
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QElapsedTimer>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -41,6 +43,8 @@
 #include <tuple>
 #include <unistd.h>
 #include <vector>
+
+using aowis::dvmdb::test::commitMetadata;
 
 namespace {
 void check(bool ok, const char* message) {
@@ -159,12 +163,38 @@ public:
         this->client_.set_write_timeout(std::chrono::seconds(30));
     }
     quint16 port() const { return this->port_; }
+    // Like a real client, every request that creates a revision names its
+    // author (and, except merges and project creation, which have default
+    // messages, its message). callExact() sends the body unchanged.
     Response call(const QByteArray& verb, const QString& path, const QJsonObject& body = {}) {
+        return callExact(verb, path, withAuthorship(verb, path, body));
+    }
+    Response callExact(const QByteArray& verb, const QString& path, const QJsonObject& body = {}) {
         const BinaryResponse reply = callRaw(verb, path,
             QJsonDocument(body).toJson(QJsonDocument::Compact), "application/json");
         const QJsonDocument json = QJsonDocument::fromJson(reply.body);
         check(json.isObject(), "HTTP response is not JSON");
         return Response{reply.status, json.object(), reply.retryAfter};
+    }
+    static QJsonObject testAuthor() {
+        return QJsonObject{
+            {"id", QString::fromStdString(aowis::dvmdb::test::testAuthorId().toString())},
+            {"name", QStringLiteral("HTTP test")}};
+    }
+    static QJsonObject withAuthorship(const QByteArray& verb, const QString& path, QJsonObject body) {
+        if (verb != "POST" || body.contains("author")) return body;
+        const bool project = path == QStringLiteral("/dvmdb/v1/projects") &&
+                             !body.value("unborn").toBool(false);
+        const bool merge = path.startsWith(QStringLiteral("/dvmdb/v1/projects/")) &&
+                           path.endsWith(QStringLiteral("merges"));
+        const bool revision = path.startsWith(QStringLiteral("/dvmdb/v1/projects/")) &&
+            (path.endsWith(QStringLiteral("/model-commits")) ||
+             path.endsWith(QStringLiteral("/networks")) || path.endsWith(QStringLiteral("/edits")));
+        if (!project && !merge && !revision) return body;
+        body.insert("author", testAuthor());
+        if (revision && !body.contains("message"))
+            body.insert("message", QStringLiteral("HTTP test revision"));
+        return body;
     }
     BinaryResponse callRaw(const QByteArray& verb, const QString& path,
                            const QByteArray& bytes = QByteArray(),
@@ -241,7 +271,7 @@ aowis::dvmdb::RevisionId commitRaw(aowis::dvmdb::ProjectService& service, const 
     check(project.has_value(), "fixture project is not UUIDv7");
     std::optional<aowis::dvmdb::RevisionId> committed;
     service.withRepository(id, [&](aowis::dvmdb::Repository& repository) {
-        committed = repository.commit(*project, branch, changes);
+        committed = repository.commit(*project, branch, changes, commitMetadata());
     });
     return *committed;
 }
@@ -481,7 +511,7 @@ void exerciseTransport(Client& client, aowis::dvmdb::ProjectService& service,
     // catalogue, so it accepts that project's revision bundle.
     TemporaryRoot originRoot;
     native::ProjectService origin(originRoot.root());
-    const native::ProjectInfo sourceProject = origin.createProject("Transport source");
+    const native::ProjectInfo sourceProject = origin.createProject("Transport source", commitMetadata());
     const QString targetId = QString::fromStdString(sourceProject.id);
     {
         std::vector<native::Change> changes;
@@ -710,7 +740,7 @@ void exerciseConcurrency() {
     // project's clone target on this server while A is busy.
     TemporaryRoot originRoot;
     native::ProjectService origin(originRoot.root());
-    const native::ProjectInfo imported = origin.createProject("Imported");
+    const native::ProjectInfo imported = origin.createProject("Imported", commitMetadata());
     {
         std::vector<native::Change> changes;
         for (unsigned i = 0; i < 2000; ++i) {
@@ -1045,8 +1075,8 @@ void exerciseTransferStagingBudget() {
 void exerciseRevisionGraphHttp() {
     TemporaryRoot root;
     aowis::dvmdb::ProjectService service(root.root());
-    const std::string id = service.createProject("Graph API").id;
-    const std::string other = service.createProject("Other graph").id;
+    const std::string id = service.createProject("Graph API", commitMetadata()).id;
+    const std::string other = service.createProject("Other graph", commitMetadata()).id;
     const QString project = QString::fromStdString(id);
     const aowis::dvmdb::RevisionId initial = service.head(id, "main");
     (void)commitRaw(service, project, "main", {{aowis::dvmdb::Key{1}, aowis::dvmdb::Bytes{1}}});
@@ -1054,7 +1084,7 @@ void exerciseRevisionGraphHttp() {
     (void)service.createBranch(id, "alias", "feature");
     (void)commitRaw(service, project, "main", {{aowis::dvmdb::Key{2}, aowis::dvmdb::Bytes{2}}});
     (void)commitRaw(service, project, "feature", {{aowis::dvmdb::Key{3}, aowis::dvmdb::Bytes{3}}});
-    const aowis::dvmdb::MergeResult result = service.mergeBranches(id, "main", "feature");
+    const aowis::dvmdb::MergeResult result = service.mergeBranches(id, "main", "feature", commitMetadata());
     check(result.status == aowis::dvmdb::MergeStatus::Merged && result.resultHead.has_value() &&
           service.revision(id, *result.resultHead).parents.size() == 2,
           "HTTP graph test merge fixture failed");
@@ -1238,7 +1268,7 @@ void exerciseRevisionBundleHttp() {
     const std::filesystem::path sourcePath = temp.root() / "v2-source";
     const std::filesystem::path replicaPath = temp.root() / "v2-replica";
     native::ProjectService source(sourcePath);
-    const native::ProjectInfo project = source.createProject("Revision transfer");
+    const native::ProjectInfo project = source.createProject("Revision transfer", commitMetadata());
     const std::optional<native::ProjectId> projectId = native::ProjectId::parse(project.id);
     check(projectId.has_value(), "created project is not UUIDv7");
     // Clone the initial, fully published project before either side commits.
@@ -1256,7 +1286,7 @@ void exerciseRevisionBundleHttp() {
     native::Key key{};
     key[15] = 41;
     source.withRepository(project.id, [&](native::Repository& repository) {
-        tip = repository.commit(*projectId, "main", {{key, native::Bytes{1, 2, 3}}}, tip);
+        tip = repository.commit(*projectId, "main", {{key, native::Bytes{1, 2, 3}}}, commitMetadata(), tip);
     });
     const native::BundleLimits limits{4ULL * 1024ULL * 1024ULL, 10000ULL, 1024ULL * 1024ULL};
     TestServer sourceServer(source, limits);
@@ -1297,7 +1327,7 @@ void exerciseRevisionBundleHttp() {
           "invalid incremental base accepted");
     check(sender.callRaw("GET", prefix + "?unused=1").status == 400,
           "unknown export query argument accepted");
-    const native::ProjectInfo unrelated = replica.createProject("Unrelated project");
+    const native::ProjectInfo unrelated = replica.createProject("Unrelated project", commitMetadata());
     const QString unrelatedPath = QStringLiteral("/dvmdb/v1/projects/") +
         QString::fromStdString(unrelated.id) + "/branches/main/bundle";
     check(receiver.callRaw("POST", unrelatedPath, full.body,
@@ -1314,7 +1344,7 @@ void exerciseRevisionBundleHttp() {
           "HTTP full revision replay failed");
     const native::RevisionId base = tip;
     source.withRepository(project.id, [&](native::Repository& repository) {
-        tip = repository.commit(*projectId, "main", {{key, native::Bytes{4, 5, 6}}}, base);
+        tip = repository.commit(*projectId, "main", {{key, native::Bytes{4, 5, 6}}}, commitMetadata(), base);
     });
     const BinaryResponse delta = sender.callRaw("GET", prefix + "?base=" +
                                               QString::fromStdString(base.toString()));
@@ -1476,7 +1506,7 @@ void exerciseUnbornProjectHttp() {
     key[15] = 9;
     std::optional<native::RevisionId> first;
     service.withRepository(project, [&](native::Repository& repository) {
-        first = repository.commit(*id, "main", {{key, native::Bytes{1, 2, 3}}}, std::nullopt);
+        first = repository.commit(*id, "main", {{key, native::Bytes{1, 2, 3}}}, commitMetadata(), std::nullopt);
     });
     check(first.has_value(), "HTTP first unborn commit returned no revision");
     const QString firstId = QString::fromStdString(first->toString());
@@ -1642,7 +1672,7 @@ void exerciseUuidv7HistoryHttp() {
     native::Key first{};
     first[15] = 7;
     service.withRepository(project, [&](native::Repository& repository) {
-        mainTip = repository.commit(*id, "main", {{first, native::Bytes{1, 2}}}, mainTip);
+        mainTip = repository.commit(*id, "main", {{first, native::Bytes{1, 2}}}, commitMetadata(), mainTip);
     });
     const QString newer = QString::fromStdString(mainTip.toString());
     const Response graphFirst = client.call("GET", graphPath + "?limit=1");
@@ -1651,7 +1681,7 @@ void exerciseUuidv7HistoryHttp() {
           !graphFirst.json.value("complete").toBool(), "UUIDv7 graph first page malformed");
     const QString cursor = graphFirst.json.value("nextCursor").toString();
     check(!cursor.isEmpty(), "UUIDv7 graph did not return pagination cursor");
-    const QString differentProject = QString::fromStdString(service.createProject("Other").id);
+    const QString differentProject = QString::fromStdString(service.createProject("Other", commitMetadata()).id);
     check(client.call("GET", "/dvmdb/v1/projects/" + differentProject +
                       "/revision-graph?cursor=" + cursor).status == 400,
           "UUIDv7 graph cursor was accepted across projects");
@@ -1662,7 +1692,7 @@ void exerciseUuidv7HistoryHttp() {
           "forged UUIDv7 graph cursor was accepted");
     // Advance main during paging; the pinned first page must not be rewritten.
     service.withRepository(project, [&](native::Repository& repository) {
-        mainTip = repository.commit(*id, "main", {{first, native::Bytes{3, 4}}}, mainTip);
+        mainTip = repository.commit(*id, "main", {{first, native::Bytes{3, 4}}}, commitMetadata(), mainTip);
     });
     const Response graphSecond = client.call("GET", graphPath + "?limit=1&cursor=" + cursor);
     check(graphSecond.status == 200 && graphSecond.json.value("heads") == graphFirst.json.value("heads") &&
@@ -2221,13 +2251,13 @@ void exerciseHydraulicDraftMembershipHttp() {
     // before exercising the committed-network fixture.
     check(!service.optionalHead(project.id, "main").has_value(),
           "new hydraulic fixture project should have an unborn HEAD");
-    const native::RevisionId head = service.commitModel(project.id, "main", {});
+    const native::RevisionId head = service.commitModel(project.id, "main", {}, commitMetadata());
     check(service.optionalHead(project.id, "main") == head,
           "first hydraulic fixture commit did not establish the HEAD");
     native::RevisionId base = head;
     service.withRepository(project.id, [&](native::Repository& repository) {
         base = native::hydraulic::saveHydraulicNetwork(repository, projectUuid,
-                                                         "main", network, head);
+                                                         "main", network, head, commitMetadata());
     });
     service.configureRepositoryRole(native::RepositoryRole::Private);
     TestServer server(service, native::BundleLimits{4ULL * 1024ULL * 1024ULL,
@@ -2448,6 +2478,127 @@ void exerciseWorkingCopyListAndDiscardHttp() {
 
 } // namespace
 
+// Every route that creates a revision requires an author and (except merges
+// and project creation, which have defaults) a message; revision reads,
+// history and the graph return them with the publication time.
+void exerciseCommitMetadataHttp() {
+    namespace native = aowis::dvmdb;
+    TemporaryRoot temp;
+    native::ProjectService service(temp.root());
+    TestServer server(service, native::BundleLimits{4ULL * 1024ULL * 1024ULL, 10000, 1024ULL * 1024ULL});
+    Client client(server.port());
+    const QJsonObject author = Client::testAuthor();
+
+    check(client.callExact("POST", "/dvmdb/v1/projects", QJsonObject{{"name", "anonymous"}}).status == 400,
+          "a project with a first revision was created without an author");
+    check(client.callExact("POST", "/dvmdb/v1/projects",
+              QJsonObject{{"name", "unborn"}, {"unborn", true}, {"author", author}}).status == 400,
+          "an unborn project accepted an author for a revision it does not have");
+    const qint64 before = QDateTime::currentMSecsSinceEpoch();
+    const Response created = client.callExact("POST", "/dvmdb/v1/projects",
+        QJsonObject{{"name", "Authored"}, {"author", author}});
+    check(created.status == 201, "project creation with an author failed");
+    const QString path = QStringLiteral("/dvmdb/v1/projects/") + created.json.value("id").toString();
+    const QString root = client.call("GET", path + "/branches/main/head").json.value("id").toString();
+    const Response rootRecord = client.call("GET", path + "/revisions/" + root);
+    check(rootRecord.json.value("author").toObject() == author &&
+          rootRecord.json.value("message").toString() == "Create project Authored",
+          "the first revision lost its author or default message");
+
+    const QString commitPath = path + "/branches/main/model-commits";
+    const QJsonObject change{{"uuid", "00000000-0000-0000-0000-000000000011"}, {"kind", 31},
+                             {"references", QJsonArray{}}, {"payloadBase64", "Cw=="}};
+    const QJsonObject base{{"expectedHead", root}, {"changes", QJsonArray{change}}};
+    const auto rejected = [&](QJsonObject body, const char* message) {
+        check(client.callExact("POST", commitPath, body).status == 400, message);
+    };
+    rejected(base, "model commit without author accepted");
+    QJsonObject body = base;
+    body.insert("author", author);
+    rejected(body, "model commit without message accepted");
+    body.insert("message", "");
+    rejected(body, "model commit with an empty message accepted");
+    body.insert("message", "carriage\rreturn");
+    rejected(body, "model commit with a carriage return accepted");
+    body.insert("message", QString(65537, QChar('m')));
+    rejected(body, "model commit with an oversized message accepted");
+    body.insert("message", "fine");
+    body.insert("author", QJsonObject{{"id", "018f84c0-0000-4000-8000-00000000a001"},
+                                      {"name", "v4 author"}});
+    rejected(body, "model commit with a non-UUIDv7 author accepted");
+    body.insert("author", QJsonObject{{"id", author.value("id")}, {"name", "tab\tname"}});
+    rejected(body, "model commit with a control character in the author name accepted");
+    body.insert("author", QJsonObject{{"id", author.value("id")}, {"name", ""}});
+    rejected(body, "model commit with an empty author name accepted");
+    body.insert("author", QJsonObject{{"id", author.value("id")}, {"name", "A"}, {"email", "x"}});
+    rejected(body, "model commit with an unknown author field accepted");
+    check(client.call("GET", path + "/branches/main/head").json.value("id").toString() == root,
+          "a rejected model commit moved HEAD");
+
+    const QJsonObject alice{{"id", "018f84c0-0000-7000-8000-00000000a0a1"}, {"name", "Alice Ünal"}};
+    body = base;
+    body.insert("author", alice);
+    body.insert("message", "Add reservoir\n\nwith head 12 m\tok");
+    const Response committed = client.callExact("POST", commitPath, body);
+    check(committed.status == 201, "authored model commit failed");
+    const QString first = committed.json.value("id").toString();
+    const qint64 after = QDateTime::currentMSecsSinceEpoch();
+    const Response record = client.call("GET", path + "/revisions/" + first);
+    bool numeric = false;
+    const qint64 committedAt = record.json.value("committedAtMs").toString().toLongLong(&numeric);
+    check(record.json.value("author").toObject() == alice &&
+          record.json.value("message").toString() == "Add reservoir\n\nwith head 12 m\tok" &&
+          record.json.value("committedAtMs").isString() && numeric &&
+          committedAt >= before && committedAt <= after,
+          "revision read did not return author, message and commit time");
+    const QJsonArray history =
+        client.call("GET", path + "/branches/main/history").json.value("revisions").toArray();
+    check(!history.isEmpty() && history.at(0).toObject().value("author").toObject() == alice &&
+          history.at(0).toObject().value("message") == record.json.value("message") &&
+          history.at(0).toObject().value("committedAtMs") == record.json.value("committedAtMs"),
+          "history did not return revision metadata");
+    bool inGraph = false;
+    for (const QJsonValue& revision :
+         client.call("GET", path + "/revision-graph").json.value("revisions").toArray())
+        if (revision.toObject().value("id").toString() == first)
+            inGraph = revision.toObject().value("author").toObject() == alice;
+    check(inGraph, "revision graph did not return revision metadata");
+
+    // Merges: the message defaults to "Merge <source> into <target>".
+    QString mainId;
+    for (const QJsonValue& value :
+         client.call("GET", path + "/revision-graph?limit=1").json.value("heads").toArray())
+        if (value.toObject().value("branch").toString() == QStringLiteral("main"))
+            mainId = value.toObject().value("branchId").toString();
+    check(client.call("POST", path + "/branches",
+                      QJsonObject{{"name", "feature"}, {"fromBranchId", mainId}}).status == 201,
+          "feature branch creation failed");
+    QJsonObject featureChange = change;
+    featureChange.insert("uuid", "00000000-0000-0000-0000-000000000012");
+    const QString feature = client.call("POST", path + "/branches/feature/model-commits",
+        QJsonObject{{"expectedHead", first}, {"changes", QJsonArray{featureChange}}})
+        .json.value("id").toString();
+    QJsonObject secondChange = change;
+    secondChange.insert("uuid", "00000000-0000-0000-0000-000000000013");
+    const QString second = client.call("POST", commitPath,
+        QJsonObject{{"expectedHead", first}, {"changes", QJsonArray{secondChange}}})
+        .json.value("id").toString();
+    const QJsonObject merge{{"target", "main"}, {"source", "feature"},
+                            {"expectedTargetHead", second}, {"expectedSourceHead", feature}};
+    check(client.callExact("POST", path + "/merges", merge).status == 400,
+          "merge without an author accepted");
+    QJsonObject authoredMerge = merge;
+    authoredMerge.insert("author", alice);
+    const Response merged = client.callExact("POST", path + "/merges", authoredMerge);
+    check(merged.status == 200 && merged.json.value("status").toString() == "merged",
+          "authored merge failed");
+    const Response mergeRecord =
+        client.call("GET", path + "/revisions/" + merged.json.value("head").toString());
+    check(mergeRecord.json.value("author").toObject() == alice &&
+          mergeRecord.json.value("message").toString() == "Merge feature into main",
+          "merge revision lost its author or default message");
+}
+
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     try {
@@ -2468,6 +2619,7 @@ int main(int argc, char** argv) {
         exerciseHydraulicDraftMembershipHttp();
 #endif
         exerciseUuidv7HistoryHttp();
+        exerciseCommitMetadataHttp();
         exerciseExecutable(QString::fromLocal8Bit(argv[1]));
         std::cout << "HTTP project service tests passed\n";
         return 0;

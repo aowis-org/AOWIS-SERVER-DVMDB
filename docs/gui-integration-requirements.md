@@ -51,7 +51,8 @@ commits. Shared sources remain separate. See
 | Operation | Status |
 |---|---|
 | Catalogue, branches, nullable HEADs, provenance | available |
-| Pinned paged revision DAG, revision records | available |
+| Pinned paged revision DAG, revision records with author, message and commit time | available |
+| Every write that creates a revision sends `author` (UUIDv7 + name) and `message` | required |
 | Checkout: draft at a HEAD or null; unborn-branch and project provisioning | available |
 | Edit: leased, fenced event Saves with server-side membership; draft network hydration | available |
 | Branch from a revision or source branch | available |

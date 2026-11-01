@@ -1,6 +1,6 @@
 # Hydraulic-aware three-way branch merges
 
-`aowis::dvmdb::hydraulic::mergeHydraulicBranches(repository, project, target, source, selections)`
+`aowis::dvmdb::hydraulic::mergeHydraulicBranches(repository, project, target, source, selections, metadata)`
 (HTTP: `POST /dvmdb/v1/projects/{id}/hydraulic-merges`) builds
 on the native two-parent revision/merge API while validating the combined
 hydraulic model **before any bytes are appended or the target branch ref moves**.
@@ -17,8 +17,10 @@ canonical seven-field metadata merge already defined by `ModelCodec`.
 ## Explicit conflict resolution
 
 In the examples, `namespace hydraulic = aowis::dvmdb::hydraulic;`,
-`project` is the selected project UUID, and `targetHead` / `sourceHead`
-are pinned during conflict preview, not refreshed after the user chooses.
+`project` is the selected project UUID, `targetHead` / `sourceHead`
+are pinned during conflict preview, not refreshed after the user chooses, and
+`metadata` is the author and message of the merge revision (HTTP: `author` and
+an optional `message`, default "Merge <source> into <target>").
 
 The mandatory fifth argument, `HydraulicMergeSelections`, allows the AOWIS UI to
 resolve individual fields after previewing a conflict:
@@ -28,7 +30,7 @@ hydraulic::HydraulicMergeSelections selections{targetHead, sourceHead, {}, {}};
 selections.fields.push_back({pipeUuid, QStringLiteral("diameter_mm"),
     hydraulic::HydraulicMergeSide::Source});
 const aowis::dvmdb::MergeResult result =
-    hydraulic::mergeHydraulicBranches(repository, project, "main", "feature", selections);
+    hydraulic::mergeHydraulicBranches(repository, project, "main", "feature", selections, metadata);
 ```
 
 Each selection identifies a canonical entity UUID, an **exact conflicting field
@@ -55,7 +57,7 @@ modification and incompatible topology rewires, AOWIS may instead choose one
 hydraulic::HydraulicMergeSelections choices{targetHead, sourceHead, {}, {}};
 choices.objects.push_back({pipeUuid, hydraulic::HydraulicMergeSide::Source});
 const aowis::dvmdb::MergeResult merged =
-    hydraulic::mergeHydraulicBranches(repository, project, "main", "feature", choices);
+    hydraulic::mergeHydraulicBranches(repository, project, "main", "feature", choices, metadata);
 ```
 
 An object choice deliberately discards the other side's changes to *that one

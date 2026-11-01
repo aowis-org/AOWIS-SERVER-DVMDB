@@ -32,12 +32,12 @@ changes its kind.
 
 | Operation | C++ | HTTP (`/dvmdb/v1/projects/{id}/branches/{branch}`) |
 |---|---|---|
-| Save a whole network | `saveHydraulicNetwork(repository, project, branch, network, expectedHead)` | `POST …/networks` |
-| Edit up to 128 entities | `editHydraulicNetwork(repository, project, branch, networkId, changes, expectedHead)` | `POST …/networks/{networkId}/edits` |
+| Save a whole network | `saveHydraulicNetwork(repository, project, branch, network, expectedHead, metadata)` | `POST …/networks` |
+| Edit up to 128 entities | `editHydraulicNetwork(repository, project, branch, networkId, changes, expectedHead, metadata)` | `POST …/networks/{networkId}/edits` |
 | Load a network | `loadHydraulicNetworkAtRevision(repository, project, revision, networkId)` | `GET …/networks/{networkId}?revision=` |
 | List one collection | `listHydraulicEntityIdsAtRevisionLimited(…, type, limit)` | `GET …/networks/{networkId}/entities?type=&revision=` (≤ 10,000) |
 | Load one entity | `loadHydraulicEntityAtRevision(…, networkId, entityId)` | `GET …/networks/{networkId}/entities/{entityId}?revision=` |
-| Merge branches | `mergeHydraulicBranches(repository, project, target, source, selections)` | `POST /dvmdb/v1/projects/{id}/hydraulic-merges` |
+| Merge branches | `mergeHydraulicBranches(repository, project, target, source, selections, metadata)` | `POST /dvmdb/v1/projects/{id}/hydraulic-merges` |
 
 Payloads are canonical MODEL bytes (`ModelCodec<T>`), base64 in JSON. Load
 functions return `std::nullopt` only for "not found"; every other failure is a

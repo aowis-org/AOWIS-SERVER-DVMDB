@@ -129,7 +129,7 @@ Bytes storedObject(const std::filesystem::path& repository, const Hash& hash) {
                  pack.begin() + static_cast<std::ptrdiff_t>(offset + 45 + size));
 }
 
-// A forged revision record (UUIDv7, frozen 'T',2 layout) and its identity.
+// A forged revision record (UUIDv7, 'T',3 layout) and its identity.
 struct ForgedRevision {
     RevisionId id;
     Bytes bytes;
@@ -137,7 +137,7 @@ struct ForgedRevision {
 
 ForgedRevision revisionObject(const ProjectId& project, const Hash& root, const Hash& referencesRoot,
                               bool model, const std::vector<std::pair<RevisionId, Hash>>& parents) {
-    ForgedRevision result{RevisionId::generate(), Bytes{'T', 2}};
+    ForgedRevision result{RevisionId::generate(), Bytes{'T', 3}};
     for (const aowis::dvmdb::UuidV7* uuid : {&result.id.uuid(), &project.uuid()})
         result.bytes.insert(result.bytes.end(), uuid->bytes.begin(), uuid->bytes.end());
     result.bytes.insert(result.bytes.end(), root.begin(), root.end());
@@ -149,6 +149,7 @@ ForgedRevision revisionObject(const ProjectId& project, const Hash& root, const 
                             parent.first.uuid().bytes.end());
         result.bytes.insert(result.bytes.end(), parent.second.begin(), parent.second.end());
     }
+    aowis::dvmdb::test::appendRecordMetadata(result.bytes);
     return result;
 }
 

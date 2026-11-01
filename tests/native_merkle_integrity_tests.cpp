@@ -1,3 +1,4 @@
+#include "commit_metadata_fixture.h"
 #include "aowis/dvmdb/native_store.h"
 #include "project_repository.h"
 
@@ -107,7 +108,9 @@ struct BundleBuilder {
                            bool model = false,
                            const std::optional<BuiltRevision>& parent = std::nullopt) {
         aowis::dvmdb::RevisionRecord record{RevisionId::generate(), this->project, root,
-                                              references, model, {}};
+                                              references, model, {},
+                                              aowis::dvmdb::test::commitMetadata(),
+                                              1793491823009ULL};
         if (parent) record.parents.push_back({parent->id, parent->hash});
         return BuiltRevision{record.id, add(aowis::dvmdb::encodeRevisionRecord(record))};
     }

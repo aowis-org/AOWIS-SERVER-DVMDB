@@ -418,7 +418,7 @@ int main(int argc, char** argv) {
             testValidHistories();
             for (const std::pair<Fault, std::string>& entry :
                  std::vector<std::pair<Fault, std::string>>{
-                    {Fault::InvalidRevision, "truncated revision record"},
+                    {Fault::InvalidRevision, "unsupported revision record header"},
                     {Fault::InvalidRootTag, "invalid bundled tree tag"},
                     {Fault::WrongChildSlot, "wrong slot"},
                     {Fault::MissingRawValue, "missing"},

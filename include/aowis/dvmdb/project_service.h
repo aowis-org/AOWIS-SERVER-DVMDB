@@ -159,7 +159,9 @@ public:
     ProjectService& operator=(const ProjectService&) = delete;
 
     // Revision IDs are UUIDv7; SHA-256 only authenticates stored records.
-    ProjectInfo createProject(std::string_view name);
+    // Creates `main` with an empty first revision described by
+    // `rootMetadata`. New clients use createUnbornProject (roadmap VC-01).
+    ProjectInfo createProject(std::string_view name, const CommitMetadata& rootMetadata);
     // Explicit opt-in until all clients support nullable initial HEADs.
     // With a caller-chosen projectId (UUIDv7) the creation is idempotent: a
     // repeated request returns the existing project of that ID and name, so
@@ -203,12 +205,13 @@ public:
     BranchCreationResult createBranchFromId(
         std::string_view projectId, std::string_view name, std::string_view sourceBranchId,
         std::optional<RevisionId> revision, std::string_view createdBranchId);
+    // Every operation that creates a revision records `metadata` with it.
     MergeResult mergeBranches(std::string_view projectId, std::string_view target,
-                                  std::string_view source,
+                                  std::string_view source, const CommitMetadata& metadata,
                                   std::optional<RevisionId> expectedTarget = std::nullopt,
                                   std::optional<RevisionId> expectedSource = std::nullopt);
     RevisionId commitModel(std::string_view projectId, std::string_view branch,
-                             std::vector<ModelChange> changes,
+                             std::vector<ModelChange> changes, const CommitMetadata& metadata,
                              std::optional<RevisionId> expectedHead = std::nullopt);
     // Strict expected-local-HEAD CAS for VC-05 on a private repository.
     // Unlike commitModel(), nullopt means the branch MUST still be unborn.
@@ -216,7 +219,7 @@ public:
     // or provide operation-ID replay yet; only use under a commit coordinator.
     RevisionId commitModelAtExpectedHead(std::string_view projectId,
         std::string_view branch, std::vector<ModelChange> changes,
-        std::optional<RevisionId> expectedLocalHead);
+        const CommitMetadata& metadata, std::optional<RevisionId> expectedLocalHead);
     std::optional<ModelRecord> getModelAtRevision(std::string_view projectId,
                                                    const RevisionId& revision, const Key& key);
     // Persistent identity of this DVMDB catalogue / repository root (UUIDv7).
@@ -304,11 +307,14 @@ public:
     // request is bound to its UUIDv7 operation ID, draft generation, writer
     // fencing token and exact expected local HEAD (null means unborn).
     // Replays of an accepted request return the same immutable revision UUID.
+    // `metadata` (author and message) is part of the request; the commit time
+    // is reserved with the operation, so a retry writes the same revision.
     LocalCommitInfo commitWorkingCopy(
         std::string_view operationId, std::string_view draftId,
         std::string_view sessionId, std::string_view fencingToken,
         std::uint64_t expectedGeneration,
-        std::optional<RevisionId> expectedLocalHead);
+        std::optional<RevisionId> expectedLocalHead,
+        const CommitMetadata& metadata);
     // Durable status query. A pending record is reconciled against committed
     // ancestry before returning, including after a process restart.
     LocalCommitInfo localCommitStatus(std::string_view operationId);
@@ -363,7 +369,8 @@ private:
     // requestedProjectId: caller-chosen UUIDv7, idempotent by (ID, name).
     // With unborn == false it provisions a clone target (no branch at all).
     ProjectInfo createProjectImpl(std::string_view name, bool unborn = false,
-                                  std::optional<std::string> requestedProjectId = std::nullopt);
+                                  std::optional<std::string> requestedProjectId = std::nullopt,
+                                  const CommitMetadata* rootMetadata = nullptr);
 
     std::filesystem::path root_;
     std::string repository_id_;

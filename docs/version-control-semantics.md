@@ -50,10 +50,16 @@ need to be a leaf in the project-wide ancestry graph.
   repository reopening. UUIDv7 ordering is **not** commit ancestry.
 - Compute SHA-256 over a **canonical, versioned, immutable revision record**
   that binds revision UUID, project UUID, ordered parent revision UUIDs with
-  each parent's record hash, the snapshot root and the reference-index root,
-  so changing an ancestor cannot pass verification unnoticed
-  ([record layout](storage-formats.md#revision-record-t-2)). The record holds no
-  author, message or time; the UUIDv7 carries the creation time.
+  each parent's record hash, the snapshot root, the reference-index root and
+  the commit metadata (author UUIDv7 and name, message, commit time), so
+  changing an ancestor or a commit's description cannot pass verification
+  unnoticed ([record layout](storage-formats.md#revision-record-t-3)).
+- Every revision has an **author** (a UUIDv7 and a display name), a non-empty
+  **message** and the **time** the repository published it. Every operation
+  that creates a revision — commit, merge, hydraulic save or edit, local
+  Commit — supplies author and message; merges and the empty first revision of
+  a non-unborn project get a default message. The author is what the client
+  states: until there is authentication it is not verified.
 - The snapshot's Merkle roots recursively bind **all** committed hydraulic
   and model objects; the complete model need not be copied into one flat hash
   input for each commit. Shared immutable subtrees may be deduplicated.
@@ -265,8 +271,8 @@ The API contract must make these distinct operations explicit:
 - list/get branches -> UUID, name, nullable HEAD, `originBranchId`,
   `forkRevisionId`;
 - checkout/start working copy -> UUID, ownership, exact base revision/null;
-- read immutable revision/snapshot -> UUID, SHA-256 record/snapshot roots
-  and ordered parents with their record hashes;
+- read immutable revision/snapshot -> UUID, SHA-256 record/snapshot roots,
+  ordered parents with their record hashes, author, message and commit time;
 - create branch from **committed** revision, with optional source branch UUID;
 - save drafts and commit locally in the personal repository with exact
   expected **local** HEAD and idempotent result;

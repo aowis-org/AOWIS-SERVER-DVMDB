@@ -4,6 +4,7 @@
 // delta) holding arbitrary, possibly malformed objects, for exercising the
 // importer's verifier. Revision records may be forged without validation.
 
+#include "commit_metadata_fixture.h"
 #include "aowis/dvmdb/native_store.h"
 #include "aowis/dvmdb/revision_record.h"
 
@@ -43,7 +44,7 @@ public:
                            const std::vector<BuiltRevision>& parents = {},
                            std::optional<std::uint8_t> modelFlag = std::nullopt) {
         const RevisionId id = RevisionId::generate();
-        Bytes bytes{'T', 2};
+        Bytes bytes{'T', 3};
         for (const UuidV7* uuid : {&id.uuid(), &this->project_.uuid()})
             bytes.insert(bytes.end(), uuid->bytes.begin(), uuid->bytes.end());
         bytes.insert(bytes.end(), root.begin(), root.end());
@@ -54,6 +55,7 @@ public:
             bytes.insert(bytes.end(), parent.id.uuid().bytes.begin(), parent.id.uuid().bytes.end());
             bytes.insert(bytes.end(), parent.hash.begin(), parent.hash.end());
         }
+        appendRecordMetadata(bytes);
         return BuiltRevision{id, add(bytes)};
     }
 

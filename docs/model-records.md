@@ -28,8 +28,9 @@ de-duplicated UUIDs of the entities it requires. `encodeModelRecord()` writes
 the `AOMD` envelope ([format](storage-formats.md#model-record-aomd)). A
 `ModelChange` is an entity UUID plus a record, or no record for a deletion.
 
-`Repository::commitModel(project, branch, changes, expectedHead, …)` applies a
-batch and publishes one revision. Before anything is written it checks that
+`Repository::commitModel(project, branch, changes, metadata, expectedHead, …)`
+applies a batch and publishes one revision with the caller's author and
+message. Before anything is written it checks that
 every required reference exists in the resulting snapshot (including entities
 created in the same batch) and that no deleted entity is still referenced, and
 it updates the primary trie and the reverse-reference trie together. A failed

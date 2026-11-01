@@ -24,11 +24,14 @@ struct RevisionRecord {
     Hash referencesRoot{};
     bool modelIndexed = false;
     std::vector<RevisionParent> parents;
+    CommitMetadata metadata;
+    std::uint64_t committedAtMs = 0;  // Unix epoch ms (UTC) of publication; never 0
 };
 
-// Exact frozen T/02 encoding: 100 + 48 * parent-count bytes, 0..2 parents.
-// Input validation failures are StorageError(InvalidInput); malformed records
-// obtained from storage are StorageError(Corruption).
+// Canonical `T` 0x03 encoding (docs/storage-formats.md): 100 + 48 * parents
+// bytes of identity, roots and parents, then the commit time, author and
+// message. Input validation failures are StorageError(InvalidInput);
+// malformed records obtained from storage are StorageError(Corruption).
 Bytes encodeRevisionRecord(const RevisionRecord& record);
 RevisionRecord decodeRevisionRecord(const Bytes& bytes);
 Hash hashRevisionRecord(const RevisionRecord& record);

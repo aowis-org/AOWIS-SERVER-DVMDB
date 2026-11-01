@@ -1,3 +1,4 @@
+#include "commit_metadata_fixture.h"
 #include "aowis/dvmdb/project_service.h"
 #include "aowis/dvmdb/revision_record.h"
 
@@ -5,6 +6,8 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+
+using aowis::dvmdb::test::commitMetadata;
 
 namespace {
 namespace fs = std::filesystem;
@@ -49,9 +52,9 @@ void testRawAndHistoricalFork() {
     BranchId featureBranch = BranchId::generate();
     {
         Repository repository(temp.path);
-        root = repository.createBranch(project, "main");
+        root = repository.createRootBranch(project, "main", commitMetadata());
         mainBranch = *repository.branchId("main");
-        first = repository.commit(project, "main", {{key(1), Bytes{11}}}, root);
+        first = repository.commit(project, "main", {{key(1), Bytes{11}}}, commitMetadata(), root);
         check(repository.createBranchAtRevision(project, "feature", "main", root) == root,
               "historical fork changed source revision");
         featureBranch = *repository.branchId("feature");
@@ -60,14 +63,14 @@ void testRawAndHistoricalFork() {
                        project, "invalid", "feature", first); },
                 StorageErrorKind::InvalidInput, "unreachable fork accepted");
         check(!repository.hasBranch("invalid"), "rejected fork still published");
-        feature = repository.commit(project, "feature", {{key(2), Bytes{22}}}, root);
+        feature = repository.commit(project, "feature", {{key(2), Bytes{22}}}, commitMetadata(), root);
         check(repository.revisionReachableFrom(project, feature, root),
               "ancestry cannot find root");
         check(!repository.revisionReachableFrom(project, feature, first),
               "unrelated history incorrectly reachable");
-        rejects([&] { (void)repository.mergeBranches(project, "main", "feature", root, feature); },
+        rejects([&] { (void)repository.mergeBranches(project, "main", "feature", commitMetadata(), root, feature); },
                 StorageErrorKind::Conflict, "stale target merge accepted");
-        const MergeResult result = repository.mergeBranches(project, "main", "feature", first, feature);
+        const MergeResult result = repository.mergeBranches(project, "main", "feature", commitMetadata(), first, feature);
         check(result.status == MergeStatus::Merged && result.resultHead &&
               repository.head(project, "main") == *result.resultHead &&
               repository.head(project, "feature") == feature,
@@ -78,7 +81,7 @@ void testRawAndHistoricalFork() {
               record.parents[1].id == feature, "two parent UUID ancestry lost");
         check(repository.revisionReachableFrom(project, merged, feature),
               "second parent ancestry not traversed");
-        check(repository.mergeBranches(project, "main", "feature").status == MergeStatus::UpToDate,
+        check(repository.mergeBranches(project, "main", "feature", commitMetadata()).status == MergeStatus::UpToDate,
               "remerging incorporated history changed HEAD");
         check(repository.createBranchAtRevision(project, "historic", "main", feature) == feature,
               "historical fork from second merge parent failed");
@@ -98,17 +101,17 @@ void testFastForwardAndConflicts() {
     Temporary temp;
     const ProjectId project = ProjectId::generate();
     Repository repo(temp.path);
-    const RevisionId root = repo.createBranch(project, "main");
+    const RevisionId root = repo.createRootBranch(project, "main", commitMetadata());
     check(repo.createBranch(project, "feature", "main") == root, "shared head not created");
-    const RevisionId f1 = repo.commit(project, "feature", {{key(1), Bytes{1}}}, root);
-    const MergeResult fast = repo.mergeBranches(project, "main", "feature", root, f1);
+    const RevisionId f1 = repo.commit(project, "feature", {{key(1), Bytes{1}}}, commitMetadata(), root);
+    const MergeResult fast = repo.mergeBranches(project, "main", "feature", commitMetadata(), root, f1);
     check(fast.status == MergeStatus::FastForward && fast.resultHead == f1 &&
           repo.head(project, "main") == f1, "fast-forward did not advance target");
-    check(repo.mergeBranches(project, "feature", "main").status == MergeStatus::UpToDate,
+    check(repo.mergeBranches(project, "feature", "main", commitMetadata()).status == MergeStatus::UpToDate,
           "source-containing-target should be up to date");
-    const RevisionId main2 = repo.commit(project, "main", {{key(2), Bytes{5}}}, f1);
-    const RevisionId feature2 = repo.commit(project, "feature", {{key(2), Bytes{6}}}, f1);
-    const MergeResult conflict = repo.mergeBranches(project, "main", "feature", main2, feature2);
+    const RevisionId main2 = repo.commit(project, "main", {{key(2), Bytes{5}}}, commitMetadata(), f1);
+    const RevisionId feature2 = repo.commit(project, "feature", {{key(2), Bytes{6}}}, commitMetadata(), f1);
+    const MergeResult conflict = repo.mergeBranches(project, "main", "feature", commitMetadata(), main2, feature2);
     check(conflict.status == MergeStatus::Conflicts && conflict.conflicts.size() == 1 &&
           repo.head(project, "main") == main2 &&
           repo.head(project, "feature") == feature2,
@@ -117,14 +120,14 @@ void testFastForwardAndConflicts() {
 void testModelMergeAndInvalidReferences() {
     Temporary temp;
     ProjectService service(temp.path);
-    const ProjectInfo project = service.createProject("model-merge");
+    const ProjectInfo project = service.createProject("model-merge", commitMetadata());
     const RevisionId root = service.head(project.id, "main");
-    const RevisionId base = service.commitModel(project.id, "main", {{key(1), model(1)}}, root);
+    const RevisionId base = service.commitModel(project.id, "main", {{key(1), model(1)}}, commitMetadata(), root);
     check(service.createBranch(project.id, "feature", "main") == base,
           "model fork did not share base");
-    const RevisionId main = service.commitModel(project.id, "main", {{key(2), model(2, {key(1)})}}, base);
-    const RevisionId feature = service.commitModel(project.id, "feature", {{key(3), model(3)}}, base);
-    const MergeResult merge = service.mergeBranches(project.id, "main", "feature", main, feature);
+    const RevisionId main = service.commitModel(project.id, "main", {{key(2), model(2, {key(1)})}}, commitMetadata(), base);
+    const RevisionId feature = service.commitModel(project.id, "feature", {{key(3), model(3)}}, commitMetadata(), base);
+    const MergeResult merge = service.mergeBranches(project.id, "main", "feature", commitMetadata(), main, feature);
     check(merge.status == MergeStatus::Merged && merge.resultHead.has_value(),
           "model merge did not publish a two-parent revision");
     check(service.head(project.id, "feature") == feature, "model merge rewound source");
@@ -148,8 +151,8 @@ void testModelMergeAndInvalidReferences() {
           "compaction lost model-indexed merge content");
     check(service.createBranchAtRevision(project.id, "deleter", "main", base) == base,
           "service historical branch creation failed");
-    const RevisionId removed = service.commitModel(project.id, "deleter", {{key(1), std::nullopt}}, base);
-    const MergeResult conflict = service.mergeBranches(project.id, "main", "deleter", current, removed);
+    const RevisionId removed = service.commitModel(project.id, "deleter", {{key(1), std::nullopt}}, commitMetadata(), base);
+    const MergeResult conflict = service.mergeBranches(project.id, "main", "deleter", commitMetadata(), current, removed);
     check(conflict.status == MergeStatus::Conflicts && !conflict.conflicts.empty() &&
           service.head(project.id, "main") == current &&
           service.head(project.id, "deleter") == removed,
@@ -159,14 +162,14 @@ void testTypedConflictResolutionAndValidation() {
     Temporary temp;
     const ProjectId project = ProjectId::generate();
     Repository repository(temp.path);
-    const RevisionId root = repository.createBranch(project, "main");
-    const RevisionId base = repository.commitModel(project, "main", {{key(1), model(1)}}, root);
+    const RevisionId root = repository.createRootBranch(project, "main", commitMetadata());
+    const RevisionId base = repository.commitModel(project, "main", {{key(1), model(1)}}, commitMetadata(), root);
     check(repository.createBranch(project, "feature", "main") == base,
           "typed test failed to share its base revision");
-    const RevisionId target = repository.commitModel(project, "main", {{key(1), model(2)}}, base);
-    const RevisionId source = repository.commitModel(project, "feature", {{key(1), model(3)}}, base);
+    const RevisionId target = repository.commitModel(project, "main", {{key(1), model(2)}}, commitMetadata(), base);
+    const RevisionId source = repository.commitModel(project, "feature", {{key(1), model(3)}}, commitMetadata(), base);
     const std::uint64_t bytes = repository.packSize();
-    const MergeResult rejected = repository.mergeBranches(project, "main", "feature", target, source);
+    const MergeResult rejected = repository.mergeBranches(project, "main", "feature", commitMetadata(), target, source);
     check(rejected.status == MergeStatus::Conflicts && rejected.conflicts.size() == 1 &&
           repository.packSize() == bytes, "conflict wrote objects before resolution");
 
@@ -187,7 +190,7 @@ void testTypedConflictResolutionAndValidation() {
         return counted == 1 ? std::nullopt : std::optional<std::string>("bad merged traversal");
     };
     const MergeResult accepted = repository.mergeBranches(
-        project, "main", "feature", target, source, choices);
+        project, "main", "feature", commitMetadata(), target, source, choices);
     check(accepted.status == MergeStatus::Merged && accepted.resultHead &&
           *accepted.resultHead != target && repository.head(project, "feature") == source,
           "typed conflict resolution failed");
@@ -203,8 +206,8 @@ void testTypedConflictResolutionAndValidation() {
           "cannot create test branch from common ancestor");
     check(repository.createBranchAtRevision(project, "reject-right", "main", base) == base,
           "cannot create second test branch from common ancestor");
-    const RevisionId left = repository.commitModel(project, "reject-left", {{key(1), model(5)}}, base);
-    const RevisionId right = repository.commitModel(project, "reject-right", {{key(1), model(6)}}, base);
+    const RevisionId left = repository.commitModel(project, "reject-left", {{key(1), model(5)}}, commitMetadata(), base);
+    const RevisionId right = repository.commitModel(project, "reject-right", {{key(1), model(6)}}, commitMetadata(), base);
     MergeOptions rejectedCandidate;
     rejectedCandidate.resolve = [](const Key&, const ModelRecord&, const ModelRecord&,
                                    const ModelRecord&) { return MergeResolution{model(7), {}}; };
@@ -213,7 +216,7 @@ void testTypedConflictResolutionAndValidation() {
     };
     const std::uint64_t sizeBefore = repository.packSize();
     const MergeResult invalid = repository.mergeBranches(
-        project, "reject-left", "reject-right", left, right, rejectedCandidate);
+        project, "reject-left", "reject-right", commitMetadata(), left, right, rejectedCandidate);
     check(invalid.status == MergeStatus::Conflicts && !invalid.conflicts.empty() &&
           repository.head(project, "reject-left") == left &&
           repository.head(project, "reject-right") == right &&
@@ -223,17 +226,17 @@ void testTypedConflictResolutionAndValidation() {
     MergeOptions unused;
     unused.checkSelections = []() -> std::optional<std::string> { return "unused selection"; };
     rejects([&] { (void)repository.mergeBranches(
-        project, "reject-left", "reject-right", left, right, unused); },
+        project, "reject-left", "reject-right", commitMetadata(), left, right, unused); },
         StorageErrorKind::InvalidInput, "unused explicit choice was accepted");
     rejects([&] { (void)repository.mergeBranches(
-        project, "reject-left", "reject-right", base, right, choices); },
+        project, "reject-left", "reject-right", commitMetadata(), base, right, choices); },
         StorageErrorKind::Conflict, "stale selection was accepted");
 
     check(repository.createBranchAtRevision(project, "ff-target", "main", base) == base,
           "cannot create fast-forward target");
     check(repository.createBranchAtRevision(project, "ff-source", "main", base) == base,
           "cannot create fast-forward source");
-    const RevisionId ff = repository.commitModel(project, "ff-source", {{key(1), model(8)}}, base);
+    const RevisionId ff = repository.commitModel(project, "ff-source", {{key(1), model(8)}}, commitMetadata(), base);
     const std::uint64_t ffBytes = repository.packSize();
     MergeOptions invalidFastForward;
     invalidFastForward.validate = [](const MergeCandidate& candidate) -> std::optional<std::string> {
@@ -242,12 +245,12 @@ void testTypedConflictResolutionAndValidation() {
                                                      : std::nullopt;
     };
     const MergeResult rejectedFF = repository.mergeBranches(
-        project, "ff-target", "ff-source", base, ff, invalidFastForward);
+        project, "ff-target", "ff-source", commitMetadata(), base, ff, invalidFastForward);
     check(rejectedFF.status == MergeStatus::Conflicts &&
           repository.head(project, "ff-target") == base &&
           repository.packSize() == ffBytes,
           "fast forward bypassed semantic validation or wrote pack objects");
-    const MergeResult acceptedFF = repository.mergeBranches(project, "ff-target", "ff-source", base, ff);
+    const MergeResult acceptedFF = repository.mergeBranches(project, "ff-target", "ff-source", commitMetadata(), base, ff);
     check(acceptedFF.status == MergeStatus::FastForward &&
           repository.head(project, "ff-target") == ff,
           "safe fast-forward did not reuse the existing UUIDv7 revision");
@@ -258,9 +261,9 @@ void testTypedConflictResolutionAndValidation() {
           repository.createBranchAtRevision(project, "add-right", "main", base) == base,
           "cannot create concurrent-addition branches");
     const RevisionId addLeft = repository.commitModel(
-        project, "add-left", {{key(4), model(12)}}, base);
+        project, "add-left", {{key(4), model(12)}}, commitMetadata(), base);
     const RevisionId addRight = repository.commitModel(
-        project, "add-right", {{key(4), model(13)}}, base);
+        project, "add-right", {{key(4), model(13)}}, commitMetadata(), base);
     bool resolvedAddition = false;
     bool reconciledCandidate = false;
     MergeOptions addition;
@@ -294,7 +297,7 @@ void testTypedConflictResolutionAndValidation() {
                ? std::nullopt : std::optional<std::string>("candidate misses reference repair");
     };
     const MergeResult added = repository.mergeBranches(
-        project, "add-left", "add-right", addLeft, addRight, addition);
+        project, "add-left", "add-right", commitMetadata(), addLeft, addRight, addition);
     check(added.status == MergeStatus::Merged && added.resultHead &&
           resolvedAddition && reconciledCandidate &&
           repository.getModelAtRevision(project, *added.resultHead, key(4))->payload == Bytes{14} &&
@@ -308,9 +311,9 @@ void testTypedConflictResolutionAndValidation() {
           repository.createBranchAtRevision(project, "object-right", "main", base) == base,
           "cannot create object-choice branches");
     const RevisionId objectLeft = repository.commitModel(
-        project, "object-left", {{key(1), model(21)}}, base);
+        project, "object-left", {{key(1), model(21)}}, commitMetadata(), base);
     const RevisionId objectRight = repository.commitModel(
-        project, "object-right", {{key(1), model(22)}}, base);
+        project, "object-right", {{key(1), model(22)}}, commitMetadata(), base);
     MergeOptions objectChoice;
     objectChoice.chooseConflict = [](const MergeConflict& conflict)
         -> std::optional<MergeChoiceSide> {
@@ -318,7 +321,7 @@ void testTypedConflictResolutionAndValidation() {
                                       : std::nullopt;
     };
     const MergeResult selected = repository.mergeBranches(
-        project, "object-left", "object-right", objectLeft, objectRight, objectChoice);
+        project, "object-left", "object-right", commitMetadata(), objectLeft, objectRight, objectChoice);
     check(selected.status == MergeStatus::Merged && selected.resultHead &&
           repository.getModelAtRevision(project, *selected.resultHead, key(1))->payload == Bytes{22},
           "whole-object source choice was ignored");

@@ -1199,13 +1199,17 @@ std::vector<ModelChange> mergedCandidate(const std::vector<ModelChange>& current
 // One durable private-local operation record owns its UUIDv7, request
 // fingerprint, snapshot of candidate changes and reserved revision UUID.
 // The pending record is fsynced before any immutable object or HEAD is written.
-constexpr std::string_view localCommitMarker = "AOWIS-LOCAL-COMMIT-1\n";
-constexpr std::size_t localCommitMaxBytes = 8 * 1024 * 1024 + 2048;
+constexpr std::string_view localCommitMarker = "AOWIS-LOCAL-COMMIT-2\n";
+constexpr std::size_t localCommitMaxBytes = 8 * 1024 * 1024 + 2 * maxCommitMessageBytes + 4096;
 
+// The reserved commit time and the metadata make the revision record of a
+// retried publication byte-identical to the first attempt.
 struct PersistedLocalCommit {
     LocalCommitInfo info;
     std::string requestDigest;
     std::vector<ModelChange> changes;
+    CommitMetadata metadata;
+    std::uint64_t committedAtMs = 0;
 };
 
 std::filesystem::path localCommitDirectory(const std::filesystem::path& root) {
@@ -1218,16 +1222,24 @@ std::string localDigest(std::string_view input) {
     return hexBytes(hash.data(), hash.size());
 }
 
+std::string hexText(std::string_view text) {
+    return hexBytes(reinterpret_cast<const std::uint8_t*>(text.data()), text.size());
+}
+
 std::string localRequestDigest(std::string_view repositoryId,
                                std::string_view draftId, std::string_view sessionId,
                                std::string_view token, std::uint64_t generation,
-                               const std::optional<RevisionId>& expected) {
-    // Explicit null and UUIDv7 HEAD have distinct canonical encodings.
-    return localDigest(std::string("AOWIS-LOCAL-COMMIT-REQUEST-1\n") +
+                               const std::optional<RevisionId>& expected,
+                               const CommitMetadata& metadata) {
+    // Explicit null and UUIDv7 HEAD have distinct canonical encodings; text
+    // fields are hex, so no value can contain the separator.
+    return localDigest(std::string("AOWIS-LOCAL-COMMIT-REQUEST-2\n") +
         std::string(repositoryId) + "\n" + std::string(draftId) + "\n" +
         std::string(sessionId) + "\n" + std::string(token) + "\n" +
         std::to_string(generation) + "\n" +
-        (expected ? expected->toString() : "-") + "\n");
+        (expected ? expected->toString() : "-") + "\n" +
+        metadata.authorId.toString() + "\n" + hexText(metadata.authorName) + "\n" +
+        hexText(metadata.message) + "\n");
 }
 
 std::string localStateToken(LocalCommitState state) {
@@ -1249,6 +1261,10 @@ std::string localCommitBody(const PersistedLocalCommit& operation) {
         "generation\t" + std::to_string(info.expectedGeneration) + "\n" +
         "expected\t" + (info.expectedHead ? info.expectedHead->toString() : "-") + "\n" +
         "reserved\t" + info.reservedRevisionId + "\n" +
+        "committed-at\t" + std::to_string(operation.committedAtMs) + "\n" +
+        "author-id\t" + operation.metadata.authorId.toString() + "\n" +
+        "author-name\t" + hexText(operation.metadata.authorName) + "\n" +
+        "message\t" + hexText(operation.metadata.message) + "\n" +
         "request-digest\t" + operation.requestDigest + "\n" +
         "payload-digest\t" + info.payloadDigest + "\n" +
         "state\t" + localStateToken(info.state) + "\n" +
@@ -1301,6 +1317,19 @@ PersistedLocalCommit readLocalCommit(const std::filesystem::path& path) {
     info.expectedGeneration = decimalField(nextField("generation"));
     const std::string expected = nextField("expected");
     info.reservedRevisionId = nextField("reserved");
+    result.committedAtMs = decimalField(nextField("committed-at"));
+    {
+        const std::optional<UuidV7> author = UuidV7::parse(nextField("author-id"));
+        check(author.has_value(), "invalid local commit author UUIDv7");
+        result.metadata.authorId = *author;
+        const Bytes name = unhexBytes(nextField("author-name"));
+        const Bytes message = unhexBytes(nextField("message"));
+        result.metadata.authorName.assign(name.begin(), name.end());
+        result.metadata.message.assign(message.begin(), message.end());
+        try { validateCommitMetadata(result.metadata); }
+        catch (const StorageError&) { check(false, "invalid local commit author or message"); }
+        check(result.committedAtMs != 0, "local commit has no reserved commit time");
+    }
     result.requestDigest = nextField("request-digest");
     info.payloadDigest = nextField("payload-digest");
     const std::string state = nextField("state");
@@ -1703,12 +1732,15 @@ void ProjectService::provisionUnbornBranch(std::string_view projectId,
     });
 }
 
-ProjectInfo ProjectService::createProject(std::string_view name) {
-    return createProjectImpl(name);
+ProjectInfo ProjectService::createProject(std::string_view name,
+                                          const CommitMetadata& rootMetadata) {
+    translated<int>([&]() { validateCommitMetadata(rootMetadata); return 0; });
+    return createProjectImpl(name, false, std::nullopt, &rootMetadata);
 }
 
 ProjectInfo ProjectService::createProjectImpl(std::string_view name, bool unborn,
-                                             std::optional<std::string> requestedProjectId) {
+                                             std::optional<std::string> requestedProjectId,
+                                             const CommitMetadata* rootMetadata) {
     std::lock_guard<std::mutex> guard(this->mutex_);
     ensureHealthy();
     if (!validName(name)) throw ProjectError(ProjectErrorKind::InvalidInput,
@@ -1754,7 +1786,7 @@ ProjectInfo ProjectService::createProjectImpl(std::string_view name, bool unborn
                 if (!project) throw StorageError(StorageErrorKind::Internal,
                                                  "new project UUIDv7 did not validate");
                 if (unborn) repository.createUnbornBranch(*project, "main");
-                else (void)repository.createBranch(*project, "main");
+                else (void)repository.createRootBranch(*project, "main", *rootMetadata);
             }
         }
         syncDirectory(staging / "repository" / "refs" / "heads");
@@ -2130,7 +2162,9 @@ LocalCommitInfo ProjectService::commitWorkingCopy(
         std::string_view operationId, std::string_view draftId,
         std::string_view sessionId, std::string_view fencingToken,
         std::uint64_t expectedGeneration,
-        std::optional<RevisionId> expectedLocalHead) {
+        std::optional<RevisionId> expectedLocalHead,
+        const CommitMetadata& metadata) {
+    translated<int>([&]() { validateCommitMetadata(metadata); return 0; });
     if (!UuidV7::parse(operationId).has_value() ||
         !UuidV7::parse(draftId).has_value() ||
         !UuidV7::parse(sessionId).has_value() ||
@@ -2149,7 +2183,7 @@ LocalCommitInfo ProjectService::commitWorkingCopy(
     }
     const std::string requestDigest = localRequestDigest(
         this->repository_id_, draftId, sessionId, fencingToken,
-        expectedGeneration, expectedLocalHead);
+        expectedGeneration, expectedLocalHead, metadata);
     LocalCommitInfo outcome;
     // The project's operation mutex covers the complete intent/commit/outcome
     // sequence and every ledger record of the project; the draft lock keeps
@@ -2203,6 +2237,8 @@ LocalCommitInfo ProjectService::commitWorkingCopy(
             operation.info.expectedGeneration = expectedGeneration;
             operation.info.reservedRevisionId = RevisionId::generate().toString();
             operation.requestDigest = requestDigest;
+            operation.metadata = metadata;
+            operation.committedAtMs = wallClockMs();
             operation.changes = draft.candidateChanges;
             operation.info.payloadDigest = localDigest(requestDigest + "\n" +
                 saveBatchFingerprint(operation.changes, {}) + "\n");
@@ -2228,7 +2264,8 @@ LocalCommitInfo ProjectService::commitWorkingCopy(
             });
         try {
             (void)repository.commitModel(*project, current->name, operation.changes,
-                                           operation.info.expectedHead, true, reserved);
+                                           operation.metadata, operation.info.expectedHead, true,
+                                           ReservedRevision{*reserved, operation.committedAtMs});
             operation.info.state = LocalCommitState::Succeeded;
         } catch (const StorageError& error) {
             if (error.kind() == StorageErrorKind::Conflict ||
@@ -2412,7 +2449,7 @@ BranchCreationResult ProjectService::createBranchAtRevisionWithIdentity(
 }
 
 MergeResult ProjectService::mergeBranches(std::string_view projectId,
-                std::string_view target, std::string_view source,
+                std::string_view target, std::string_view source, const CommitMetadata& metadata,
                 std::optional<RevisionId> expectedTarget,
                 std::optional<RevisionId> expectedSource) {
     if (!validBranchName(target) || !validBranchName(source))
@@ -2422,7 +2459,7 @@ MergeResult ProjectService::mergeBranches(std::string_view projectId,
     MergeResult result;
     withRepository(projectId, [&](Repository& repository) {
         result = translated<MergeResult>([&]() {
-            return repository.mergeBranches(*project, target, source,
+            return repository.mergeBranches(*project, target, source, metadata,
                                                expectedTarget, expectedSource);
         });
     });
@@ -2475,6 +2512,7 @@ RevisionGraphPage ProjectService::revisionGraph(
 
 RevisionId ProjectService::commitModel(std::string_view projectId,
                           std::string_view branch, std::vector<ModelChange> changes,
+                          const CommitMetadata& metadata,
                           std::optional<RevisionId> expectedHead) {
     if (!validBranchName(branch))
         throw ProjectError(ProjectErrorKind::InvalidInput, "invalid branch name");
@@ -2483,7 +2521,8 @@ RevisionId ProjectService::commitModel(std::string_view projectId,
     RevisionId committed = RevisionId::generate();
     withRepository(projectId, [&](Repository& repository) {
         committed = translated<RevisionId>([&]() {
-            return repository.commitModel(*project, branch, std::move(changes), expectedHead);
+            return repository.commitModel(*project, branch, std::move(changes), metadata,
+                                            expectedHead);
         });
     });
     return committed;
@@ -2491,7 +2530,7 @@ RevisionId ProjectService::commitModel(std::string_view projectId,
 
 RevisionId ProjectService::commitModelAtExpectedHead(
         std::string_view projectId, std::string_view branch,
-        std::vector<ModelChange> changes,
+        std::vector<ModelChange> changes, const CommitMetadata& metadata,
         std::optional<RevisionId> expectedLocalHead) {
     requirePrivateRepository("local commit requires a private repository");
     if (!validBranchName(branch))
@@ -2501,8 +2540,8 @@ RevisionId ProjectService::commitModelAtExpectedHead(
     RevisionId committed = RevisionId::generate();
     withRepository(projectId, [&](Repository& repository) {
         committed = translated<RevisionId>([&]() {
-            return repository.commitModel(*project, branch,
-                                            std::move(changes), expectedLocalHead, true);
+            return repository.commitModel(*project, branch, std::move(changes), metadata,
+                                            expectedLocalHead, true);
         });
     });
     return committed;
@@ -2527,7 +2566,8 @@ RevisionGraphRevision ProjectService::revision(std::string_view projectId, const
         if (!bytes) throw ProjectError(ProjectErrorKind::NotFound, "revision not found");
         const RevisionRecord record = decodeRevisionRecord(*bytes);
         RevisionGraphRevision result{record.id, hashRevisionRecord(record),
-                                      record.root, record.referencesRoot, record.modelIndexed, {}};
+                                      record.root, record.referencesRoot, record.modelIndexed, {},
+                                      record.metadata, record.committedAtMs};
         result.parents.reserve(record.parents.size());
         for (const RevisionParent& parent : record.parents)
             result.parents.push_back(RevisionGraphParent{parent.id, parent.expectedRecordHash});

@@ -1050,7 +1050,8 @@ std::optional<RevisionType> tryIndexedMembershipEditsUsing(
 std::optional<RevisionId> tryIndexedUuidMembershipEdits(
     Repository& repository, const ProjectId& project, std::string_view branch,
     const QUuid& networkUuid, const std::vector<HydraulicEntityChange>& changes,
-    const RevisionId& expectedHead, HydraulicEditDiagnostics* diagnostics) {
+    const RevisionId& expectedHead, const CommitMetadata& metadata,
+    HydraulicEditDiagnostics* diagnostics) {
     return tryIndexedMembershipEditsUsing<RevisionId>(
         [&repository, &project, &expectedHead](const Key& key) {
             return repository.getModelAtRevision(project, expectedHead, key);
@@ -1061,8 +1062,8 @@ std::optional<RevisionId> tryIndexedUuidMembershipEdits(
         [&repository, &project, &expectedHead, &networkUuid](const Key& key) {
             return ownerChunkAtRevision(repository, project, expectedHead, networkUuid, key);
         },
-        [&repository, &project, branch, &expectedHead](std::vector<ModelChange> pending) {
-            return repository.commitModel(project, branch, std::move(pending), expectedHead);
+        [&repository, &project, branch, &expectedHead, &metadata](std::vector<ModelChange> pending) {
+            return repository.commitModel(project, branch, std::move(pending), metadata, expectedHead);
         }, networkUuid, changes, diagnostics);
 }
 
@@ -1095,7 +1096,8 @@ struct IndexedEntityUuid {
 std::optional<RevisionId> tryIndexedUuidPhysicalEdits(
     Repository& repository, const ProjectId& project, std::string_view branch,
     const QUuid& networkUuid, const std::vector<HydraulicEntityChange>& changes,
-    const RevisionId& expectedHead, HydraulicEditDiagnostics* diagnostics) {
+    const RevisionId& expectedHead, const CommitMetadata& metadata,
+    HydraulicEditDiagnostics* diagnostics) {
     std::set<Key> seen;
     std::vector<ModelChange> pending;
     pending.reserve(changes.size());
@@ -1130,7 +1132,7 @@ std::optional<RevisionId> tryIndexedUuidPhysicalEdits(
             throw StorageError(StorageErrorKind::Conflict,
                                "branch head changed during UUIDv7 hydraulic physical edit");
     } else {
-        result = repository.commitModel(project, branch, std::move(pending), expectedHead);
+        result = repository.commitModel(project, branch, std::move(pending), metadata, expectedHead);
     }
     if (diagnostics) {
         diagnostics->indexedPhysicalFastPath = true;
@@ -1145,7 +1147,8 @@ std::optional<RevisionId> tryIndexedUuidPhysicalEdits(
 std::optional<RevisionId> tryIndexedUuidCatalogueEdits(
     Repository& repository, const ProjectId& project, std::string_view branch,
     const QUuid& networkUuid, const std::vector<HydraulicEntityChange>& changes,
-    const RevisionId& expectedHead, HydraulicEditDiagnostics* diagnostics) {
+    const RevisionId& expectedHead, const CommitMetadata& metadata,
+    HydraulicEditDiagnostics* diagnostics) {
     std::set<Key> seen;
     std::vector<ModelChange> pending;
     pending.reserve(changes.size());
@@ -1180,7 +1183,7 @@ std::optional<RevisionId> tryIndexedUuidCatalogueEdits(
             throw StorageError(StorageErrorKind::Conflict,
                                "branch head changed during UUIDv7 hydraulic catalogue edit");
     } else {
-        result = repository.commitModel(project, branch, std::move(pending), expectedHead);
+        result = repository.commitModel(project, branch, std::move(pending), metadata, expectedHead);
     }
     if (diagnostics) {
         diagnostics->indexedCatalogueFastPath = true;
@@ -1196,7 +1199,8 @@ std::optional<RevisionId> tryIndexedUuidCatalogueEdits(
 std::optional<RevisionId> tryIndexedUuidPipeRewires(
     Repository& repository, const ProjectId& project, std::string_view branch,
     const QUuid& networkUuid, const std::vector<HydraulicEntityChange>& changes,
-    const RevisionId& expectedHead, HydraulicEditDiagnostics* diagnostics) {
+    const RevisionId& expectedHead, const CommitMetadata& metadata,
+    HydraulicEditDiagnostics* diagnostics) {
     std::set<Key> seen;
     std::vector<ModelChange> pending;
     pending.reserve(changes.size());
@@ -1255,7 +1259,7 @@ std::optional<RevisionId> tryIndexedUuidPipeRewires(
             throw StorageError(StorageErrorKind::Conflict,
                                "branch head changed during UUIDv7 hydraulic topology edit");
     } else {
-        result = repository.commitModel(project, branch, std::move(pending), expectedHead);
+        result = repository.commitModel(project, branch, std::move(pending), metadata, expectedHead);
     }
     if (diagnostics) {
         diagnostics->indexedTopologyFastPath = true;
@@ -1271,7 +1275,8 @@ std::optional<RevisionId> tryIndexedUuidPipeRewires(
 std::optional<RevisionId> tryIndexedUuidDependentUpdates(
     Repository& repository, const ProjectId& project, std::string_view branch,
     const QUuid& networkUuid, const std::vector<HydraulicEntityChange>& changes,
-    const RevisionId& expectedHead, HydraulicEditDiagnostics* diagnostics) {
+    const RevisionId& expectedHead, const CommitMetadata& metadata,
+    HydraulicEditDiagnostics* diagnostics) {
     std::set<Key> seen;
     std::vector<ModelChange> pending;
     pending.reserve(changes.size());
@@ -1381,7 +1386,7 @@ std::optional<RevisionId> tryIndexedUuidDependentUpdates(
             throw StorageError(StorageErrorKind::Conflict,
                                "branch head changed during UUIDv7 hydraulic dependent edit");
     } else {
-        result = repository.commitModel(project, branch, std::move(pending), expectedHead);
+        result = repository.commitModel(project, branch, std::move(pending), metadata, expectedHead);
     }
     if (diagnostics) {
         diagnostics->indexedDependentUpdateFastPath = true;
@@ -1398,7 +1403,8 @@ std::optional<RevisionId> tryIndexedUuidDependentUpdates(
 std::optional<RevisionId> tryIndexedUuidScalarEdits(
     Repository& repository, const ProjectId& project, std::string_view branch,
     const QUuid& networkUuid, const std::vector<HydraulicEntityChange>& changes,
-    const RevisionId& expectedHead, HydraulicEditDiagnostics* diagnostics) {
+    const RevisionId& expectedHead, const CommitMetadata& metadata,
+    HydraulicEditDiagnostics* diagnostics) {
     std::set<Key> seen;
     std::vector<ModelChange> pending;
     pending.reserve(changes.size());
@@ -1448,7 +1454,7 @@ std::optional<RevisionId> tryIndexedUuidScalarEdits(
             throw StorageError(StorageErrorKind::Conflict,
                                "branch head changed during UUIDv7 hydraulic scalar edit");
     } else {
-        result = repository.commitModel(project, branch, std::move(pending), expectedHead);
+        result = repository.commitModel(project, branch, std::move(pending), metadata, expectedHead);
     }
     if (diagnostics) {
         diagnostics->indexedScalarFastPath = true;
@@ -2163,10 +2169,12 @@ std::invoke_result_t<Callback, const MergeOptions&> mergeHydraulicWithChoices(
 
 MergeResult mergeHydraulicBranches(Repository& repository, const ProjectId& project,
                                        std::string_view target, std::string_view source,
-                                       const HydraulicMergeSelections& selections) {
+                                       const HydraulicMergeSelections& selections,
+                                       const CommitMetadata& metadata) {
+    validateCommitMetadata(metadata);
     return mergeHydraulicWithChoices(selections.fields, selections.objects,
         [&](const MergeOptions& options) {
-            return repository.mergeBranches(project, target, source,
+            return repository.mergeBranches(project, target, source, metadata,
                 selections.expectedTargetHead, selections.expectedSourceHead, options);
         });
 }
@@ -2255,7 +2263,9 @@ std::optional<NetworkHydraulic> loadHydraulicNetworkAtRevision(
 
 RevisionId saveHydraulicNetwork(Repository& repository, const ProjectId& project,
                                   std::string_view branch, const NetworkHydraulic& network,
-                                  const RevisionId& expectedHead) {
+                                  const RevisionId& expectedHead,
+                                  const CommitMetadata& metadata) {
+    validateCommitMetadata(metadata);
     if (network.uuid.isNull())
         throw StorageError(StorageErrorKind::InvalidInput, "hydraulic network UUID is null");
     // Pin one immutable starting point. Native commitModel() rechecks the
@@ -2316,14 +2326,16 @@ RevisionId saveHydraulicNetwork(Repository& repository, const ProjectId& project
     root.payload = bytesFromQByteArray(encodeManifest(next));
     root.references = chunkKeys(next);
     changes.push_back(ModelChange{networkKey, std::move(root)});
-    return repository.commitModel(project, branch, std::move(changes), expectedHead);
+    return repository.commitModel(project, branch, std::move(changes), metadata, expectedHead);
 }
 
 RevisionId editHydraulicNetwork(Repository& repository, const ProjectId& project,
                                   std::string_view branch, const QUuid& networkUuid,
                                   const std::vector<HydraulicEntityChange>& changes,
                                   const RevisionId& expectedHead,
+                                  const CommitMetadata& metadata,
                                   HydraulicEditDiagnostics* diagnostics) {
+    validateCommitMetadata(metadata);
     if (diagnostics) *diagnostics = HydraulicEditDiagnostics{};
     if (networkUuid.isNull())
         throw StorageError(StorageErrorKind::InvalidInput, "hydraulic network UUID is null");
@@ -2335,22 +2347,22 @@ RevisionId editHydraulicNetwork(Repository& repository, const ProjectId& project
     // Mixed or reference-changing batches fall through to full validation.
     if (!changes.empty()) {
         if (const std::optional<RevisionId> indexed = tryIndexedUuidScalarEdits(
-                repository, project, branch, networkUuid, changes, expectedHead, diagnostics))
+                repository, project, branch, networkUuid, changes, expectedHead, metadata, diagnostics))
             return *indexed;
         if (const std::optional<RevisionId> indexed = tryIndexedUuidPhysicalEdits(
-                repository, project, branch, networkUuid, changes, expectedHead, diagnostics))
+                repository, project, branch, networkUuid, changes, expectedHead, metadata, diagnostics))
             return *indexed;
         if (const std::optional<RevisionId> indexed = tryIndexedUuidCatalogueEdits(
-                repository, project, branch, networkUuid, changes, expectedHead, diagnostics))
+                repository, project, branch, networkUuid, changes, expectedHead, metadata, diagnostics))
             return *indexed;
         if (const std::optional<RevisionId> indexed = tryIndexedUuidPipeRewires(
-                repository, project, branch, networkUuid, changes, expectedHead, diagnostics))
+                repository, project, branch, networkUuid, changes, expectedHead, metadata, diagnostics))
             return *indexed;
         if (const std::optional<RevisionId> indexed = tryIndexedUuidDependentUpdates(
-                repository, project, branch, networkUuid, changes, expectedHead, diagnostics))
+                repository, project, branch, networkUuid, changes, expectedHead, metadata, diagnostics))
             return *indexed;
         if (const std::optional<RevisionId> indexed = tryIndexedUuidMembershipEdits(
-                repository, project, branch, networkUuid, changes, expectedHead, diagnostics))
+                repository, project, branch, networkUuid, changes, expectedHead, metadata, diagnostics))
             return *indexed;
     }
     std::optional<NetworkHydraulic> network =
@@ -2392,7 +2404,7 @@ RevisionId editHydraulicNetwork(Repository& repository, const ProjectId& project
             throw StorageError(StorageErrorKind::Conflict, "branch head changed during hydraulic edit");
         return expectedHead;
     }
-    return saveHydraulicNetwork(repository, project, branch, *network, expectedHead);
+    return saveHydraulicNetwork(repository, project, branch, *network, expectedHead, metadata);
 }
 
 } // namespace aowis::dvmdb::hydraulic

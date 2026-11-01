@@ -1,3 +1,4 @@
+#include "commit_metadata_fixture.h"
 #include "model_edit_event_fixture.h"
 #include "aowis/dvmdb/project_service.h"
 #include "aowis/dvmdb/object_id.h"
@@ -16,6 +17,8 @@
 
 #include <sys/stat.h>
 #include <unistd.h>
+
+using aowis::dvmdb::test::commitMetadata;
 
 namespace {
 using aowis::dvmdb::BranchId;
@@ -120,7 +123,7 @@ void testWorkingCopyCreationAndRecovery() {
                 "draft creation modified committed ancestry");
         expectError([&]() { service.workingCopy(sessionOne); }, ProjectErrorKind::NotFound);
         expectError([&]() { service.workingCopy("not-a-uuid"); }, ProjectErrorKind::InvalidInput);
-        committed = service.commitModel(projectId, "main", {simpleChange()});
+        committed = service.commitModel(projectId, "main", {simpleChange()}, commitMetadata());
         committedId = service.createWorkingCopy(projectId, "main", committed, sessionOne).id;
         expectError([&]() { service.createWorkingCopy(projectId, "main", std::nullopt, sessionTwo); },
                     ProjectErrorKind::Conflict);
@@ -578,7 +581,7 @@ void testDraftWritesAreIncremental() {
 
     // A local Commit rebases the draft: no candidate, no journal files.
     const aowis::dvmdb::LocalCommitInfo committed = service.commitWorkingCopy(
-        UuidV7::generate().toString(), draftId, session, token, 3, std::nullopt);
+        UuidV7::generate().toString(), draftId, session, token, 3, std::nullopt, commitMetadata());
     require(committed.state == aowis::dvmdb::LocalCommitState::Succeeded,
             "local Commit of an incremental draft failed");
     const WorkingCopyInfo rebased = service.workingCopy(draftId);

@@ -7,6 +7,7 @@
 
 #include "aowis/dvmdb/native_store.h"
 #include "aowis/dvmdb/revision_record.h"
+#include "commit_metadata_fixture.h"
 
 #include <array>
 #include <cerrno>
@@ -33,6 +34,8 @@ struct CommittedRevision {
     Hash referencesRoot{};
     bool modelIndexed = false;
     std::vector<RevisionId> parents;
+    CommitMetadata metadata;
+    std::uint64_t committedAtMs = 0;
 };
 
 // Layout of a UUIDv7 revision bundle file: header size by format marker,
@@ -114,14 +117,16 @@ public:
         this->repository_.renameBranch(this->project_, previous, renamed, expectedHead);
     }
 
+    // Every revision records the fixture's test author and message.
     RevisionId commit(std::string_view branch, const std::vector<Change>& changes,
                       std::optional<RevisionId> expectedHead = std::nullopt) {
-        return this->repository_.commit(this->project_, branch, changes, expectedHead);
+        return this->repository_.commit(this->project_, branch, changes, commitMetadata(),
+                                        expectedHead);
     }
     RevisionId commitModel(std::string_view branch, std::vector<ModelChange> changes,
                            std::optional<RevisionId> expectedHead = std::nullopt) {
         return this->repository_.commitModel(this->project_, branch, std::move(changes),
-                                               expectedHead);
+                                               commitMetadata(), expectedHead);
     }
 
     // Commit and return the decoded immutable record.
@@ -145,7 +150,7 @@ public:
         if (!bytes) throw StorageError(StorageErrorKind::NotFound, "revision UUID not found");
         const RevisionRecord record = decodeRevisionRecord(*bytes);
         CommittedRevision result{record.id, sha256(*bytes), record.root, record.referencesRoot,
-                                 record.modelIndexed, {}};
+                                 record.modelIndexed, {}, record.metadata, record.committedAtMs};
         for (const RevisionParent& parent : record.parents) result.parents.push_back(parent.id);
         return result;
     }
@@ -195,7 +200,8 @@ public:
                         const MergeOptions& options = {},
                         std::optional<RevisionId> expectedTarget = std::nullopt,
                         std::optional<RevisionId> expectedSource = std::nullopt) {
-        return this->repository_.mergeBranches(this->project_, target, source, expectedTarget,
+        return this->repository_.mergeBranches(this->project_, target, source,
+                                                 commitMetadata("merge"), expectedTarget,
                                                  expectedSource, options);
     }
 

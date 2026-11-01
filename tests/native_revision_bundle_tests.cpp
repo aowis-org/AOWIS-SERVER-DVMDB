@@ -1,3 +1,4 @@
+#include "commit_metadata_fixture.h"
 #include "aowis/dvmdb/native_store.h"
 #include "aowis/dvmdb/storage_error.h"
 
@@ -8,6 +9,8 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+
+using aowis::dvmdb::test::commitMetadata;
 
 namespace {
 namespace fs = std::filesystem;
@@ -62,12 +65,12 @@ void run() {
     Temporary files;
     const ProjectId project = ProjectId::generate();
     Repository source(files.path / "source");
-    const RevisionId root = source.createBranch(project, "main");
-    const RevisionId base = source.commit(project, "main", {{key(1), Bytes{10}}}, root);
+    const RevisionId root = source.createRootBranch(project, "main", commitMetadata());
+    const RevisionId base = source.commit(project, "main", {{key(1), Bytes{10}}}, commitMetadata(), root);
     check(source.createBranch(project, "feature", "main") == base, "branch must share the same revision");
-    const RevisionId main = source.commit(project, "main", {{key(2), Bytes{20}}}, base);
-    const RevisionId feature = source.commit(project, "feature", {{key(3), Bytes{30}}}, base);
-    const MergeResult merge = source.mergeBranches(project, "main", "feature", main, feature);
+    const RevisionId main = source.commit(project, "main", {{key(2), Bytes{20}}}, commitMetadata(), base);
+    const RevisionId feature = source.commit(project, "feature", {{key(3), Bytes{30}}}, commitMetadata(), base);
+    const MergeResult merge = source.mergeBranches(project, "main", "feature", commitMetadata(), main, feature);
     check(merge.status == MergeStatus::Merged && merge.resultHead, "missing two-parent merge");
     const RevisionId merged = *merge.resultHead;
     const std::optional<BranchId> branchId = source.branchId("main");
@@ -104,7 +107,7 @@ void run() {
     check(target.head(project, "main") == merged && target.branchId("main") == branchId,
           "compaction changed imported branch UUID or HEAD");
 
-    const RevisionId advanced = source.commit(project, "main", {{key(4), Bytes{40}}}, merged);
+    const RevisionId advanced = source.commit(project, "main", {{key(4), Bytes{40}}}, commitMetadata(), merged);
     const fs::path later = files.bundle();
     {
         File transfer(later, O_RDWR | O_CREAT | O_EXCL);
@@ -135,7 +138,7 @@ void run() {
     // AOWREV22 carries only the objects missing from a pinned recipient
     // base, not another copy of the entire merge ancestry. Same UUID and
     // parent hashes must survive an incremental round trip and replay.
-    const RevisionId deltaHead = source.commit(project, "main", {{key(5), Bytes{50}}}, advanced);
+    const RevisionId deltaHead = source.commit(project, "main", {{key(5), Bytes{50}}}, commitMetadata(), advanced);
     const fs::path deltaPath = files.bundle();
     {
         File delta(deltaPath, O_RDWR | O_CREAT | O_EXCL);
@@ -173,7 +176,7 @@ void run() {
     // No source revision mutation or HEAD publication is allowed if the
     // recipient is not at the exact base recorded in the delta.
     {
-        const RevisionId future = source.commit(project, "main", {{key(6), Bytes{60}}}, deltaHead);
+        const RevisionId future = source.commit(project, "main", {{key(6), Bytes{60}}}, commitMetadata(), deltaHead);
         check(future != deltaHead, "stale-delta test did not advance source");
         const fs::path stalePath = files.bundle();
         File stale(stalePath, O_RDWR | O_CREAT | O_EXCL);
@@ -204,9 +207,9 @@ void run() {
     }
     // An incremental merge can contain a whole new side of the DAG, not
     // merely the new first-parent chain. Neither side gets a cloned UUID.
-    const RevisionId side = source.commit(project, "feature", {{key(8), Bytes{80}}}, feature);
+    const RevisionId side = source.commit(project, "feature", {{key(8), Bytes{80}}}, commitMetadata(), feature);
     const MergeResult sideMerge = source.mergeBranches(
-        project, "main", "feature", source.head(project, "main"), side);
+        project, "main", "feature", commitMetadata(), source.head(project, "main"), side);
     check(sideMerge.status == MergeStatus::Merged && sideMerge.resultHead,
           "incremental merge fixture was not divergent");
     const fs::path mergeDelta = files.bundle();
@@ -264,7 +267,7 @@ void run() {
     }
     {
         Repository wrong(files.path / "wrong");
-        (void)wrong.createBranch(ProjectId::generate(), "other");
+        (void)wrong.createRootBranch(ProjectId::generate(), "other", commitMetadata());
         File transfer(path, O_RDONLY);
         expectError([&] { (void)wrong.importRevisionBundle(project, transfer.fd, "main"); },
                     StorageErrorKind::Conflict, "cross-project transfer was accepted");
@@ -274,12 +277,12 @@ void run() {
     {
         const ProjectId modelProject = ProjectId::generate();
         Repository modelSource(files.path / "model-source");
-        const RevisionId initial = modelSource.createBranch(modelProject, "main");
+        const RevisionId initial = modelSource.createRootBranch(modelProject, "main", commitMetadata());
         ModelRecord firstModel;
         firstModel.kind = 31;
         firstModel.payload = {7, 8};
         const RevisionId modelHead = modelSource.commitModel(
-            modelProject, "main", {{key(7), firstModel}}, initial);
+            modelProject, "main", {{key(7), firstModel}}, commitMetadata(), initial);
         const fs::path modelBundle = files.bundle();
         File output(modelBundle, O_RDWR | O_CREAT | O_EXCL);
         modelSource.exportRevisionBundle(modelProject, "main", output.fd);
@@ -311,16 +314,16 @@ void runForkProvenanceBundle() {
     Temporary files;
     const ProjectId project = ProjectId::generate();
     Repository source(files.path / "source");
-    const RevisionId root = source.createBranch(project, "main");
-    const RevisionId historical = source.commit(project, "main", {{key(1), Bytes{1}}}, root);
+    const RevisionId root = source.createRootBranch(project, "main", commitMetadata());
+    const RevisionId historical = source.commit(project, "main", {{key(1), Bytes{1}}}, commitMetadata(), root);
     const BranchId origin = *source.branchId("main");
-    const RevisionId newer = source.commit(project, "main", {{key(2), Bytes{2}}}, historical);
+    const RevisionId newer = source.commit(project, "main", {{key(2), Bytes{2}}}, commitMetadata(), historical);
     const BranchCreationResult fork = source.createBranchAtRevisionWithIdentity(
         project, "Prüfung Süd", "main", historical);
     check(fork.originBranchId == origin && fork.forkRevisionId == historical,
           "source historical fork provenance was not recorded");
     const RevisionId advanced = source.commit(
-        project, "Prüfung Süd", {{key(3), Bytes{3}}}, historical);
+        project, "Prüfung Süd", {{key(3), Bytes{3}}}, commitMetadata(), historical);
     check(advanced != newer && advanced != historical, "fork did not advance independently");
 
     const fs::path full = files.bundle();
@@ -358,7 +361,7 @@ void runForkProvenanceBundle() {
         checkProvenance(recipient, advanced);
     }
     const RevisionId later = source.commit(
-        project, "Prüfung Süd", {{key(4), Bytes{4}}}, advanced);
+        project, "Prüfung Süd", {{key(4), Bytes{4}}}, commitMetadata(), advanced);
     const fs::path delta = files.bundle();
     {
         File out(delta, O_RDWR | O_CREAT | O_EXCL);

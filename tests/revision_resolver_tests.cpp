@@ -1,3 +1,4 @@
+#include "commit_metadata_fixture.h"
 #include "aowis/dvmdb/revision_resolver.h"
 
 #include <chrono>
@@ -55,7 +56,8 @@ struct ObjectPack final {
 };
 
 RevisionRecord makeRecord(ProjectId project, RevisionId revision) {
-    RevisionRecord record{revision, project};
+    RevisionRecord record{revision, project, Hash{}, Hash{}, false, {},
+                          aowis::dvmdb::test::commitMetadata(), 1793491823009ULL};
     record.root.fill(0x12);
     return record;
 }

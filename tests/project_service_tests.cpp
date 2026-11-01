@@ -1,3 +1,4 @@
+#include "commit_metadata_fixture.h"
 #include "aowis/dvmdb/project_service.h"
 #include "aowis/dvmdb/object_id.h"
 
@@ -13,6 +14,8 @@
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
+
+using aowis::dvmdb::test::commitMetadata;
 
 namespace {
 using aowis::dvmdb::ProjectService;
@@ -100,7 +103,7 @@ void exerciseBackend() {
         require(service.listBranches(firstId) == std::vector<std::string>{"main"}, "missing initial main branch");
         require(!service.optionalHead(firstId, "main") && service.history(firstId, "main", 10).empty(),
                 "new project main is not unborn");
-        firstHead = service.commitModel(firstId, "main", {{modelKey(1), record(1)}});
+        firstHead = service.commitModel(firstId, "main", {{modelKey(1), record(1)}}, commitMetadata());
         require(service.history(firstId, "main", 10).size() == 1, "missing first revision");
         require(service.revision(firstId, firstHead).id == firstHead, "revision lookup failed");
         require(service.history(firstId, "main", 10, firstHead).empty(), "history cursor should be exclusive");
@@ -115,7 +118,7 @@ void exerciseBackend() {
         const aowis::dvmdb::ProjectId project = *aowis::dvmdb::ProjectId::parse(firstId);
         aowis::dvmdb::RevisionId modelRevision = aowis::dvmdb::RevisionId::generate();
         service.withRepository(firstId, [&](aowis::dvmdb::Repository& repository) {
-            modelRevision = repository.commitModel(project, "main", {{modelKey(2), record(2)}},
+            modelRevision = repository.commitModel(project, "main", {{modelKey(2), record(2)}}, commitMetadata(),
                                                      firstHead);
             require(repository.getModelAtRevision(project, modelRevision, modelKey(2)).has_value(),
                     "scoped repository callback did not persist model record");
@@ -213,7 +216,7 @@ void exerciseLargeBranchCatalogue() {
     ProjectService service(root.directory);
     const aowis::dvmdb::ProjectInfo project = service.createUnbornProject("Branch scaling");
     const aowis::dvmdb::RevisionId mainHead =
-        service.commitModel(project.id, "main", {{modelKey(1), record(1)}});
+        service.commitModel(project.id, "main", {{modelKey(1), record(1)}}, commitMetadata());
     const aowis::dvmdb::Hash mainDigest = service.revision(project.id, mainHead).recordHash;
     const std::filesystem::path heads = root.directory / "projects" / project.id /
                                         "repository" / "refs" / "heads";

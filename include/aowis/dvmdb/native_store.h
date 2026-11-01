@@ -57,6 +57,26 @@ struct ModelChange {
     std::optional<ModelRecord> record;
 };
 
+// Who made a revision and why; every revision records it, together with the
+// time the repository published it. There is no authentication: the author
+// is whoever the caller says it is.
+struct CommitMetadata {
+    UuidV7 authorId;         // stable UUIDv7 of the author
+    std::string authorName;  // 1..200 bytes of UTF-8 without control characters
+    std::string message;     // 1..65536 bytes of UTF-8; tab and newline are the only controls
+};
+inline constexpr std::size_t maxAuthorNameBytes = 200;
+inline constexpr std::size_t maxCommitMessageBytes = 64 * 1024;
+// StorageError(InvalidInput) unless `metadata` follows the rules above.
+void validateCommitMetadata(const CommitMetadata& metadata);
+
+// A revision UUIDv7 and commit time chosen before the revision is written
+// (local Commit), so a retry publishes byte-identical records.
+struct ReservedRevision {
+    RevisionId id;
+    std::uint64_t committedAtMs = 0;
+};
+
 Bytes encodeModelRecord(const ModelRecord& record);
 ModelRecord decodeModelRecord(const Bytes& bytes);
 
@@ -204,6 +224,8 @@ struct RevisionGraphRevision {
     Hash referencesRoot{};
     bool modelIndexed = false;
     std::vector<RevisionGraphParent> parents;
+    CommitMetadata metadata;
+    std::uint64_t committedAtMs = 0;  // Unix epoch ms (UTC)
 };
 
 struct RevisionGraphHead {
@@ -283,9 +305,8 @@ public:
     std::optional<ProjectId> projectId();
 
     // Branches. A repository's first branch is created unborn (no revision,
-    // null HEAD); later branches start at an existing committed revision.
-    // createBranch without a source still writes an empty root revision for
-    // the first branch; new code uses createUnbornBranch (see docs/roadmap.md, VC-01).
+    // null HEAD); later branches start at an existing committed revision
+    // (`from` names the source branch; without it the call is invalid).
     RevisionId createBranch(const ProjectId& project, std::string_view name,
                               std::optional<std::string_view> from = std::nullopt);
     // Return the new branch UUID and fork metadata from the same locked write.
@@ -293,6 +314,10 @@ public:
         const ProjectId& project, std::string_view name,
         std::optional<std::string_view> from = std::nullopt);
     void createUnbornBranch(const ProjectId& project, std::string_view name);
+    // The first branch with an empty first revision. Only for projects that
+    // are not created unborn (see docs/roadmap.md, VC-01).
+    RevisionId createRootBranch(const ProjectId& project, std::string_view name,
+                                  const CommitMetadata& metadata);
     // Clone an unborn branch with its original UUIDv7 into a branchless project.
     // A repeated identical request is safe after a lost acknowledgement.
     // No initial revision, manifest or synthetic fork is created.
@@ -351,20 +376,24 @@ public:
     // Commits. A failed preflight never advances HEAD or publishes a revision.
     // Raw revisions hold opaque values; model revisions hold ModelRecords plus
     // a persistent reverse-reference index and cannot be mixed on one branch.
+    // Every revision records `metadata` and the time it was published.
     RevisionId commit(const ProjectId& project, std::string_view branch,
-                        const std::vector<Change>& changes,
+                        const std::vector<Change>& changes, const CommitMetadata& metadata,
                         std::optional<RevisionId> expectedHead = std::nullopt);
     // Unpinned writes may omit expectedHead. Local Commit passes
     // requireExactHead=true so an explicit null pins an unborn branch instead
-    // of silently accepting a concurrently published first commit.
+    // of silently accepting a concurrently published first commit, and a
+    // reserved revision UUID and commit time, so a retry writes the
+    // identical record.
     RevisionId commitModel(const ProjectId& project, std::string_view branch,
-                             std::vector<ModelChange> changes,
+                             std::vector<ModelChange> changes, const CommitMetadata& metadata,
                              std::optional<RevisionId> expectedHead = std::nullopt,
                              bool requireExactHead = false,
-                             std::optional<RevisionId> reservedRevisionId = std::nullopt);
+                             std::optional<ReservedRevision> reserved = std::nullopt);
     // Low-level revision publication over already stored trees (tests/tools).
     RevisionId writeRevision(const ProjectId& project, const Hash& root,
                                const Hash& referencesRoot, bool modelIndexed,
+                               const CommitMetadata& metadata,
                                const std::vector<RevisionId>& parents = {});
 
     // Reads at an immutable revision, never at a moving branch ref. The raw
@@ -390,8 +419,9 @@ public:
     // Three-way merge. Domain callbacks are pure and execute under the
     // repository lock; both HEAD pins are checked atomically with publication.
     // A conflicting merge leaves both heads and the pack unchanged.
+    // `metadata` describes the merge revision, if one is created.
     MergeResult mergeBranches(const ProjectId& project, std::string_view target,
-                                  std::string_view source,
+                                  std::string_view source, const CommitMetadata& metadata,
                                   std::optional<RevisionId> expectedTarget = std::nullopt,
                                   std::optional<RevisionId> expectedSource = std::nullopt,
                                   const MergeOptions& options = {});
@@ -517,7 +547,8 @@ private:
     RevisionId writeRevisionLocked(const ProjectId& project, const Hash& root,
                                      const Hash& referencesRoot, bool modelIndexed,
                                      const std::vector<RevisionId>& parents,
-                                     std::optional<RevisionId> reservedRevisionId = std::nullopt);
+                                     const CommitMetadata& metadata,
+                                     std::optional<ReservedRevision> reserved = std::nullopt);
     void exportRevisionBundleLocked(const ProjectId& project, std::string_view branch,
                                       std::optional<RevisionId> base, int fd,
                                       BundleLimits limits);
@@ -526,7 +557,8 @@ private:
     std::optional<BranchId> branchIdLocked(std::string_view name);
     BranchCreationResult createBranchLocked(const ProjectId& project, std::string_view name,
                                                 std::optional<std::string_view> from,
-                                                const BranchId& createdId);
+                                                const BranchId& createdId,
+                                                const CommitMetadata* rootMetadata = nullptr);
     BranchCreationResult createBranchAtRevisionLocked(const ProjectId& project,
                                                           std::string_view name,
                                                           std::string_view sourceBranch,

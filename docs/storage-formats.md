@@ -124,14 +124,15 @@ and revision records.
 
 See [model records](model-records.md).
 
-### Revision record (`T` 2)
+### Revision record (`T` 3)
 
-A committed revision is one immutable pack object of exactly
-100 + 48·*p* bytes, *p* = number of parents (0, 1 or 2):
+A committed revision is one immutable pack object: 100 + 48·*p* bytes of
+identity, roots and parents (*p* = number of parents: 0, 1 or 2), followed by
+the commit time, the author and the message.
 
 | Offset | Size | Field |
 |---|---|---|
-| 0 | 2 | `T` `0x02` |
+| 0 | 2 | `T` `0x03` |
 | 2 | 16 | revision UUIDv7 |
 | 18 | 16 | project UUIDv7 |
 | 34 | 32 | model Merkle root (snapshot root) |
@@ -140,12 +141,22 @@ A committed revision is one immutable pack object of exactly
 | 99 | 1 | parent count *p* |
 | 100 + 48·*i* | 16 | parent *i* revision UUIDv7 (target first for a merge) |
 | 116 + 48·*i* | 32 | parent *i* record SHA-256 |
+| *m* = 100 + 48·*p* | 8 | commit time: Unix epoch milliseconds, UTC, not 0 |
+| *m* + 8 | 16 | author UUIDv7 |
+| *m* + 24 | 2 | author name length *a* (1–200) |
+| *m* + 26 | *a* | author name, UTF-8 without control characters |
+| *m* + 26 + *a* | 4 | message length *n* (1–65,536) |
+| *m* + 30 + *a* | *n* | message, UTF-8; tab and newline are the only control characters |
 
-The **record hash** is the SHA-256 of these bytes. Binding every parent's
-record hash makes the record hash commit to the whole ancestry. The record
-carries no author, message or timestamp; the UUIDv7 encodes creation time to
-the millisecond. Branch names and fork provenance are deliberately outside the
-record, so renaming a branch never changes a revision.
+The record ends exactly after the message. The **record hash** is the SHA-256
+of these bytes. Binding every parent's record hash makes the record hash commit
+to the whole ancestry, and the metadata is covered too: author, message and time
+cannot change without changing the revision's identity binding. The commit
+time is the moment the repository published the revision (a local Commit
+reserves it with the operation, so a retry writes the identical record). The
+author is self-reported by the client; nothing authenticates it. Branch names
+and fork provenance are deliberately outside the record, so renaming a branch
+never changes a revision.
 
 ### Revision bindings (`revision-v2/`)
 
@@ -256,13 +267,13 @@ framing: `AOWE` `0x01` (5), payload length (u32), payload, SHA-256 of the
 payload (32). The payload starts with the transaction UUIDv7, which is the
 event's identity.
 
-## Local Commit ledger (`AOWIS-LOCAL-COMMIT-1`)
+## Local Commit ledger (`AOWIS-LOCAL-COMMIT-2`)
 
 `local-commits/<operation-uuidv7>`, one file per Commit operation, kept
 permanently:
 
 ```text
-AOWIS-LOCAL-COMMIT-1
+AOWIS-LOCAL-COMMIT-2
 repository\t<repository-uuidv7>
 project\t<project-uuidv7>
 branch\t<branch-uuidv7>
@@ -270,7 +281,11 @@ draft\t<draft-uuidv7>
 generation\t<expected draft generation>
 expected\t<expected local HEAD revision-uuidv7|->
 reserved\t<reserved revision-uuidv7>
-request-digest\t<SHA-256 of the request>
+committed-at\t<reserved commit time, Unix epoch ms>
+author-id\t<author-uuidv7>
+author-name\t<author name as lowercase hex of its UTF-8 bytes>
+message\t<message as lowercase hex of its UTF-8 bytes>
+request-digest\t<SHA-256 of the request, author and message included>
 payload-digest\t<SHA-256 of request and frozen candidate>
 state\t<pending|succeeded|rejected>
 rejection\t<conflict|invalid-input|not-found|->
@@ -278,6 +293,6 @@ changes\t<count>
 change\t<entity key, 32 hex>\t<AOMD record hex|->
 ```
 
-The `pending` record (with the frozen candidate and reserved revision UUID) is
-fsynced before any revision object is written; the outcome replaces it
-atomically. Behaviour: [working copies](working-copies.md#local-commit).
+The `pending` record (with the frozen candidate, the reserved revision UUID and
+commit time, and the author and message) is fsynced before any revision object
+is written; the outcome replaces it atomically. Behaviour: [working copies](working-copies.md#local-commit).

@@ -24,7 +24,8 @@ Standalone AOWIS builds link the library directly and need no HTTP server.
 
 * **Versioned models.** Every project, branch, revision and draft has a UUIDv7.
   A revision is an immutable whole-model snapshot with zero, one or two
-  parents; SHA-256 binds its content and ancestry. Branches are movable refs
+  parents, an author, a message and its commit time; SHA-256 binds its
+  content, ancestry and metadata. Branches are movable refs
   with a nullable HEAD (a new project starts with an unborn `main` and no
   revision) and immutable fork provenance.
 * **Storage.** One append-only object pack per project with a rebuildable
@@ -102,12 +103,15 @@ Repository repository("/path/to/repository");
 const ProjectId project = ProjectId::generate();
 repository.createUnbornBranch(project, "main");   // no revision yet
 
+// Every revision records who made it and why; the repository adds the time.
+const CommitMetadata metadata{*UuidV7::parse("018f84c0-0000-7000-8000-00000000a001"),
+                              "Alice", "Import the town network"};
 // The first revision comes from a model commit (or a draft's local Commit);
 // later hydraulic saves pin the expected HEAD.
-const RevisionId first = repository.commitModel(project, "main", changes,
+const RevisionId first = repository.commitModel(project, "main", changes, metadata,
                                                 std::nullopt, true);
 const RevisionId next = hydraulic::saveHydraulicNetwork(
-    repository, project, "main", network, first);
+    repository, project, "main", network, first, metadata);
 ```
 
 Engine failures are `StorageError` with a `StorageErrorKind`; service failures

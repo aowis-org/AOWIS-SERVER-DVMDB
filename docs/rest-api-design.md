@@ -23,7 +23,18 @@ All routes are under `/dvmdb/v1`. There is no authentication.
 * **Nullable HEADs.** An unborn branch has `null` as its HEAD everywhere. In
   write preconditions a missing field is invalid; it is not a synonym for
   `null`.
-* **64-bit counters** (draft generations, lease expiry) are decimal strings.
+* **64-bit counters** (draft generations, lease expiry, commit times) are
+  decimal strings.
+* **Authorship.** Every request that creates a revision carries
+  `"author": {"id": "<uuidv7>", "name": "<display name>"}` and a `"message"`:
+  model commits, network saves and edits, merges and hydraulic merges, and
+  `POST /projects` without `unborn`. Merges may omit the message
+  (`"Merge <source> into <target>"`), project creation too
+  (`"Create project <name>"`). Names are 1–200 bytes of UTF-8 without control
+  characters, messages 1–65,536 bytes of UTF-8 where tab and newline are the
+  only control characters; anything else is `400`. Revision reads, history and
+  the revision graph return `author`, `message` and `committedAtMs`, the
+  server's publication time. The author is self-reported; nothing verifies it.
 * **Optimistic concurrency.** Every write that moves a branch names the
   expected HEAD(s); every draft write names the lease session, fencing token
   and expected generation. A mismatch is `409 Conflict` and changes nothing.
@@ -57,7 +68,8 @@ All routes are under `/dvmdb/v1`. There is no authentication.
 ### Known deviations
 
 * `POST /projects` without `unborn: true` still creates `main` with an empty
-  first revision, which the contract does not want for new projects. Clients
+  first revision (which then needs an `author`), which the contract does not
+  want for new projects. Clients
   should always send `unborn: true` (it is required with a caller-chosen `id`).
 * `PATCH …/branches/{branch}` (rename) and `POST …/model-commits` require a
   non-null `expectedHead`, so they do not work on an unborn branch. The first

@@ -65,7 +65,7 @@ repository; nothing below is accepted end to end with the GUI yet.
 | **VC-06** Fetch and clone | verified full/incremental bundles (CLI, HTTP), identity-preserving project and unborn-branch provisioning | Fetch into a personal repository that updates tracking records; pinned remote reads |
 | **VC-07** Publish | — | object transfer plus conditional shared-HEAD move, remote branch provisioning, Publish ledger and status |
 | **VC-08** reconciliation | generic and hydraulic three-way merges with pinned HEADs and explicit choices | compare/reconcile of a draft against a new HEAD; recursive merge bases (criss-cross histories are refused) |
-| **VC-09** history and graph | pinned paged revision DAG of all branches, revision records with parent bindings | inspector fields for local vs shared HEADs |
+| **VC-09** history and graph | pinned paged revision DAG of all branches, revision records with parent bindings, author, message and commit time on every revision | inspector fields for local vs shared HEADs |
 | **VC-10** GUI workflows | — | GUI and Standalone/HTTP parity for all actions |
 | **VC-11** qualification | crash, ENOSPC, SIGKILL, recovery, stress and backup suites; opt-in QEMU power-cut and HTTP soak drills | format freeze; repeated power-cut and soak runs on the final build; GUI acceptance evidence |
 
@@ -77,7 +77,7 @@ repository; nothing below is accepted end to end with the GUI yet.
 2. DVMDB: run the complete hydraulic-network validator on the candidate inside
    `commitWorkingCopy`.
 3. DVMDB: HTTP routes for local Commit and its status, with the same operation
-   ID semantics.
+   ID semantics and the author and message in the request.
 4. GUI: Commit action; prove the first commit of an unborn branch end to end.
 5. Then Fetch (VC-06) and Publish (VC-07).
 

@@ -27,8 +27,9 @@ catalogue lock lets only one of them open it.
 * Projects, branches, revisions and drafts have **UUIDv7** identities. Names
   are display data and never storage keys.
 * A revision is an immutable record binding its UUID, project, the model trie
-  root, the reverse-reference trie root and zero, one or two ordered parents
-  together with each parent's record SHA-256. The record's SHA-256 therefore
+  root, the reverse-reference trie root, zero, one or two ordered parents
+  together with each parent's record SHA-256, and its author (UUIDv7 and
+  name), message and commit time. The record's SHA-256 therefore
   commits to the whole ancestry; SHA-256 is integrity, UUIDv7 is identity.
 * A revision UUID is resolved through a write-once binding to its record hash,
   so a lookup is O(1): one binding read, one record read, parent bindings

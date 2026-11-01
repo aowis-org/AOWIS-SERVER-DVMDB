@@ -4,6 +4,7 @@
 // records (including invalid ones), their UUID->SHA bindings and branch
 // records. Simulates on-disk damage that bypassed the normal write path.
 
+#include "commit_metadata_fixture.h"
 #include "aowis/dvmdb/native_store.h"
 
 #include <filesystem>
@@ -42,12 +43,12 @@ inline void repointBranch(Repository& repository, const std::filesystem::path& r
                         toHex(digest) + "\n");
 }
 
-// Canonical revision record layout (frozen 'T',2), written without the
+// Canonical revision record layout ('T',3), written without the
 // encoder's validation so tests can store records the encoder would refuse.
 inline Bytes forgedRevisionRecord(const RevisionId& id, const ProjectId& project, const Hash& root,
                                   const Hash& references, std::uint8_t modelFlag,
                                   const std::vector<std::pair<RevisionId, Hash>>& parents) {
-    Bytes bytes{'T', 2};
+    Bytes bytes{'T', 3};
     for (const UuidV7* uuid : {&id.uuid(), &project.uuid()})
         bytes.insert(bytes.end(), uuid->bytes.begin(), uuid->bytes.end());
     bytes.insert(bytes.end(), root.begin(), root.end());
@@ -58,6 +59,7 @@ inline Bytes forgedRevisionRecord(const RevisionId& id, const ProjectId& project
         bytes.insert(bytes.end(), parent.first.uuid().bytes.begin(), parent.first.uuid().bytes.end());
         bytes.insert(bytes.end(), parent.second.begin(), parent.second.end());
     }
+    appendRecordMetadata(bytes);
     return bytes;
 }
 

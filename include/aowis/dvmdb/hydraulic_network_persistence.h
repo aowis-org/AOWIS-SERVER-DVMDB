@@ -134,23 +134,27 @@ struct HydraulicMergeSelections {
     std::vector<HydraulicFieldChoice> fields;
     std::vector<HydraulicObjectChoice> objects;
 };
+// `metadata` describes the merge revision, if one is created.
 MergeResult mergeHydraulicBranches(Repository& repository, const ProjectId& project,
                                        std::string_view target, std::string_view source,
-                                       const HydraulicMergeSelections& selections);
+                                       const HydraulicMergeSelections& selections,
+                                       const CommitMetadata& metadata);
 
 // Canonical project-scoped UUIDv7 hydraulic operations. All reads pin an
 // immutable revision; saves/edits compare expected HEAD during atomic commit.
 // Whitelisted scalar, physical, catalogue, topology, dependent-reference and
 // structural membership edits use revision-pinned indexed validation. Other
 // edits fall back to complete canonical network validation and replacement.
-// No SHA-revision fallback is permitted.
+// Every revision records the caller's `metadata` (author and message).
 RevisionId saveHydraulicNetwork(Repository& repository, const ProjectId& project,
                                   std::string_view branch, const NetworkHydraulic& network,
-                                  const RevisionId& expectedHead);
+                                  const RevisionId& expectedHead,
+                                  const CommitMetadata& metadata);
 RevisionId editHydraulicNetwork(Repository& repository, const ProjectId& project,
                                   std::string_view branch, const QUuid& networkUuid,
                                   const std::vector<HydraulicEntityChange>& changes,
                                   const RevisionId& expectedHead,
+                                  const CommitMetadata& metadata,
                                   HydraulicEditDiagnostics* diagnostics = nullptr);
 std::optional<NetworkHydraulic> loadHydraulicNetworkAtRevision(
     Repository& repository, const ProjectId& project, const RevisionId& revisionId,

@@ -1,3 +1,4 @@
+#include "commit_metadata_fixture.h"
 #include "aowis/dvmdb/project_service.h"
 
 #include <algorithm>
@@ -13,6 +14,8 @@
 #include <unistd.h>
 #include <utility>
 #include <vector>
+
+using aowis::dvmdb::test::commitMetadata;
 
 namespace {
 using aowis::dvmdb::Key;
@@ -155,19 +158,19 @@ void exercise(const std::string& python, const std::string& script,
     {
         ProjectService service(source);
         for (int index = 0; index < 4; ++index) {
-            const ProjectInfo info = service.createProject("Current project " + std::to_string(index));
+            const ProjectInfo info = service.createProject("Current project " + std::to_string(index), commitMetadata());
             projects.push_back(info);
             const ProjectId project = *ProjectId::parse(info.id);
             const RevisionId initial = service.head(info.id, "main");
             const RevisionId fork = service.createBranchAtRevision(info.id, "feature", "main", initial);
             require(fork == initial, "fork invented a revision");
             const ModelRecord first = model(100, 16, static_cast<std::uint8_t>(index));
-            historical.push_back(service.commitModel(info.id, "main", {{key(0x21), first}}, initial));
+            historical.push_back(service.commitModel(info.id, "main", {{key(0x21), first}}, commitMetadata(), initial));
             const ModelRecord feature = model(101, 19, static_cast<std::uint8_t>(index + 1));
-            (void)service.commitModel(info.id, "feature", {{key(0x31), feature}}, initial);
+            (void)service.commitModel(info.id, "feature", {{key(0x31), feature}}, commitMetadata(), initial);
             const std::size_t length = index == 3 ? 2 * 1024 * 1024 : 32 + static_cast<std::size_t>(index);
             const ModelRecord latest = model(102, length, static_cast<std::uint8_t>(index + 2));
-            (void)service.commitModel(info.id, "main", {{key(0x21), latest}}, historical.back());
+            (void)service.commitModel(info.id, "main", {{key(0x21), latest}}, commitMetadata(), historical.back());
             service.withRepository(info.id, [&](Repository& repository) {
                 require(repository.getModelAtRevision(project, historical.back(), key(0x21))->payload == first.payload,
                         "historical immutable model snapshot changed");
@@ -188,7 +191,7 @@ void exercise(const std::string& python, const std::string& script,
         const ProjectId project = *ProjectId::parse(projects[0].id);
         const RevisionId expected = service.head(projects[0].id, "main");
         (void)service.commitModel(projects[0].id, "main",
-                                  {{key(0x61), model(103, 18, 0x59)}}, expected);
+                                  {{key(0x61), model(103, 18, 0x59)}}, commitMetadata(), expected);
         service.withRepository(projects[0].id, [&](Repository& repository) {
             const std::optional<ModelRecord> old =
                 repository.getModelAtRevision(project, historical[0], key(0x21));

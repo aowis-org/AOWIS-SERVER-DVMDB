@@ -1,3 +1,4 @@
+#include "commit_metadata_fixture.h"
 #include "aowis/dvmdb/native_store.h"
 #include "aowis/dvmdb/storage_error.h"
 
@@ -8,6 +9,8 @@
 #include <iostream>
 #include <stdexcept>
 #include <vector>
+
+using aowis::dvmdb::test::commitMetadata;
 
 namespace {
 namespace fs = std::filesystem;
@@ -39,7 +42,7 @@ void run() {
     WorkingDirectory work;
     const ProjectId project = ProjectId::generate();
     Repository source(work.root / "source");
-    const RevisionId initial = source.createBranch(project, "main");
+    const RevisionId initial = source.createRootBranch(project, "main", commitMetadata());
     // Distinct incompressible-looking raw model values. The old fixed 64 MiB
     // *bundle* ceiling must not reject a bounded, disk-backed transfer.
     std::vector<Change> changes;
@@ -51,7 +54,7 @@ void run() {
             value[position] = static_cast<std::uint8_t>((position * 131U + index * 17U) & 255U);
         changes.push_back(Change{key, std::move(value)});
     }
-    const RevisionId head = source.commit(project, "main", changes, initial);
+    const RevisionId head = source.commit(project, "main", changes, commitMetadata(), initial);
     changes.clear();
     const fs::path fullPath = work.root / "full.bundle";
     {

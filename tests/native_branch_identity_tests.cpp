@@ -10,6 +10,8 @@
 #include <vector>
 #include <unistd.h>
 
+using aowis::dvmdb::test::commitMetadata;
+
 namespace {
 using aowis::dvmdb::BranchId;
 using aowis::dvmdb::Bytes;
@@ -174,7 +176,7 @@ void testService() {
         aowis::dvmdb::ModelRecord record;
         record.kind = 1;
         record.payload = {2};
-        const RevisionId head = service.commitModel(project, "main", {{key, record}});
+        const RevisionId head = service.commitModel(project, "main", {{key, record}}, commitMetadata());
         service.renameBranch(project, "main", "develop", head);
         check(service.branchId(project, "develop")->toString() == id,
               "service rename changed branch UUID");

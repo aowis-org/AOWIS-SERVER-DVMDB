@@ -1,3 +1,4 @@
+#include "commit_metadata_fixture.h"
 #include "aowis/dvmdb/native_store.h"
 
 #include <httplib.h>
@@ -29,6 +30,8 @@
 #include <unistd.h>
 #include <vector>
 #include <fcntl.h>
+
+using aowis::dvmdb::test::commitMetadata;
 
 namespace {
 namespace fs = std::filesystem;
@@ -104,7 +107,10 @@ HttpResponse request(unsigned short port, const std::string& method, const std::
 }
 
 std::string project(unsigned short port, const std::string& name) {
-    const HttpResponse reply = request(port, "POST", "/dvmdb/v1/projects", "{\"name\":\"" + name + "\"}");
+    // The project's first revision records the test author (default message).
+    const HttpResponse reply = request(port, "POST", "/dvmdb/v1/projects",
+        "{\"name\":\"" + name + "\",\"author\":{\"id\":\"" +
+        aowis::dvmdb::test::testAuthorId().toString() + "\",\"name\":\"stress test\"}}");
     require(reply.status == 201, "unable to create project: " + reply.body);
     return field(reply.body, "id");
 }
@@ -258,7 +264,7 @@ std::string makeBundle(const fs::path& root, const std::string& projectText, std
     Repository repository(sourcePath);
     const std::optional<ProjectId> project = ProjectId::parse(projectText);
     require(project.has_value(), "invalid project UUID for stress fixture");
-    const RevisionId initial = repository.createBranch(*project, "main");
+    const RevisionId initial = repository.createRootBranch(*project, "main", commitMetadata());
     std::vector<Change> changes;
     changes.reserve(1024);
     for (unsigned index = 0; index < 1024; ++index) {
@@ -275,7 +281,7 @@ std::string makeBundle(const fs::path& root, const std::string& projectText, std
         }
         changes.push_back(Change{key, std::move(value)});
     }
-    expected = repository.commit(*project, "main", changes, initial).toString();
+    expected = repository.commit(*project, "main", changes, commitMetadata(), initial).toString();
     const fs::path output = root / "fixture.bundle";
     const int fd = ::open(output.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     require(fd >= 0, "unable to create revision-v2 fixture");
