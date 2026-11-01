@@ -1734,7 +1734,8 @@ void ProjectService::provisionUnbornBranch(std::string_view projectId,
 
 BranchId ProjectService::createUnbornBranch(std::string_view projectId,
                                             std::string_view name,
-                                            std::optional<std::string_view> branchId) {
+                                            std::optional<std::string_view> branchId,
+                                            const BranchMetadata& metadata) {
     const std::optional<ProjectId> project = ProjectId::parse(projectId);
     if (!project || !validBranchName(name))
         throw ProjectError(ProjectErrorKind::InvalidInput,
@@ -1749,7 +1750,7 @@ BranchId ProjectService::createUnbornBranch(std::string_view projectId,
     std::optional<BranchId> result;
     withRepository(projectId, [&](Repository& repository) {
         result = translated<BranchId>([&]() {
-            return repository.createUnbornBranch(*project, name, identity);
+            return repository.createUnbornBranch(*project, name, identity, metadata);
         });
     });
     return *result;

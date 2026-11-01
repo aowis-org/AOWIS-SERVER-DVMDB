@@ -1087,7 +1087,46 @@ struct StoredBranch {
     std::optional<RevisionId> revision;
     std::optional<BranchId> originBranchId; // Immutable creation provenance, not a revision parent.
     std::optional<RevisionId> forkRevisionId; // Immutable historical fork point; never a DAG edge.
+    BranchMetadata metadata;
 };
+
+// Metadata remains part of the atomically published branch reference, so
+// creation, HEAD advancement and reopening cannot silently discard it.
+void validateBranchMetadata(const BranchMetadata& metadata) {
+    require(Err::InvalidInput, metadata.description.size() <= 512,
+            "branch description exceeds 512 UTF-8 bytes");
+    require(Err::InvalidInput, metadata.tags.size() <= 12,
+            "branch has more than 12 tags");
+    std::set<std::string> unique;
+    for (const std::string& tag : metadata.tags) {
+        require(Err::InvalidInput, !tag.empty() && tag.size() <= 32 &&
+                tag.find_first_of("\n\r\0", 0, 3) == std::string::npos &&
+                unique.insert(tag).second, "invalid or duplicate branch tag");
+    }
+}
+
+std::string metadataHex(std::string_view data) {
+    constexpr char digits[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(data.size() * 2);
+    for (const unsigned char byte : data) {
+        result.push_back(digits[byte >> 4]);
+        result.push_back(digits[byte & 15]);
+    }
+    return result;
+}
+
+std::string metadataUnhex(std::string_view data) {
+    require(Err::Corruption, data.size() % 2 == 0, "invalid branch metadata hex");
+    std::string result;
+    result.reserve(data.size() / 2);
+    for (std::size_t i = 0; i < data.size(); i += 2) {
+        const int a = nibbleHex(data[i]);
+        const int b = nibbleHex(data[i + 1]);
+        result.push_back(static_cast<char>((a << 4) | b));
+    }
+    return result;
+}
 
 std::vector<StoredBranch> readStoredBranches(const std::filesystem::path& repository) {
     const std::filesystem::path heads = repository / "refs" / "heads";
@@ -1110,7 +1149,7 @@ std::vector<StoredBranch> readStoredBranches(const std::filesystem::path& reposi
         try {
             struct stat st{};
             systemCall(::fstat(fd, &st) == 0, "stat UUID branch record");
-            require(Err::Corruption, S_ISREG(st.st_mode) && st.st_size >= 21 && st.st_size <= 320,
+            require(Err::Corruption, S_ISREG(st.st_mode) && st.st_size >= 21 && st.st_size <= 4096,
                     "invalid UUID branch record file type or length");
             bytes.resize(static_cast<std::size_t>(st.st_size));
             std::size_t offset = 0;
@@ -1129,6 +1168,57 @@ std::vector<StoredBranch> readStoredBranches(const std::filesystem::path& reposi
         constexpr std::string_view originPrefix = "AOWIS-BRANCH-3\n";
         constexpr std::string_view unbornPrefix = "AOWIS-BRANCH-4\n";
         constexpr std::string_view forkPrefix = "AOWIS-BRANCH-5\n";
+        constexpr std::string_view metadataPrefix = "AOWIS-BRANCH-6\n";
+        if (bytes.starts_with(metadataPrefix)) {
+            std::vector<std::string> lines;
+            std::size_t offset = metadataPrefix.size();
+            while (offset < bytes.size()) {
+                const std::size_t end = bytes.find('\n', offset);
+                require(Err::Corruption, end != std::string::npos,
+                        "truncated branch metadata record");
+                lines.push_back(bytes.substr(offset, end - offset));
+                offset = end + 1;
+            }
+            require(Err::Corruption, lines.size() == 7,
+                    "invalid branch metadata record fields");
+            try { checkBranch(lines[0]); }
+            catch (const StorageError&) { throw StorageError(Err::Corruption, "invalid stored branch name"); }
+            const std::optional<RevisionId> revision = lines[1] == "-"
+                ? std::nullopt : RevisionId::parse(lines[1]);
+            const std::optional<BranchId> origin = lines[2] == "-"
+                ? std::nullopt : BranchId::parse(lines[2]);
+            const std::optional<RevisionId> fork = lines[3] == "-"
+                ? std::nullopt : RevisionId::parse(lines[3]);
+            require(Err::Corruption, (lines[1] == "-" || revision.has_value()) &&
+                (lines[2] == "-" || (origin && *origin != *parsed)) &&
+                (lines[3] == "-" || (fork && origin)) &&
+                (revision.has_value() == (lines[4] != "-")) &&
+                names.insert(lines[0]).second, "invalid branch metadata references");
+            Hash head{};
+            if (revision) {
+                require(Err::Corruption, lines[4].size() == 64, "invalid metadata HEAD hash");
+                try { head = fromHex(lines[4]); }
+                catch (const StorageError&) { throw StorageError(Err::Corruption, "invalid metadata HEAD hash"); }
+                require(Err::Corruption, !isZero(head), "zero committed HEAD hash");
+            }
+            BranchMetadata metadata;
+            try {
+                metadata.description = metadataUnhex(lines[5]);
+                std::size_t start = 0;
+                while (start < lines[6].size()) {
+                    const std::size_t end = lines[6].find(',', start);
+                    const std::size_t count = end == std::string::npos ? std::string::npos : end - start;
+                    metadata.tags.push_back(metadataUnhex(std::string_view(lines[6]).substr(start, count)));
+                    if (end == std::string::npos) break;
+                    start = end + 1;
+                }
+                validateBranchMetadata(metadata);
+            } catch (const StorageError&) {
+                throw StorageError(Err::Corruption, "invalid stored branch metadata");
+            }
+            result.push_back(StoredBranch{*parsed, lines[0], head, revision, origin, fork, metadata});
+            continue;
+        }
         const bool hasFork = bytes.starts_with(forkPrefix);
         const bool isUnborn = bytes.starts_with(unbornPrefix);
         const bool hasOrigin = hasFork || bytes.starts_with(originPrefix);
@@ -1217,7 +1307,23 @@ void publishStoredBranch(const std::filesystem::path& repository,
     // branch; BRANCH-5 also the immutable fork revision.
     require(Err::Internal, branch.revision.has_value() == !isZero(branch.head),
             "branch record needs both a UUIDv7 HEAD and its digest, or neither");
-    const std::string payload = !branch.revision
+    validateBranchMetadata(branch.metadata);
+    const bool withMetadata = !branch.metadata.description.empty() || !branch.metadata.tags.empty();
+    std::string taggedPayload;
+    if (withMetadata) {
+        taggedPayload = "AOWIS-BRANCH-6\n" + branch.name + "\n" +
+            (branch.revision ? branch.revision->toString() : std::string("-")) + "\n" +
+            (branch.originBranchId ? branch.originBranchId->toString() : std::string("-")) + "\n" +
+            (branch.forkRevisionId ? branch.forkRevisionId->toString() : std::string("-")) + "\n" +
+            (branch.revision ? toHex(branch.head) : std::string("-")) + "\n" +
+            metadataHex(branch.metadata.description) + "\n";
+        for (std::size_t index = 0; index < branch.metadata.tags.size(); ++index) {
+            if (index) taggedPayload += ',';
+            taggedPayload += metadataHex(branch.metadata.tags[index]);
+        }
+        taggedPayload += '\n';
+    }
+    const std::string payload = withMetadata ? taggedPayload : !branch.revision
         ? std::string("AOWIS-BRANCH-4\n") + branch.name + "\n-\n-\n"
         : branch.originBranchId
         ? (branch.forkRevisionId ? std::string("AOWIS-BRANCH-5\n") : std::string("AOWIS-BRANCH-3\n")) +
@@ -2972,7 +3078,7 @@ MergeResult Repository::mergeBranches(const ProjectId& project,
         require(Err::Internal, stored && stored->revision == result.targetBefore,
                 "target branch disappeared before fast forward");
         publishStoredBranch(this->directory_, StoredBranch{stored->id, stored->name,
-                hashRevisionRecord(sourceHead), sourceHead.id, stored->originBranchId, stored->forkRevisionId}, false);
+                hashRevisionRecord(sourceHead), sourceHead.id, stored->originBranchId, stored->forkRevisionId, stored->metadata}, false);
         result.status = MergeStatus::FastForward;
         result.resultHead = sourceHead.id;
         return result;
@@ -3332,7 +3438,7 @@ MergeResult Repository::mergeBranches(const ProjectId& project,
             "target branch disappeared before merge publication");
     publishStoredBranch(this->directory_, StoredBranch{stored->id, stored->name,
                                                         saved->recordHash, merged,
-                                                        stored->originBranchId, stored->forkRevisionId}, false);
+                                                        stored->originBranchId, stored->forkRevisionId, stored->metadata}, false);
     result.status = MergeStatus::Merged;
     result.resultHead = merged;
     return result;
@@ -3422,7 +3528,8 @@ RevisionRecord Repository::branchRevisionLocked(const ProjectId& project,
 }
 
 BranchId Repository::createUnbornBranch(const ProjectId& project, std::string_view name,
-                                         std::optional<BranchId> identity) {
+                                         std::optional<BranchId> identity, const BranchMetadata& metadata) {
+    validateBranchMetadata(metadata);
     std::lock_guard<std::mutex> guarded(this->mutex_);
     ScopedFileLock locked(this->lockFd_);
     refreshIndex();
@@ -3435,15 +3542,15 @@ BranchId Repository::createUnbornBranch(const ProjectId& project, std::string_vi
     const std::vector<StoredBranch> branches = readStoredBranches(this->directory_);
     for (const StoredBranch& stored : branches) {
         if (identity && stored.id == *identity) {
-            require(Err::Conflict, stored.name == name,
-                    "branch UUID already belongs to another name");
+            require(Err::Conflict, stored.name == name && stored.metadata == metadata,
+                    "branch UUID already belongs to another name or metadata");
             return stored.id; // idempotent retry, even if HEAD advanced
         }
         require(Err::Conflict, stored.name != name, "branch name already exists");
     }
     const BranchId created = identity.value_or(BranchId::generate());
     publishStoredBranch(this->directory_, StoredBranch{
-        created, std::string(name), Hash{}, std::nullopt, std::nullopt, std::nullopt}, true);
+        created, std::string(name), Hash{}, std::nullopt, std::nullopt, std::nullopt, metadata}, true);
     return created;
 }
 
@@ -3583,7 +3690,7 @@ RevisionGraphPage Repository::revisionGraph(
     } else {
         for (const StoredBranch& branch : readStoredBranches(this->directory_)) {
             page.heads.push_back({branch.id, branch.name, branch.revision,
-                                  branch.head, branch.originBranchId, branch.forkRevisionId});
+                                  branch.head, branch.originBranchId, branch.forkRevisionId, branch.metadata});
             require(Err::LimitExceeded, page.heads.size() <= maxBranches,
                     "graph exceeds branch snapshot limit");
         }
@@ -3653,7 +3760,7 @@ void Repository::renameBranch(const ProjectId& project, std::string_view previou
     const std::optional<StoredBranch> existing = findStoredBranch(this->directory_, previous);
     require(Err::Internal, existing && existing->revision, "branch disappeared");
     publishStoredBranch(this->directory_, StoredBranch{existing->id, std::string(renamed),
-                                 existing->head, existing->revision, existing->originBranchId, existing->forkRevisionId}, false);
+                                 existing->head, existing->revision, existing->originBranchId, existing->forkRevisionId, existing->metadata}, false);
 }
 
 RevisionId Repository::createBranch(const ProjectId& project, std::string_view name,
@@ -3733,7 +3840,7 @@ std::optional<RevisionGraphHead> Repository::branchById(const ProjectId& project
             recordHash = stored.head;
         }
         return RevisionGraphHead{stored.id, stored.name, revision, recordHash,
-                                   stored.originBranchId, stored.forkRevisionId};
+                                   stored.originBranchId, stored.forkRevisionId, stored.metadata};
     }
     return std::nullopt;
 }
@@ -3836,7 +3943,7 @@ RevisionId Repository::commit(const ProjectId& project, std::string_view branch,
     require(Err::Internal, stored && stored->id == starting->id && stored->revision == (previous ? std::optional<RevisionId>(previous->id) : std::nullopt) && (previous || isZero(stored->head)),
             "branch changed during commit");
     publishStoredBranch(this->directory_, StoredBranch{stored->id, stored->name,
-                            updated->recordHash, newId, stored->originBranchId, stored->forkRevisionId}, false);
+                            updated->recordHash, newId, stored->originBranchId, stored->forkRevisionId, stored->metadata}, false);
     return newId;
 }
 
@@ -3898,7 +4005,7 @@ RevisionId Repository::commitModel(const ProjectId& project, std::string_view br
             "model branch HEAD changed during commit");
     publishStoredBranch(this->directory_, StoredBranch{
         branchRecord->id, branchRecord->name, saved->recordHash, revisionId,
-        branchRecord->originBranchId, branchRecord->forkRevisionId}, false);
+        branchRecord->originBranchId, branchRecord->forkRevisionId, branchRecord->metadata}, false);
     return revisionId;
 }
 
@@ -5130,7 +5237,8 @@ RevisionBundleImport Repository::importRevisionBundle(const ProjectId& expectedP
     publishStoredBranch(this->directory_, StoredBranch{*branchId, std::string(localBranch),
                                                         tipHash, *incoming,
                                                         existing ? existing->originBranchId : originBranchId,
-                                                        existing ? existing->forkRevisionId : forkRevisionId},
+                                                        existing ? existing->forkRevisionId : forkRevisionId,
+                                                        existing ? existing->metadata : BranchMetadata{}},
                         !existing);
     if (profile != nullptr) profile->publicationMs = elapsedImportMs(publishStart, ImportClock::now());
     finishProfile();

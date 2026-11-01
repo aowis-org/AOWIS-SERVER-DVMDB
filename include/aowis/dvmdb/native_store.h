@@ -228,6 +228,12 @@ struct RevisionGraphRevision {
     std::uint64_t committedAtMs = 0;  // Unix epoch ms (UTC)
 };
 
+struct BranchMetadata {
+    std::string description;
+    std::vector<std::string> tags;
+    bool operator==(const BranchMetadata&) const = default;
+};
+
 struct RevisionGraphHead {
     BranchId branchId;
     std::string name;
@@ -235,6 +241,7 @@ struct RevisionGraphHead {
     Hash recordHash{};
     std::optional<BranchId> originBranchId; // Immutable creation provenance.
     std::optional<RevisionId> forkRevisionId; // Exact immutable fork point, not a revision parent.
+    BranchMetadata metadata;
 };
 
 struct RevisionGraphCursor {
@@ -316,7 +323,8 @@ public:
     // Add an independent, unborn branch to this project's repository. The
     // caller-supplied UUID makes POST retries idempotent; no revision is made.
     BranchId createUnbornBranch(const ProjectId& project, std::string_view name,
-                                 std::optional<BranchId> identity = std::nullopt);
+                                 std::optional<BranchId> identity = std::nullopt,
+                                 const BranchMetadata& metadata = {});
     // The first branch with an empty first revision. Only for projects that
     // are not created unborn (see docs/roadmap.md, VC-01).
     RevisionId createRootBranch(const ProjectId& project, std::string_view name,

@@ -179,7 +179,8 @@ public:
     // Project-level creation: no source branch or revision. UUIDv7 ID optional
     // for native callers, required for retry-safe HTTP clients.
     BranchId createUnbornBranch(std::string_view projectId, std::string_view name,
-                                  std::optional<std::string_view> branchId = std::nullopt);
+                                  std::optional<std::string_view> branchId = std::nullopt,
+                                  const BranchMetadata& metadata = {});
     RevisionGraphRevision revision(std::string_view projectId, const RevisionId& id);
     void renameBranch(std::string_view projectId, std::string_view previous,
                       std::string_view renamed, const RevisionId& expectedHead);

@@ -551,6 +551,13 @@ paths:
                 id: {type: string, format: uuid, description: Caller-chosen UUIDv7 of the new branch (retry-safe creation)}
                 name: {type: string}
                 unborn: {type: boolean, description: Set true for an independent unborn branch without an origin}
+                description: {type: string, description: Optional branch description for unborn creation (max 512 UTF-8 bytes)}
+                tags:
+                  type: array
+                  description: Optional branch tags for unborn creation (maximum 12, each at most 32 UTF-8 bytes)
+                  maxItems: 12
+                  uniqueItems: true
+                  items: {type: string}
                 fromBranchId: {type: string, format: uuid, description: Required for a derived branch; forbidden when unborn is true}
                 revision: {type: string, format: uuid, description: Historical revision UUIDv7 reachable from the source; forbidden when unborn is true}
       responses:
@@ -569,6 +576,10 @@ paths:
                     description: Exact committed fork revision UUIDv7, or null for an unborn branch
                   branch: {type: string, description: Newly created branch name}
                   branchId: {type: string, format: uuid, description: Persistent UUIDv7 of the new branch}
+                  description: {type: string, description: Stored branch description (unborn creation only)}
+                  tags:
+                    type: array
+                    items: {type: string}
                   originBranchId:
                     oneOf:
                       - {type: string, format: uuid}

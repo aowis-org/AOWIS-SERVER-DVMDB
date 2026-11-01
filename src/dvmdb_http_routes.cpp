@@ -482,6 +482,37 @@ QByteArray graphSignature(const QByteArray& payload) {
     return QMessageAuthenticationCode::hash(payload, graphTokenKey(), QCryptographicHash::Sha256);
 }
 
+QJsonArray branchTagsJson(const BranchMetadata& metadata) {
+    QJsonArray result;
+    for (const std::string& tag : metadata.tags)
+        result.append(QString::fromStdString(tag));
+    return result;
+}
+
+BranchMetadata parseBranchMetadata(const QJsonObject& object) {
+    BranchMetadata metadata;
+    if (object.contains("description")) {
+        requireInput(object.value("description").isString(), "branch description must be a string");
+        metadata.description = object.value("description").toString().toUtf8().toStdString();
+        requireInput(metadata.description.size() <= 512, "branch description exceeds 512 UTF-8 bytes");
+    }
+    if (object.contains("tags")) {
+        requireInput(object.value("tags").isArray(), "branch tags must be an array");
+        const QJsonArray tags = object.value("tags").toArray();
+        requireInput(tags.size() <= 12, "too many branch tags");
+        std::set<std::string> unique;
+        for (const QJsonValue& value : tags) {
+            requireInput(value.isString(), "branch tag must be a string");
+            const std::string tag = value.toString().toUtf8().toStdString();
+            requireInput(!tag.empty() && tag.size() <= 32 &&
+                         tag.find_first_of("\n\r") == std::string::npos &&
+                         unique.insert(tag).second, "invalid or duplicate branch tag");
+            metadata.tags.push_back(tag);
+        }
+    }
+    return metadata;
+}
+
 // One branch HEAD as the graph page and the branch-by-UUID route report it.
 QJsonObject branchHeadJson(const RevisionGraphHead& head) {
     return QJsonObject{{"branch", QString::fromStdString(head.name)},
@@ -495,7 +526,9 @@ QJsonObject branchHeadJson(const RevisionGraphHead& head) {
             : QJsonValue(QJsonValue::Null)},
         {"forkRevisionId", head.forkRevisionId
             ? QJsonValue(revisionIdString(*head.forkRevisionId))
-            : QJsonValue(QJsonValue::Null)}};
+            : QJsonValue(QJsonValue::Null)},
+        {"description", QString::fromStdString(head.metadata.description)},
+        {"tags", branchTagsJson(head.metadata)}};
 }
 
 // Graph cursors pin both logical identities and content digests. Reuse the
@@ -514,7 +547,9 @@ QString graphToken(const RevisionGraphCursor& cursor, const std::string& project
                                     : QJsonValue(QJsonValue::Null),
                                 head.forkRevisionId
                                     ? QJsonValue(revisionIdString(*head.forkRevisionId))
-                                    : QJsonValue(QJsonValue::Null)});
+                                    : QJsonValue(QJsonValue::Null),
+                                QString::fromStdString(head.metadata.description),
+                                branchTagsJson(head.metadata)});
     }
     const QByteArray payload = QJsonDocument(QJsonObject{
         {"v", 2}, {"project", QString::fromStdString(projectId)},
@@ -562,12 +597,13 @@ RevisionGraphCursor readGraphToken(const std::string& encoded,
     for (const QJsonValue& value : heads) {
         requireInput(value.isArray(), "invalid UUIDv7 graph head");
         const QJsonArray head = value.toArray();
-        requireInput((head.size() == 5 || head.size() == 6) && head.at(0).isString() &&
+        requireInput((head.size() == 5 || head.size() == 6 || head.size() == 8) && head.at(0).isString() &&
                      head.at(1).isString() &&
                      ((head.at(2).isString() && head.at(3).isString()) ||
                       (head.at(2).isNull() && head.at(3).isNull())) &&
                      (head.at(4).isNull() || head.at(4).isString()) &&
-                     (head.size() == 5 || head.at(5).isNull() || head.at(5).isString()),
+                     (head.size() == 5 || head.at(5).isNull() || head.at(5).isString()) &&
+                     (head.size() != 8 || (head.at(6).isString() && head.at(7).isArray())),
                      "invalid UUIDv7 graph head fields");
         const std::optional<BranchId> branch = BranchId::parse(head.at(0).toString().toStdString());
         requireInput(branch.has_value(), "invalid graph branch UUIDv7");
@@ -576,7 +612,7 @@ RevisionGraphCursor readGraphToken(const std::string& encoded,
             origin = BranchId::parse(head.at(4).toString().toStdString());
             requireInput(origin && *origin != *branch, "invalid branch creation origin");
         }
-        requireInput(head.size() != 6 || head.at(5).isNull() ||
+        requireInput(head.size() < 6 || head.at(5).isNull() ||
                      (origin.has_value() && head.at(2).isString()),
                      "fork revision requires a source and committed branch HEAD");
         cursor.heads.push_back({*branch, head.at(1).toString().toStdString(),
@@ -584,9 +620,12 @@ RevisionGraphCursor readGraphToken(const std::string& encoded,
                   ? std::optional<RevisionId>(parseRevisionId(head.at(2).toString().toStdString()))
                   : std::nullopt,
               head.at(3).isString() ? parseHash(head.at(3).toString().toStdString()) : Hash{},
-              origin, head.size() == 6 && head.at(5).isString()
+              origin, head.size() >= 6 && head.at(5).isString()
                   ? std::optional<RevisionId>(parseRevisionId(head.at(5).toString().toStdString()))
-                  : std::nullopt});
+                  : std::nullopt,
+              head.size() == 8
+                  ? parseBranchMetadata(QJsonObject{{"description", head.at(6)}, {"tags", head.at(7)}})
+                  : BranchMetadata{}});
     }
     return cursor;
 }
@@ -1747,7 +1786,7 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 [&service](const httplib::Request& request, httplib::Response& response) {
         guarded(response, [&]() {
             const QJsonObject object = parseBody(request, maxJsonSmallBytes);
-            requireKeys(object, {"name", "fromBranchId", "revision", "id", "unborn"});
+            requireKeys(object, {"name", "fromBranchId", "revision", "id", "unborn", "description", "tags"});
             const std::string project = pathParam(request, "id");
             const std::string name = requiredString(object, "name");
             if (object.contains("unborn")) {
@@ -1758,16 +1797,21 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                                  "unborn branch cannot have an origin revision");
                     const std::string branchId = object.contains("id")
                         ? requiredString(object, "id") : BranchId::generate().toString();
+                    const BranchMetadata metadata = parseBranchMetadata(object);
                     const BranchId created = service.createUnbornBranch(
-                        project, name, branchId);
+                        project, name, branchId, metadata);
                     return Reply{201, QJsonObject{
                         {"id", QJsonValue(QJsonValue::Null)},
                         {"branch", QString::fromStdString(name)},
                         {"branchId", QString::fromStdString(created.toString())},
                         {"originBranchId", QJsonValue(QJsonValue::Null)},
-                        {"forkRevisionId", QJsonValue(QJsonValue::Null)}}};
+                        {"forkRevisionId", QJsonValue(QJsonValue::Null)},
+                        {"description", QString::fromStdString(metadata.description)},
+                        {"tags", branchTagsJson(metadata)}}};
                 }
             }
+            requireInput(!object.contains("description") && !object.contains("tags"),
+                         "branch metadata is supported for unborn creation only");
             // The source is addressed by its UUIDv7, never by its renamable
             // name (DG-01). `id` is the new branch's caller-chosen UUIDv7:
             // repeating the request returns the original creation instead of
