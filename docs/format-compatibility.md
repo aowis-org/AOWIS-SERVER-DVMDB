@@ -7,6 +7,16 @@ An unknown/obsolete format is rejected explicitly, never silently guessed,
 relabelled, or treated as an empty repository. There is no legacy decoder,
 implicit migration or format-conversion acceptance gate.
 
+Every persisted record and bundle starts with a marker or magic; the byte
+layouts are in [storage formats](storage-formats.md). Names such as
+`revision-v2/`, `AOWREV21`–`24` and the `T`/`RID`/`PRJ` version byte `2` are
+the **current** format, not a compatibility layer. When a format changes, the
+marker changes and the old one is rejected (for example, single-file
+`AOWIS-WORKING-COPY-3` drafts are refused since drafts became directories).
+`aowis-dvmdb-format-compatibility-tests` keeps a frozen pre-release pack and
+its bundles (`tests/fixtures/pack-20261024`) to prove they are refused without
+modifying anything.
+
 ## Invariants
 
 - Projects, branches, revisions and draft working copies have UUIDv7 identities;

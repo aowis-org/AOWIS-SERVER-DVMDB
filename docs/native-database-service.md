@@ -1,79 +1,125 @@
-# DVMDB native project service and HTTP daemon
+# Running the DVMDB HTTP service
 
-The DVMDB service hosts independent project repositories and exposes the
-same logical contract through native C++ and REST. See
-[version-control semantics](version-control-semantics.md),
-[REST contract](rest-api-design.md) and
-[repository architecture](architecture.md). The native core remains Qt-free;
-HTTP transport does not invent different project/branch/revision identities.
+`aowis-server-dvmdb` serves every project of one storage root over plain HTTP
+on a configurable address and port. It is a thin adapter over
+`aowis::dvmdb::ProjectService`; the routes and payloads are in the
+[OpenAPI contract](dvmdb-http-api.yaml) and the [REST guide](rest-api-design.md).
+For backups, recovery and maintenance see [operations](operations.md).
 
-## Service topology
+**There is no TLS, authentication or authorization.** Keep the listener on
+localhost or a trusted network.
 
-- One database root contains a durable project catalogue; each UUIDv7
-  project has its own versioned repository and per-project operation control.
-- Each repository stores immutable content-addressed objects, canonical
-  revision records and UUIDv7 branch references. User-visible names are
-  metadata, not filesystem identifiers.
-- Project creation is staged and published atomically. A new project has
-  only its **unborn** `main` branch and no committed revision.
-- The service distinguishes read-only history and snapshot queries from
-  private working-copy editing sessions and conditional writes.
-- The daemon must enforce bounded operations, safe shutdown, restart
-  recovery, durable object/ref publication and explicit error classes.
+## Quick start
 
-## Lifecycle entry points
+```bash
+./compile_linux.sh                 # build Release and start the server in the foreground
+curl -fsS http://127.0.0.1:8755/dvmdb/v1/ready      # {"status":"ready"}
+curl -fsS http://127.0.0.1:8755/dvmdb/v1/projects   # {"projects":[]} on a new root
+```
 
-| Operation | Contract |
+`./compile_linux.sh --build-only` builds without starting anything. The script
+starts the server only if configuration, the full build and the server target
+all succeeded, so a failed build never falls back to an older binary.
+`SIGINT`/`SIGTERM` closes the listener and lets running requests finish.
+
+## Storage root
+
+The root is chosen in this order:
+
+1. `--data-root DIR`
+2. `[storage] root=` in the INI file
+3. `./aowis-dvmdb-data`, if it exists in the working directory
+4. `$XDG_DATA_HOME/aowis-dvmdb/` (normally `~/.local/share/aowis-dvmdb/`)
+
+The server prints `DVMDB storage root: <path>` at startup. Roots are never
+moved or merged automatically; if both 3 and 4 exist, 3 wins and the other is
+reported. An empty project list usually means the wrong root, not lost data.
+Only one process can own a root (`catalogue.lock`); a second server, or an
+embedded library instance on the same root, fails to start with a conflict.
+
+## Configuration
+
+Options on the command line override the INI file (`-c FILE`, default
+`aowis-server-dvmdb.ini` in the working directory).
+
+| INI key | Option | Default | Range / meaning |
+|---|---|---|---|
+| `[server] bind` | `-b`, `--bind` | `127.0.0.1` | numeric IPv4 or IPv6 address |
+| `[server] port` | `-p`, `--port` | `8755` | 1–65535 |
+| `[server] worker_threads` | `--worker-threads` | `8` | 1–256 HTTP workers; up to 16 queued connections per worker, further ones are closed |
+| `[server] max_pending_per_project` | `--max-pending-per-project` | half the workers | 1–workers; operations of one project that may run or wait; beyond that 503 `busy` |
+| `[storage] root` | `-d`, `--data-root` | see above | storage root |
+| `[storage] max_internal_scratch_mib` | `--max-internal-scratch-mib` | `1024` | 1–16384; process-wide cap on import/export/verification scratch; beyond that 503 `scratch_busy` |
+| `[sync] max_transfer_mib` | `--sync-max-mib` | `32` | 1–256; largest bundle upload or download |
+| `[sync] max_objects` | `--sync-max-objects` | `100000` | 1–1,000,000 objects per bundle |
+| `[sync] max_object_mib` | `--sync-max-object-mib` | `8` | 1–64, at most `max_transfer_mib` |
+| `[sync] max_inflight_mib` | `--sync-max-inflight-mib` | max(128, 2 × transfer) | transfer..4096; sum of reserved transfer staging over all projects; beyond that 503 `staging_busy` |
+| `[logging] file` | `--log-file` | stderr | append diagnostics to a file |
+
+Invalid values stop the server with exit code 2.
+
+### Request limits
+
+| Request | Limit |
 |---|---|
-| Create project | Return project UUIDv7, `main` branch UUIDv7, `headRevisionId: null` |
-| List projects/branches | Return UUIDv7 identities, UTF-8 names, nullable committed HEADs and immutable branch fork provenance |
-| Read revision | Return immutable revision UUIDv7, ordered parent UUIDs, canonical record SHA-256 and snapshot roots |
-| Full revision graph | Return every branch HEAD and reachable revision, with consistent pagination and both merge parents |
-| Checkout | Return private working-copy UUIDv7, owner/session, target branch and pinned base revision/null |
-| Edit working copy | Change only owned mutable draft data; do not move a committed HEAD |
-| Commit | Require exact expected branch HEAD/null, complete model validation, idempotency; publish immutable revision and HEAD atomically |
-| Create branch | Persist source branch and exact immutable fork revision, create no revision |
-| Merge | Expected source/target HEADs, genuine one-/two-parent history, domain-safe resolution |
-| Replicate | Preserve UUIDs, nullable refs, origin/fork metadata, SHA-256 and complete ancestry |
+| JSON bodies for projects, branches, role, drafts, leases, release, discard, initialize-network | 16 KiB |
+| Merge requests | 256 KiB |
+| Draft saves, network saves, entity edits, model commits | 8 MiB |
+| Bundle upload | `max_transfer_mib` |
+| Changes per batch, events per Save, merge choices | 128 |
+| History, revision graph, draft list page | 1–1000 items |
+| Entity ID list | 10,000; diff 1,000 differences |
 
-A working copy may remain stale when someone else commits to its target
-branch; the server must reject its stale commit with a conflict and preserve
-its uncommitted changes. HEAD is committed/immutable, not the working state.
+JSON bodies must declare `Content-Length` (411 otherwise) and are rejected with
+413 before the body is read when they are too large. Read timeout 30 s, write
+timeout 60 s, keep-alive 10 s.
 
-## HTTP behavior
+## Deployment
 
-The `/dvmdb/v1` service exposes health/readiness, project and branch
-catalogue, immutable revision lookup, full-history pagination, hydraulic
-snapshot reads, working-copy lifecycle, conditional commit, merge and
-identity-preserving replication. The concrete route/schema declarations in
-[OpenAPI](dvmdb-http-api.yaml) must be synchronized with the operations
-specified here as they are implemented. No endpoint is presumed implemented
-solely because it is part of this normative contract.
+`deploy/` contains:
 
-For HTTP errors, distinguish bad input, missing IDs, permission refusal,
-`409 Conflict` for a stale expected HEAD, semantic validation errors,
-resource exhaustion, service unavailability and storage corruption. An
-omitted expected HEAD must be rejected; explicit `null` is valid for an
-unborn first commit. A write response lost after publication is resolved
-with its idempotency key or authoritative branch status, not blindly retried.
+* `aowis-server-dvmdb.ini` — production settings (`/var/lib/aowis-dvmdb`);
+  install it as `/etc/aowis/aowis-server-dvmdb.ini`.
+* `aowis-server-dvmdb.service` — a hardened systemd unit (dedicated user,
+  `StateDirectory=aowis-dvmdb`, read-only system, private tmp, `SIGTERM` with
+  60 s stop timeout, journald logging).
+* `nginx-aowis-server-dvmdb.conf` — an optional TLS-terminating reverse proxy
+  for `/dvmdb/`. Keep `client_max_body_size` equal to `max_transfer_mib`. TLS
+  protects the connection only; it does not add access control.
 
-## Hydraulic persistence
+## Health
 
-The DVMDB hydraulic adapter validates canonical model/entity encoding,
-UUID references, membership and topology. Immutable revision reads pin one
-committed snapshot. A full-network save or indexed edit is prepared in a
-**working copy**, not by changing the committed HEAD's record. All domain
-invariants must be checked on the complete candidate network before a
-conditional commit or merge publication.
+| Route | Meaning |
+|---|---|
+| `GET /dvmdb/v1/health` | the process answers (`{"status":"ok"}`) |
+| `GET /dvmdb/v1/ready` | the catalogue can be read (`{"status":"ready"}`); 503 when the service refuses work, e.g. after an uncertain publication that requires a restart |
+| `GET /dvmdb/v1/repository` | the root's repository UUIDv7 |
 
-## Operations and deployment
+When the service opens a project and finds a torn pack tail, it logs how many
+bytes were set aside in `recovered-pack-tails/`.
 
-Run native repository/service operations against a known, explicitly
-configured storage root. Avoid starting the daemon against an accidental
-empty directory after changing the working directory. Protect the root and
-service logs with operating-system permissions; do not expose an unauthenticated
-plain-HTTP service to untrusted networks. Repository compaction and offline
-backup require coordinated access so that snapshots, refs and published
-objects are mutually consistent. See [operations](operations.md),
-[verification](repository-verification.md) and
-[durability qualification](durability-qualification.md).
+## Errors
+
+Every error response is `{"error": {"code", "message"}}`:
+
+| Status | `code` | Cause |
+|---|---|---|
+| 400 | `invalid_request` | malformed or unknown fields, invalid UUIDs or names, validation failure |
+| 404 | `not_found` | unknown project, branch, revision, draft, network or route |
+| 409 | `conflict` | stale expected HEAD, generation, lease or token; ID reused for something else; divergent import |
+| 409 | (merge body) | a merge with unresolved conflicts returns the merge result with status 409 |
+| 411 | `length_required` | JSON body without `Content-Length` |
+| 413 | `limit_exceeded`, `transfer_too_large` | body, batch, result or draft limit exceeded |
+| 414 / 431 | `uri_too_long`, `header_too_large` | request line or headers too large |
+| 503 | `busy` | the project's operation queue is full (`Retry-After: 1`) |
+| 503 | `staging_busy` | all bundle-transfer staging is reserved (`Retry-After: 1`) |
+| 503 | `scratch_busy` | the internal scratch cap is reached (`Retry-After: 1`) |
+| 503 | `unavailable` | a repository must be reopened, or the service needs a restart |
+| 507 | `insufficient_storage` | the filesystem reported ENOSPC or EDQUOT |
+| 500 | `internal_error` | corruption, I/O or internal failure |
+
+4xx messages describe the problem. 5xx messages are generic; the details
+(paths, errno, corruption) go only to the service log. A 5xx or a lost
+response after a write may mean the write happened: read the branch HEAD or the
+draft generation before retrying, and use caller-chosen IDs where a route
+offers them.

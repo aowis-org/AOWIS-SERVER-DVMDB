@@ -24,10 +24,10 @@ appends. The native engine still needs independently tested recovery, index
 integrity, backups and replica semantics. Those properties, rather than the
 label of a storage backend, are the useful comparison criteria.
 
-The older experimental block format is intentionally **not supported** by
-current repository open. Migrate pre-release data with a compatible old
-binary via a portable bundle, then import it into a fresh pack repository.
-The pack is the sole production-intended physical implementation here.
+The older experimental block format is intentionally **not supported**: a
+current build refuses to open it, and bundles written by older builds are
+refused as well, so pre-release data is recreated rather than migrated. The
+pack is the only physical format.
 
 **Benchmark evidence boundary:** No adequately controlled numerical
 pack-versus-block or SQLite/PostgreSQL-versus-native performance comparison
@@ -143,40 +143,30 @@ with independent projects rather than a global operation mutex. A developer
 Linux Release test on October 24, 2026 completed a five-minute soak over
 **three projects**, with **7,516 successful imports and 7,516 exports**, zero
 admission-limit 503 responses, and **12 ms worst health request latency**
-reported by the harness. The most recent operator-run suite passed **44/44 tests in Debug and Release**.
-These figures describe the tested workload, not guaranteed throughput/latency
+reported by the harness. These figures describe the tested workload, not guaranteed throughput/latency
 under arbitrary contention. Longer soaks and realistic hardware/slow-client
 workloads remain necessary.
 
-## Historical format regression baseline
+## Pre-release format rejection
 
-An October 24, 2026 **frozen native pack** is retained with the actual
-published branch references, original revision SHA-256 identities, a complete
-bundle at an early revision, an incremental bundle and two full branch
-bundles. Unlike a producer/consumer test against the same binary, the
-regression uses immutable bytes emitted by an earlier build; it requires
-later binaries to rebuild the derived index, recover historical values,
-import historical transfers, preserve revision identities and reject a
-corrupted bundle. This protects a concrete pre-release compatibility
-baseline, not every legacy storage implementation or a public long-term
-format guarantee. See [format compatibility](format-compatibility.md).
+An October 24, 2026 pack and its bundles (`tests/fixtures/pack-20261024`) are
+kept as immutable bytes from an earlier build. They predate UUIDv7 revisions
+and UUID-keyed branch records. Since the SHA-256 revision
+engine was removed (October 31, 2026), `aowis-dvmdb-format-compatibility-tests`
+uses them to prove the opposite of compatibility: the current build must
+refuse the old repository and every old bundle with an explicit error, without
+modifying the destination. The same test exercises a full current-format
+round trip (two branches, incremental delta, idempotent re-import, alias
+rejection, reopen). See [format policy](format-compatibility.md).
 
-The frozen-format regression passes as part of the **44/44 Debug and Release**
-operator-run suite. The QEMU evidence checker independently validates the
-structure of the operator's eight ext4/XFS cut reports.
+## Service-root restore qualification
 
-## Service-root restore and format upgrade qualification
-
-The regression harness also has a four-project offline upgrade/restore drill:
-it installs two frozen earlier-build pack repositories under current catalogue
-identities, leaves their derived indexes absent, and mixes them with two
-independently written repositories (one with over 1 MiB of user data). It
-performs verified offline backup, independent restore, checks project IDs,
-branch histories and payloads, writes into a restored historical pack, then
-performs a second verified backup and restore. The original pre-upgrade root
-is not rewritten by this test. This guards real migration workflows against
-cross-project omissions; it is **not** evidence that an older executable can
-read new writes or that all historic experimental formats are supported.
+`aowis-dvmdb-upgrade-restore-tests` builds four projects (divergent branches,
+one with more than 1 MiB of model data), takes a verified offline backup,
+restores it independently, checks project IDs, branch UUIDs, ancestry and
+payloads, commits into the restored root, then backs up and restores that new
+state again. It guards the backup tooling against cross-project omissions; it
+is **not** evidence that an older executable can read new writes.
 
 ## What these results do not prove
 
@@ -422,13 +412,12 @@ are separate release qualification tasks.
 
 ## Current test baseline
 
-On October 26, 2026 the operator clean-rebuilt the renamed
-**AOWIS-SERVER-DVMDB** project and reported **49/49 CTest tests passing
-in both Debug and Release**. The standalone optimized Release server also
-built successfully. This includes
-the four-project historical-format upgrade/restore drill and the offline
-resource-monitor regression. The eight-cut QEMU/KVM ext4/XFS drill was run
-separately from CTest.
+On October 31, 2026, after removing the SHA-256 revision engine and the
+review fixes (O(1) revision lookup, linear reachability, draft locking and
+storage rework), the operator reported **66/66 CTest tests passing** in the
+Qt-enabled build; the Qt-free build runs 57 suites, which also pass under
+ASan/UBSan. The eight-cut QEMU/KVM ext4/XFS drill is run separately from
+CTest and has not been repeated since October 24.
 
 ## Canonical hydraulic workload qualification boundary
 
@@ -472,7 +461,11 @@ complete per-run JSON/CSV and executable hashes in this exchange, so the
 cross-size analyzer's executable-identity and detailed evidence checks remain
 to be run on the saved result directories.
 
-The current full-network read (~11.25 seconds) and merged-revision operation
+These series were measured **before** the October 31 changes, when every
+revision lookup still re-verified the whole ancestry; they should be repeated
+before being quoted for the current build.
+
+The full-network read (~11.25 seconds) and merged-revision operation
 (~20.34 seconds) at 100K pipes are **whole-network operations**, not indexed
 single-entity read or scalar edit latencies. Before changing the storage
 engine, examine the separately recorded targeted-read, indexed-edit, diff,

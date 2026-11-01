@@ -1,86 +1,84 @@
-# DVMDB REST API design contract
+# REST API guide
 
-The HTTP service is a transport for the same project/history semantics as
-the embedded native API. See
-[version-control semantics](version-control-semantics.md),
-[branch records](uuidv7-branch-ref-format.md) and
-[revision integrity](uuidv7-identity-format-v2.md).
+The HTTP API carries the same project, branch, revision and draft semantics as
+the native C++ API ([version-control contract](version-control-semantics.md)).
+This page explains the conventions and which resources exist; the exact
+request and response schemas are in the [OpenAPI contract](dvmdb-http-api.yaml),
+which a CTest (`aowis-dvmdb-http-uuidv7-route-contract-tests`) keeps in step
+with the registered routes. Running the server, limits and the error table:
+[service guide](native-database-service.md).
 
-## Identity and representation
+All routes are under `/dvmdb/v1`. There is no authentication.
 
-Project, branch, committed revision and private working-copy resource IDs
-are UUIDv7. Human names are UTF-8 metadata; hashes are SHA-256 integrity
-fields. REST must not use branch names as permanent IDs or hashes as
-revision IDs. Branch responses include `headRevisionId` (nullable),
-`originBranchId` and `forkRevisionId`. Commit responses include immutable
-revision UUID, parent UUIDs, record hash and committed snapshot identity.
+## Conventions
 
-## Personal repository versus shared source
+* **Identities are UUIDv7**, in canonical lowercase text: projects, branches,
+  revisions, drafts, operations, sessions, fencing tokens. Hashes are 64
+  lowercase hex digits and are integrity data, never identifiers.
+* **Branches** are addressed by name in most routes (names may contain spaces
+  and any valid UTF-8; percent-encode them in paths). Requests that create or
+  refer to branches durably use the branch UUIDv7 (`branchId`,
+  `fromBranchId`); `GET /projects/{id}/branch-ids/{branchId}` returns a
+  branch's current name and HEAD.
+* **Nullable HEADs.** An unborn branch has `null` as its HEAD everywhere. In
+  write preconditions a missing field is invalid; it is not a synonym for
+  `null`.
+* **64-bit counters** (draft generations, lease expiry) are decimal strings.
+* **Optimistic concurrency.** Every write that moves a branch names the
+  expected HEAD(s); every draft write names the lease session, fencing token
+  and expected generation. A mismatch is `409 Conflict` and changes nothing.
+* **Retry-safe creation.** Projects (with `unborn: true`), branches and drafts
+  accept a caller-chosen UUIDv7 `id`. Repeating the request returns the same
+  `201` answer instead of a second object; the same `id` for anything else is
+  `409`. This covers lost responses and transports that resend a POST on their
+  own (Qt before 6.10 resends a POST whose connection closed before the status
+  line, including Qt 6.8 in Debian 13).
+* **Strict JSON.** Unknown fields and repeated query parameters are rejected.
+  JSON bodies must send `Content-Length`.
+* **Pinned reads.** Reads that span several objects use one immutable
+  revision. Hydraulic reads accept `?revision=` (which must be the branch HEAD
+  or one of its ancestors) so several calls see the same snapshot.
 
-The same REST transport supports different *repository roles*: private
-working DVMDB (durable drafts and **local** commits) and shared project
-DVMDB (published branch refs). This is an explicit connection/authorization
-choice, not a silently inferred role. See
-[private working repositories](private-working-repositories.md).
+## Resources
 
-## Operations
+| Area | Routes | Notes |
+|---|---|---|
+| Service | `GET /health`, `GET /ready` | liveness, catalogue readiness |
+| Repository | `GET /repository`, `GET /repository/tracking`, `POST /repository/role` | identity, role, remote tracking ([details](repository-tracking.md)) |
+| Projects | `GET`/`POST /projects`, `GET /projects/{id}`, `POST /projects/clone-target` | create with `unborn: true` for an unborn `main` (see below) |
+| Branches | `GET`/`POST /projects/{id}/branches`, `PATCH /projects/{id}/branches/{branch}`, `GET …/branches/{branch}/head`, `GET /projects/{id}/branch-ids/{branchId}`, `POST /projects/{id}/unborn-checkout` | create from a source branch UUID (at HEAD or a reachable revision), rename with expected HEAD |
+| History | `GET …/branches/{branch}/history`, `GET /projects/{id}/revisions/{revision}`, `GET /projects/{id}/revision-graph`, `GET /projects/{id}/diff` | first-parent history, one revision, the pinned paged DAG of all branches, record-level diff |
+| Model commits | `POST …/branches/{branch}/model-commits` | generic record batch with reference checks only |
+| Merges | `POST /projects/{id}/merges`, `POST /projects/{id}/hydraulic-merges` | both need both expected HEADs; the hydraulic route validates the whole network and accepts field/object choices |
+| Hydraulic networks | `POST …/branches/{branch}/networks`, `GET …/networks/{networkId}`, `GET …/networks/{networkId}/entities`, `GET …/entities/{entityId}`, `POST …/networks/{networkId}/edits` | whole-network save, pinned reads, indexed edits ([details](native-hydraulic-network.md)) |
+| Bundles | `GET`/`POST …/branches/{branch}/bundle` | full or incremental (`?base=`) export, verified import ([details](offline-repository-synchronization.md)) |
+| Drafts | `GET`/`POST /working-copies`, `GET /working-copies/{id}`, `…/lease`, `…/save`, `…/save-events`, `…/initialize-network`, `…/release`, `…/discard`, `GET …/networks/{networkId}` | private repositories only ([details](working-copies.md)) |
 
-- List/create projects. New project creates an unborn `main` branch and
-  zero committed revisions.
-- List/get branches, creation provenance and committed HEADs, including
-  explicit null HEADs.
-- Create branch from a finalized revision with exact source branch/fork
-  UUIDs. Creation itself must not create a revision.
-- Read immutable revisions, snapshots, diffs and a pinned paginated full
-  project history including both parents of merge revisions.
-- Create/open a private working copy for a user/session, pinned to a
-  committed base UUID or explicit null for the unborn initial state.
-- Edit/validate that private working state without changing a committed HEAD.
-- Commit **locally** in a personal DVMDB using required exact expected local
-  HEAD/null, validated model state and an idempotency key.
-- Fetch immutable objects and source remote-tracking state; Publish/Push
-  with required exact expected shared HEAD/null, fast-forward validation,
-  idempotency and durable remote publication.
-- Compare/reconcile stale working copies; merge branches using explicit
-  expected source and target heads.
+### Known deviations
 
-## Errors and concurrency
+* `POST /projects` without `unborn: true` still creates `main` with an empty
+  first revision, which the contract does not want for new projects. Clients
+  should always send `unborn: true` (it is required with a caller-chosen `id`).
+* `PATCH …/branches/{branch}` (rename) and `POST …/model-commits` require a
+  non-null `expectedHead`, so they do not work on an unborn branch. The first
+  revision of an unborn branch comes from a local Commit of a draft.
 
-A concurrent local HEAD advance or a stale shared Publish returns **409
-Conflict** with the current affected HEAD. Draft state and already-successful
-local commits remain intact; no implicit retry, rebase or overwrite occurs. Validation failures, missing identities,
-permission failures, unavailable source state and ambiguous transport
-failures have distinct machine-readable outcomes. An omitted expected
-HEAD field is an invalid request, not a synonym for a first commit with
-expected null. A timed-out commit must be safely queryable by operation ID
-or idempotency key before retry.
+## Not built yet
 
-### Retry-safe creation and branch identity
+These operations are part of the contract but have no route yet; nothing
+should assume they exist:
 
-Clients choose the UUIDv7 of what they create (project with `unborn: true`,
-branch, private draft) and send it as `id`. The same request repeated returns
-the same `201` answer instead of creating a second object or failing with
-"already exists"; the id reused for anything else is `409`. This covers lost
-responses and transports that resend a request on their own (Qt before 6.10
-resends a POST whose connection closed before the status line, including Qt
-6.8 in Debian 13). Branches in requests are addressed by UUIDv7
-(`fromBranchId`, `branchId`); `GET /projects/{id}/branch-ids/{branchId}`
-returns a branch's current name and HEAD for name-addressed routes, whose
-results the client then verifies by identity (e.g. the bundle header).
+* local Commit of a draft and its status lookup (native
+  `commitWorkingCopy` / `localCommitStatus` exist);
+* Fetch and Publish between a personal and a shared repository, including
+  branch provisioning on the remote and Publish status lookup;
+* registering remotes and recording tracking observations over HTTP;
+* reconcile/compare of a stale draft against a new HEAD.
 
-The server validates canonical UUIDs, hashes, complete model references,
-all ancestry edges and branch fork metadata before durable ref publication.
-Native and REST publish equivalent outcomes and verification fields.
+## Replication and security notes
 
-## Replication and security
-
-Full/incremental transfers preserve UUIDv7 identity, nullable HEADs,
-immutable branch provenance, parent bindings and SHA-256 hashes. Private
-uncommitted working copies are not automatically exported as history.
-Authentication/authorization must restrict draft access by owner/session
-and protect commit/branch mutations; transport security is separate from
-revision integrity. Neither UUIDv7 nor SHA-256 is a permission mechanism.
-
-The machine-readable OpenAPI file must be kept synchronized with this
-contract when implementing the corresponding endpoints; never claim an
-unimplemented route exists solely because it is specified here.
+Bundles preserve branch and revision UUIDs, nullable HEADs, fork provenance and
+all integrity hashes; drafts are never part of a bundle. Bundle hashes prove
+integrity, not who produced the bundle or that they may change the project.
+Neither UUIDv7 nor SHA-256 is a permission mechanism; access control is a
+separate future design ([security backlog](security-permissions-design.md)).

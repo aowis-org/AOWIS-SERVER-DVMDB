@@ -1,8 +1,13 @@
 openapi: 3.1.0
 info:
   title: AOWIS DVMDB Service API
-  version: 2.0.0
-  description: UUIDv7-only HTTP project, branch, revision, hydraulic persistence, semantic merging, and AOWREV21/22 and provenance-aware AOWREV23/24 full/incremental bundle transfer.
+  version: 1.0.0-pre
+  description: |
+    DVMDB HTTP API: projects, branches, immutable revisions, hydraulic
+    persistence and merges, revision bundles, repository identity and
+    private drafts. All identities are UUIDv7; SHA-256 values are integrity
+    data. No authentication. Conventions: docs/rest-api-design.md; errors and
+    limits: docs/native-database-service.md.
 servers:
   - url: http://127.0.0.1:8755/dvmdb/v1
 paths:
@@ -30,8 +35,8 @@ paths:
     get:
       operationId: getRepositoryTracking
       description: |
-        Read-only VC-03 repository role, remote registry and observed tracking
-        refs. An absent tracking entry is distinct from an entry with a null
+        Repository role, remote registry and observed tracking refs
+        (read-only). An absent tracking entry is distinct from an entry with a null
         observed HEAD (unborn). Endpoint/UUID are configuration, not
         authentication. No branch HEAD is modified by this endpoint.
       responses:
@@ -97,10 +102,10 @@ paths:
         '503': {description: Catalogue unavailable}
   /working-copies:
     get:
-      operationId: listPrivateWorkingCopies
+      operationId: listWorkingCopies
       description: |
-        List persisted private draft metadata in draft-UUID order (candidate
-        overlays omitted from this listing). No fencing token is returned.
+        List draft metadata in draft-UUID order (no candidate, no journal;
+        eventCount is included). No fencing token is returned.
         Paged: pass the previous page's nextCursor as `after`.
       parameters:
         - {name: limit, in: query, required: false, schema: {type: integer, minimum: 1, maximum: 1000, default: 100}}
@@ -110,7 +115,7 @@ paths:
         '200': {description: 'workingCopies (each with UUIDv7 IDs, nullable baseRevision and string generation) and nextCursor (draft UUIDv7, or null on the last page)'}
         '400': {description: Invalid limit, cursor, project or unknown query parameter}
     post:
-      operationId: createPrivateWorkingCopy
+      operationId: createWorkingCopy
       description: |
         Create an uncommitted draft at the exact current HEAD of a local private
         repository. The branch is addressed by UUIDv7. An unborn branch requires
@@ -139,17 +144,17 @@ paths:
     parameters:
       - {name: draftId, in: path, required: true, schema: {type: string, format: uuid}}
     get:
-      operationId: getPrivateWorkingCopy
-      description: Return saved draft candidate model changes, lease holder metadata, pinned base and generation; never reveal the fencing token.
+      operationId: getWorkingCopy
+      description: Return the draft's pinned base, generation, lease holder and expiry, candidate overlay (`changes`) and MODEL event journal (`events`, `eventCount`); never the fencing token.
       responses:
-        '200': {description: Working-copy metadata and full candidate overlay}
+        '200': {description: Working-copy metadata, full candidate overlay and event journal}
         '404': {$ref: '#/components/responses/NotFound'}
   /working-copies/{draftId}/networks/{networkId}:
     parameters:
       - {name: draftId, in: path, required: true, schema: {type: string, format: uuid}}
       - {name: networkId, in: path, required: true, schema: {type: string, format: uuid}}
     get:
-      operationId: hydratePrivateHydraulicDraftNetwork
+      operationId: getWorkingCopyNetwork
       description: |
         Read one canonical NetworkHydraulic aggregate from a consistent saved
         draft candidate generation over its immutable pinned base. The server
@@ -165,7 +170,7 @@ paths:
     parameters:
       - {name: draftId, in: path, required: true, schema: {type: string, format: uuid}}
     post:
-      operationId: acquirePrivateWorkingCopyLease
+      operationId: acquireWorkingCopyLease
       description: Acquire or reacquire an exclusive expiring writer lease, rotating the fencing UUIDv7. No automatic takeover until expiry/release.
       requestBody:
         required: true
@@ -185,7 +190,7 @@ paths:
     parameters:
       - {name: draftId, in: path, required: true, schema: {type: string, format: uuid}}
     post:
-      operationId: initializeUnbornDraftHydraulicNetwork
+      operationId: initializeWorkingCopyNetwork
       description: |
         Create the first empty hydraulic network as server-owned manifest data
         in an untouched private unborn draft. Requires the live fenced writer
@@ -215,7 +220,7 @@ paths:
     parameters:
       - {name: draftId, in: path, required: true, schema: {type: string, format: uuid}}
     post:
-      operationId: savePrivateWorkingCopyEditEvents
+      operationId: saveWorkingCopyEvents
       description: |
         Atomically publish MODEL edit events and candidate model changes in the
         same durable draft update. Idempotent replay of the immediately prior
@@ -259,15 +264,15 @@ paths:
                       collectionIndex: {type: integer, minimum: 0, maximum: 17}
                       inserted: {type: boolean}
       responses:
-        '200': {description: Durable candidate and event journal; exact event UUIDs preserved}
+        '200': {description: 'Small acknowledgement {id, generation (decimal string), eventCount (total events in the journal), acceptedEventIds (this Save''s events)}. Sent after the events are appended and the candidate is stored durably; a replay of the previous identical request returns the same acknowledgement.'}
         '400': {description: 'Malformed event frame, duplicate edit, invalid model change, or events that do not describe the candidate (a before-image differs from the draft state, or a candidate record is not the final after-image)'}
         '409': {description: Conflicting generation, event UUID or writer lease}
-        '413': {description: 'Event journal (4096 events) or candidate (20000 changes) is full; a local Commit empties both'}
+        '413': {description: 'Event journal (4096 events or 8 MiB) or candidate (20000 changes or 8 MiB) is full; nothing is written. A local Commit empties both'}
   /working-copies/{draftId}/save:
     parameters:
       - {name: draftId, in: path, required: true, schema: {type: string, format: uuid}}
     post:
-      operationId: savePrivateWorkingCopyChanges
+      operationId: saveWorkingCopyChanges
       description: |
         Transactionally merge 1..128 model changes into the private candidate.
         The session, live fencing token and exact expected generation are
@@ -302,7 +307,7 @@ paths:
     parameters:
       - {name: draftId, in: path, required: true, schema: {type: string, format: uuid}}
     post:
-      operationId: releasePrivateWorkingCopyLease
+      operationId: releaseWorkingCopyLease
       requestBody:
         required: true
         content:
@@ -321,7 +326,7 @@ paths:
     parameters:
       - {name: draftId, in: path, required: true, schema: {type: string, format: uuid}}
     post:
-      operationId: discardPrivateWorkingCopy
+      operationId: discardWorkingCopy
       description: |
         Remove a draft for good. Fenced like a Save (live lease holder, token,
         current generation). Committed revisions and local Commit records are
@@ -362,9 +367,10 @@ paths:
     post:
       operationId: createProject
       description: |
-        By default creates a project with a committed initial main revision
-        for backward compatibility. Set unborn:true to create main with a
+        With unborn:true (what clients should always send) creates main with a
         durable UUIDv7 branch identity, explicit null HEAD and zero revisions.
+        Without it, main still gets an empty first revision; that deviation
+        from the version-control contract will be removed.
         A caller-chosen `id` (requires unborn:true) makes creation idempotent:
         repeating the request returns the same project with 201; the same id
         with another name is 409.
@@ -418,7 +424,7 @@ paths:
     parameters:
       - {$ref: '#/components/parameters/ProjectId'}
     post:
-      operationId: provisionIdentityPreservingUnbornBranch
+      operationId: checkoutUnbornBranch
       description: |
         Provision an unborn root branch in an empty private clone target with
         the source branch's exact UUIDv7 and a null HEAD. Does not create a
@@ -521,7 +527,7 @@ paths:
                     type: array
                     items: {type: string}
     post:
-      operationId: createUuidv7Branch
+      operationId: createBranch
       description: |
         Create a UUIDv7 branch reference from the branch identified by
         fromBranchId (at its HEAD, or at a historical revision reachable from
@@ -568,7 +574,7 @@ paths:
       - {$ref: '#/components/parameters/ProjectId'}
       - {$ref: '#/components/parameters/Branch'}
     patch:
-      operationId: renameUuidv7Branch
+      operationId: renameBranch
       description: Atomically change the user-chosen name, preserving branch UUID and revision HEAD. Requires exact expected UUIDv7 HEAD.
       requestBody:
         required: true
@@ -589,7 +595,7 @@ paths:
       - {$ref: '#/components/parameters/ProjectId'}
       - {name: branchId, in: path, required: true, schema: {type: string, format: uuid}}
     get:
-      operationId: getUuidv7BranchById
+      operationId: getBranchById
       description: The branch with this UUIDv7, whatever its current name. Same fields as a revision-graph HEAD.
       responses:
         '200':
@@ -612,7 +618,7 @@ paths:
       - {$ref: '#/components/parameters/ProjectId'}
       - {$ref: '#/components/parameters/Branch'}
     get:
-      operationId: getUuidv7BranchHead
+      operationId: getBranchHead
       responses:
         '200':
           description: Current revision UUIDv7 in id, or explicit null for unborn branch
@@ -632,7 +638,7 @@ paths:
       - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 1000, default: 100}}
       - {name: after, in: query, schema: {type: string, format: uuid}}
     get:
-      operationId: getUuidv7History
+      operationId: getBranchHistory
       description: First-parent history, newest-first, using an exclusive UUIDv7 revision cursor. Unborn branches return an empty array.
       responses:
         '200': {description: Revision objects with UUIDv7 IDs, ordered parent UUIDs, integrity hashes}
@@ -642,7 +648,7 @@ paths:
       - {$ref: '#/components/parameters/ProjectId'}
       - {name: revision, in: path, required: true, schema: {type: string, format: uuid}}
     get:
-      operationId: getUuidv7Revision
+      operationId: getRevision
       description: Immutable revision UUIDv7 lookup authenticated against its canonical record SHA-256 and parent ancestry.
       responses:
         '200': {description: UUIDv7 revision, recordHash and ordered parent UUID/hash pairs}
@@ -653,9 +659,9 @@ paths:
       - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 1000, default: 100}}
       - {name: cursor, in: query, schema: {type: string, description: Opaque, HMAC-signed, project-scoped and process-local continuation token}}
     get:
-      operationId: getUuidv7RevisionGraph
+      operationId: getRevisionGraph
       description: |
-        Native v2 graph semantics: union of all branch HEAD ancestry, both merge
+        The union of all branch HEAD ancestry, both merge
         parents and deduplicated revisions. HEADs include branch UUIDv7,
         branch name, revision UUIDv7 and record SHA-256. HEADs additionally
         include `originBranchId` and `forkRevisionId` (UUIDv7 or null),
@@ -667,7 +673,7 @@ paths:
         Cursors are invalid after server restart or when used for another project.
         Pagination bounds are 1..1000 items, up to 1024 branch HEADs and
         250000 traversed revisions. The complete boolean and nextCursor are
-        always explicit. No SHA-only revision identity fallback.
+        always explicit.
       responses:
         '200': {description: Pinned, paginated UUIDv7 revision DAG with heads, revisions, complete and nextCursor}
         '400': {$ref: '#/components/responses/BadRequest'}
@@ -677,7 +683,7 @@ paths:
       - {$ref: '#/components/parameters/ProjectId'}
       - {$ref: '#/components/parameters/Branch'}
     post:
-      operationId: commitModelRevisionV2
+      operationId: commitModel
       description: >-
         Atomically create a UUIDv7 model-indexed revision on an exact expected
         branch HEAD. The model record payload is opaque binary data encoded
@@ -748,9 +754,9 @@ paths:
     parameters:
       - {$ref: '#/components/parameters/ProjectId'}
     post:
-      operationId: mergeHydraulicBranchesV2
+      operationId: mergeHydraulicBranches
       description: >-
-        UUIDv7-only, domain-validated hydraulic branch merge. Both expected
+        Domain-validated hydraulic branch merge. Both expected
         HEAD UUIDs are mandatory, even when no conflict choices are supplied.
         Reconciles canonical typed fields and membership chunks and validates
         the entire candidate hydraulic network before publication, including
@@ -803,7 +809,7 @@ paths:
       - {name: from, in: query, required: true, schema: {type: string, format: uuid}}
       - {name: to, in: query, required: true, schema: {type: string, format: uuid}}
     get:
-      operationId: diffImmutableRevisionsV2
+      operationId: diffRevisions
       description: >-
         Compare two immutable, project-owned UUIDv7 revision snapshots.
         Returns at most 1000 changed model/object keys, otherwise HTTP 413.
@@ -818,7 +824,7 @@ paths:
       - {$ref: '#/components/parameters/ProjectId'}
       - {$ref: '#/components/parameters/Branch'}
     post:
-      operationId: saveUuidv7HydraulicNetwork
+      operationId: saveHydraulicNetwork
       description: |
         Create/replace a complete, canonically validated hydraulic network on
         a UUIDv7 project and branch. The exact expected revision HEAD must
@@ -845,7 +851,7 @@ paths:
       - {$ref: '#/components/parameters/NetworkId'}
       - {name: revision, in: query, required: false, schema: {type: string, format: uuid}, description: UUIDv7 revision in this branch ancestry; omitted selects current HEAD}
     get:
-      operationId: getUuidv7HydraulicNetwork
+      operationId: getHydraulicNetwork
       description: Pin one UUIDv7 revision, verify hydraulic metadata and all member references, then load the complete canonical payload.
       responses:
         '200': {description: Canonical network payload with UUIDv7 revision}
@@ -858,7 +864,7 @@ paths:
       - {name: revision, in: query, required: false, schema: {type: string, format: uuid}}
       - {name: type, in: query, required: true, schema: {type: integer, minimum: 0, maximum: 17}}
     get:
-      operationId: listUuidv7HydraulicEntities
+      operationId: listHydraulicEntities
       description: List one collection's ordered UUIDs at a pinned UUIDv7 revision; 10000 maximum.
       responses:
         '200': {description: Entity UUID list with UUIDv7 revision}
@@ -871,7 +877,7 @@ paths:
       - {name: revision, in: query, required: false, schema: {type: string, format: uuid}}
       - {name: entityId, in: path, required: true, schema: {type: string, format: uuid}}
     get:
-      operationId: getUuidv7HydraulicEntity
+      operationId: getHydraulicEntity
       description: Index-backed, ownership-checked canonical entity read at one immutable revision UUID.
       responses:
         '200': {description: Entity UUID, collection ordinal, canonical payload and UUIDv7 revision}
@@ -882,12 +888,13 @@ paths:
       - {$ref: '#/components/parameters/Branch'}
       - {$ref: '#/components/parameters/NetworkId'}
     post:
-      operationId: editUuidv7HydraulicNetwork
+      operationId: editHydraulicNetwork
       description: |
-        Apply at most 128 entity changes to one UUIDv7 branch HEAD. This
-        V2 path uses the full canonical hydraulic validator; indexed edit
-        fast paths and interactive hydraulic merge choices are not yet V2.
-        Identical batches do not create a revision. Requires exact expectedHead.
+        Apply at most 128 entity changes to one branch at an exact
+        expectedHead. Scalar, physical, catalogue, topology, dependent-reference
+        and membership edits are validated incrementally against the pinned
+        revision; other edits fall back to full network validation. A batch
+        that changes nothing creates no revision.
       requestBody:
         required: true
         content:

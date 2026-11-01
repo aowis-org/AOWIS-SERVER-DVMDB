@@ -458,7 +458,7 @@ bool ProjectService::validBranchName(std::string_view name) {
 ProjectService::Project::Project(ProjectInfo value) : info(std::move(value)) {}
 
 namespace {
-// Private draft format (see docs/working-copy-storage-v1.md). Earlier
+// Private draft format (see docs/storage-formats.md). Earlier
 // pre-release formats are rejected, never migrated.
 constexpr std::string_view workingCopyMarker = "AOWIS-WORKING-COPY-4\n";
 constexpr std::size_t workingCopyMaxBytes = 8 * 1024 * 1024;

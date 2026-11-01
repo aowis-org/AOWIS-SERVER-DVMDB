@@ -1,9 +1,9 @@
-# GUI / native / REST integration requirements
+# GUI integration requirements
 
-**Normative integration contract.** See
-[version-control semantics](version-control-semantics.md) for all storage
-invariants and [revision history](native-revision-history.md) for the native
-read model.
+What the AOWIS GUI may rely on from DVMDB and how it must present history and
+drafts. The rules come from the [version-control contract](version-control-semantics.md);
+the routes are in the [REST guide](rest-api-design.md) and the
+[OpenAPI contract](dvmdb-http-api.yaml).
 
 ## Required domain model
 
@@ -45,6 +45,19 @@ commits. Shared sources remain separate. See
 8. **Merge:** use expected source/target committed HEADs, both ordered parent
    IDs for a divergent merge and hydraulic-aware validation; no silent reset
    of private working state.
+
+### What exists over HTTP today
+
+| Operation | Status |
+|---|---|
+| Catalogue, branches, nullable HEADs, provenance | available |
+| Pinned paged revision DAG, revision records | available |
+| Checkout: draft at a HEAD or null; unborn-branch and project provisioning | available |
+| Edit: leased, fenced event Saves with server-side membership; draft network hydration | available |
+| Branch from a revision or source branch | available |
+| Generic and hydraulic merges with explicit choices | available |
+| Local Commit and its status | native only, no route yet |
+| Fetch, Publish | not built |
 
 HTTP must distinguish invalid IDs, missing objects, forbidden operations,
 validation failure and **409 stale HEAD**; a missing expected HEAD is not an

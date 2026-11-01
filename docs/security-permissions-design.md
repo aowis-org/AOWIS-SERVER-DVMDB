@@ -8,9 +8,25 @@ approved AOWIS-wide initiative**. It creates **no current implementation task,
 numbered milestone, release gate or dependency** for the graph, private drafts,
 local commits, fetch, publish or merge. No security solution is selected yet.
 The deployment cautions below describe risks, not acceptance criteria for the
-current functional roadmap. Refer to [repository access-control findings](native-repository-access-control.md),
-[private working repositories](private-working-repositories.md), and
+current functional roadmap. See also
+[private working repositories](private-working-repositories.md) and
 [REST design](rest-api-design.md).
+
+## What exists today
+
+* The HTTP service has **no TLS, authentication or authorization**. Anyone who
+  can reach the port can read and write every project. Bind it to localhost or
+  a trusted network; `deploy/nginx-aowis-server-dvmdb.conf` shows a TLS
+  reverse proxy, which adds encryption but no access control.
+* `AccessPolicyStore` (`include/aowis/dvmdb/access_policy.h`) and the local
+  `aowis-dvmdb-access` tool keep UUID-identified users, groups, roles and
+  branch-scoped read/write grants in `access-policy.bin` (atomic replacement,
+  SHA-256 corruption check — not a signature). Policy data is separate from
+  versioned model revisions, so reverting a branch cannot revert a grant.
+  `permits()` trusts the account string its caller passes.
+* **No service uses this library.** Its users, roles and grants are not a
+  stable API and may be reused, redesigned or replaced once an AOWIS-wide
+  security architecture exists. Do not build GUI authorization on it.
 
 ## Immediate facts and deployment cautions
 

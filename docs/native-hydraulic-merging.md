@@ -1,6 +1,7 @@
 # Hydraulic-aware three-way branch merges
 
-`aowis::dvmdb::hydraulic::mergeHydraulicBranches(repository, project, target, source)` builds
+`aowis::dvmdb::hydraulic::mergeHydraulicBranches(repository, project, target, source, selections)`
+(HTTP: `POST /dvmdb/v1/projects/{id}/hydraulic-merges`) builds
 on the native two-parent revision/merge API while validating the combined
 hydraulic model **before any bytes are appended or the target branch ref moves**.
 The operation returns `MergeStatus::Conflicts` with diagnostics on rejected
@@ -26,7 +27,7 @@ resolve individual fields after previewing a conflict:
 hydraulic::HydraulicMergeSelections selections{targetHead, sourceHead, {}, {}};
 selections.fields.push_back({pipeUuid, QStringLiteral("diameter_mm"),
     hydraulic::HydraulicMergeSide::Source});
-const native::MergeResultV2 result =
+const aowis::dvmdb::MergeResult result =
     hydraulic::mergeHydraulicBranches(repository, project, "main", "feature", selections);
 ```
 
@@ -36,7 +37,7 @@ non-conflicting edits still merge automatically; unspecified conflicting fields
 are reported, not guessed. A conflict on `metadata.description` can be selected
 independently from other metadata fields.
 
-With any explicit choices, **both previewed branch head revision UUIDs are required**.
+**Both previewed branch head revision UUIDs are always required**, with or without choices.
 The native repository checks them inside the same lock as publication. If either
 branch has advanced, the operation throws without modifying the repository;
 re-preview and obtain new conflict diagnostics before choosing again. Duplicate,
@@ -53,7 +54,7 @@ modification and incompatible topology rewires, AOWIS may instead choose one
 ```cpp
 hydraulic::HydraulicMergeSelections choices{targetHead, sourceHead, {}, {}};
 choices.objects.push_back({pipeUuid, hydraulic::HydraulicMergeSide::Source});
-const native::MergeResultV2 merged =
+const aowis::dvmdb::MergeResult merged =
     hydraulic::mergeHydraulicBranches(repository, project, "main", "feature", choices);
 ```
 

@@ -1,209 +1,152 @@
-# Private DVMDB working repositories and synchronization
+# Private working repositories
 
-**Normative lifecycle and deployment design.** See
-[version-control semantics](version-control-semantics.md),
-[offline synchronization](offline-repository-synchronization.md), and
-[security design backlog](security-permissions-design.md).
-The coordinated backend/GUI implementation sequence and unresolved wire/storage
-decisions are recorded in the [implementation roadmap](roadmap.md).
-The exact wire endpoints and configuration keys are implementation work;
-this document does not claim that they already exist.
+Every editor works through a **personal, durable DVMDB repository** that
+holds its local history and its uncommitted drafts. Published history lives in
+**shared** repositories. This page specifies how the two relate: deployment,
+clone and checkout, local Commit, Fetch and Publish. The underlying rules are
+in the [version-control contract](version-control-semantics.md); what is built
+is marked below, and the remaining work is in the [roadmap](roadmap.md).
 
-## Repository versus working copy
+## Two kinds of repository
 
-A **working repository** is one user's private, durable DVMDB repository.
-It stores checked-out project histories, local immutable commits, local
-branch references, remote-tracking state, and any number of independently
-identified uncommitted **working copies**. A working copy is one editable
-model state inside that repository, not another repository and not a revision.
-It has a UUIDv7, base committed revision (nullable for the initial unborn
-`main`), target local branch UUID, dirty state, and recovery information.
-Two editor sessions—even for the same user—must not silently edit the same
-working-copy object concurrently. Create distinct working copies by default;
-if reopening a saved copy, allow multiple readers but **one active writer**.
-Every Save must atomically verify an unexpired exclusive writer lease,
-**fencing token and expected persisted generation**; stale writers must not
-overwrite a recovered draft. Expired leases permit explicit recovery/takeover
-without deleting content; acknowledged Save is durable.
-
-## Deployment modes
-
-| Client | Personal working repository | Shared repositories |
+| | Personal (private) repository | Shared repository |
 |---|---|---|
-| Standalone desktop | Its built-in/native DVMDB at a configured durable location | Optional local or HTTP DVMDB sources |
-| Basic desktop GUI without embedded DVMDB | Explicitly configured private DVMDB service over HTTP | Separately configured HTTP DVMDB sources |
-| Browser/web GUI | Explicitly configured private DVMDB service over HTTP | Separately configured HTTP DVMDB sources |
+| Belongs to | one intended user, any number of that user's sessions | a team or project |
+| Authoritative for | unpublished local commits, drafts | published branch HEADs |
+| Holds | local branches, local history, drafts, remote-tracking state | published history |
+| Role (`repository.tracking`) | `private` | `shared` |
 
-One configured working repository belongs to **one intended user**, not one
-browser tab. It may hold several projects and separate drafts. Multiple GUI
-sessions can reconnect to that user's repo with explicit draft selection.
-The shared repository is authoritative for **published** project/branch
-HEADs. The personal repo is authoritative for **unpublished local commits**
-and **private draft state**. Never silently use a shared project source as
-the user's working repository or silently switch to another repository after
-a connection failure.
+The role is set once per storage root ([repository tracking](repository-tracking.md)).
+Drafts can only be created in a `private` root. A role is deployment intent,
+not access control.
 
-For non-standalone clients, a configured private HTTP repository is required
-for editing. Without a reachable configured working repository, the GUI
-may display cached/published history read-only, but must not pretend edits
-are durable. A browser may additionally maintain temporary UI state, but
-browser memory/storage is not an authoritative DVMDB working repository.
-Offline edits on an HTTP-only client are not promised by this architecture.
+| Client | Personal repository | Shared repositories |
+|---|---|---|
+| Standalone desktop | its embedded DVMDB at a configured durable location | optional, local or HTTP |
+| Desktop GUI without an embedded DVMDB | an explicitly configured private DVMDB over HTTP | configured HTTP sources |
+| Browser GUI | an explicitly configured private DVMDB over HTTP | configured HTTP sources |
 
-## Persistent repository identity and role
+* A client never edits in a shared repository and never falls back to one
+  when its personal repository is unreachable. Without a reachable personal
+  repository the GUI may show published history read-only, but must not
+  offer editing.
+* Browser memory or storage is UI state, not a working repository. Offline
+  editing on an HTTP-only client is not promised.
+* Several sessions of one user may connect to the same personal repository.
+  Each works in its own draft by default; reopening a draft gives one writer
+  at a time ([leases](working-copies.md#leases-fencing-tokens-and-generations)).
 
-The DVMDB catalogue root persists a UUIDv7 in `repository.id` using the
-`AOWIS-REPOSITORY-1` marker. Existing catalogue roots acquire an identity
-on their first opening with `ProjectService` and keep it across restarts and
-offline backups. A malformed existing identity fails closed instead of being
-regenerated. Separate catalogue roots receive separate UUIDs; the identity
-belongs to the DVMDB root, not to a GUI profile name, connection URL, project,
-branch, or user. `ProjectService::repositoryId()` and read-only
-`GET /dvmdb/v1/repository` expose the same value. It is **not authorization**.
+## Identity across repositories
 
-This is the identity foundation only. Repository-qualified remote-tracking
-records, clone/fetch, and private-working-repository configuration remain
-separate VC-03/VC-06 implementation tasks; this endpoint does not enable
-editing or implicitly select a private repository.
+* Each storage root has its own repository UUIDv7.
+* A project and its branches keep the **same** UUIDv7 in every repository
+  that holds them; revision UUIDs and hashes are unchanged by any transfer.
+* Each repository moves **its own** HEAD for every branch. The full key of a
+  ref is `(repositoryId, projectId, branchId)`, so Alice's local `main`, Bob's
+  local `main` and the shared `main` can all differ.
+* A branch created locally gets a new UUIDv7 and keeps it when it is first
+  provisioned on a remote.
+* A remote branch that is **absent** and one that exists but is **unborn**
+  (null HEAD) are different states, everywhere: in tracking records, in API
+  answers and in Publish preconditions.
+* Correspondence is never inferred from a name. Wrong repository, wrong
+  project and UUID collisions are rejected.
 
-## Clone/checkout and branch tracking
+## The workflow
 
-A project and its logical branches keep their UUIDv7 identities across clone,
-fetch and publication; immutable revision UUIDs and canonical SHA-256 hashes
-also survive unchanged. When cloning `main` from shared repository S into
-personal repository A, its logical branch ID is the **same** `main` UUIDv7 in
-both stores. Crucially, the mutable HEADs are *not shared memory*: the
-repository-qualified ref key `(repositoryId, projectId, branchId)` makes
-A's local HEAD and S's published HEAD independent.
+1. **Clone / checkout.** Bring the project's committed history into the
+   personal repository and track the shared branch. *Built:* full and
+   incremental bundle transfer (`GET`/`POST …/bundle`), identity-preserving
+   provisioning of the project (`POST /projects/clone-target`) and of an
+   unborn root branch (`POST /projects/{id}/unborn-checkout`, below).
+2. **Start a draft** at the local branch HEAD (or null for an unborn branch).
+   *Built* ([working copies](working-copies.md)).
+3. **Save / autosave** into the draft in the personal repository. It never
+   creates a revision, moves a HEAD or touches the shared repository. *Built.*
+4. **Commit locally.** Validate the complete model, create one immutable
+   revision in the personal repository and move only the **local** branch,
+   from the exact expected local HEAD (null for the first commit). A failure
+   keeps the draft. *Built as a native API without the full hydraulic
+   validation; no HTTP route yet.*
+5. **Fetch.** Add the shared repository's missing immutable history and
+   update remote-tracking records. Never touches drafts or local HEADs.
+   *Not built* (tracking records exist; recording them is native-only).
+6. **Publish.** Send the missing immutable objects, then move the **shared**
+   branch from an exact expected remote HEAD (null for its first
+   publication), fast-forward only. A stale expectation is a conflict; the
+   local commits and drafts stay. A new local branch is first provisioned on
+   the remote with its UUIDv7, as a separate idempotent step. *Not built.*
+7. **Reconcile.** Incorporate new remote commits by explicit fast-forward or
+   a validated three-way merge. No automatic rebase, force push or silent
+   winner; an unresolved merge stays in a draft. *Merge primitives built;
+   the Fetch-based workflow is not.*
 
-A local branch created as a **new** logical branch receives a new UUIDv7,
-which is used on first explicit provisioning on the selected remote.
-Remote-tracking metadata stores remote repository UUID, project UUID,
-branch UUID, observed remote HEAD/null, and source connection. A tracking
-record is not a fork or a revision-parent edge. Reject repository/project
-mismatch, ID collision and ambiguous name-based matching.
+```text
+Shared main at R7; Alice and Bob each cloned R7.
+Alice commits R8 locally; Bob commits B8 locally.  Shared main is still R7.
+Alice publishes R8 expecting R7  -> shared main = R8.
+Bob publishes B8 expecting R7    -> conflict. B8 and Bob's drafts stay.
+Bob fetches R8, merges with B8 into M9, publishes M9 expecting R8.
+```
 
-For a new remote branch, **absence and unborn null HEAD are distinct**:
-provision the new branch explicitly and idempotently with the same UUIDv7,
-then conditionally Publish. For an already existing unborn remote branch,
-first Commit publication compares against `expectedRemoteHead: null`.
-Neither operation silently creates an unrelated remote branch after failure.
+The first commit of a project needs the local unborn HEAD to be null; its
+first publication needs the shared HEAD to be still null. A branch cannot be
+created from an unborn branch; make the first commit first.
 
-1. Fetch or initialize the selected project in the personal repository.
-   For an unborn project, track `main` with a null committed HEAD.
-2. Checkout a pinned local committed revision (or null for unborn `main`)
-   into a durable private working copy. Store the complete model changes
-   only in that draft until the user commits.
-3. Save/autosave persists draft state in the **personal** DVMDB. It never
-   commits, advances HEAD or publishes to the shared repository.
-4. **Commit** validates the complete model, creates one immutable UUIDv7
-   revision in the personal repository and conditionally advances the
-   **local** target branch from the expected local HEAD (including null).
-   Failure retains the draft; success does not change the shared HEAD.
-5. **Fetch** updates remote-tracking refs and missing immutable objects but
-   never overwrites local drafts or silently changes local branch HEADs.
-6. **Publish/Push** sends the missing verified immutable objects and then
-   conditionally updates the **shared** branch from its expected remote
-   HEAD. The remote update must be fast-forward/valid under its policy;
-   otherwise return an explicit stale-remote/non-fast-forward conflict.
-   A failed publish keeps successful local commits and the user's drafts.
-7. **Reconcile** explicitly incorporates new remote commits by fast-forward,
-   explicit fast-forward or validated three-way merge; do not automatically
-   rebase/replay in the initial implementation. Preserve the private draft
-   when hydraulic or structural conflicts remain. Re-attempt Publish with a fresh expected remote
-   HEAD; never silently force the shared branch.
+## Operation IDs and recovery
 
-The first project commit requires the local unborn HEAD to be null. Its
-first publication requires the shared unborn HEAD to remain null. Only
-that first committed revision creates the root history node. Creating a
-branch from an unborn HEAD is rejected; make the first commit first.
+Local Commit and Publish are separate transactions, each with a
+caller-chosen UUIDv7 operation ID, a request digest and a durable `pending`,
+`succeeded` or `rejected` outcome:
 
-## Atomicity, recovery and duplicate requests
+* replaying the same ID and request returns the recorded outcome and never
+  creates a second revision or remote advance;
+* the same ID with a different request is rejected;
+* after a timeout the client asks for the outcome under the **same** ID and
+  never resends the write under a new one; a timed-out Commit may exist, a
+  timed-out Publish may have moved the shared HEAD;
+* unresolved operations are never expired.
 
-Local commits and remote publications are **two different transactions**.
-Commit and Publish each use a caller-generated UUIDv7 operation ID,
-repository/operation scope, canonical request-payload digest and durable
-`pending`, `succeeded` or `rejected` outcome lookup. Replays with the same
-ID/payload return the original outcome; changed payload under an existing ID
-is rejected. An unresolved operation is never discarded by retention cleanup.
-A timed-out local commit may already exist; a timed-out Publish may have
-moved the shared HEAD. Resolve both by checking the authoritative repository
-and operation status before retrying. Transport failure must never imply
-that a local commit should be rolled back or replayed with a fresh ID.
-
-A personal repository must provide durable autosave and restart recovery
-for its own drafts, transactional local branch updates, and consistent
-snapshots across multi-entity hydraulic edits. Backup of private draft
-state is separate from committed-revision replication bundles. Retention,
-quota, lease TTL/renewal and draft-recovery controls must be specified before
-an unrestricted editor workflow is enabled. New projects start with unborn
-`main`. Experimental pre-release formats need no migration and are rejected
-explicitly rather than silently rewritten.
-
-## Acceptance scenarios
-
-- Two users clone the same project at R7 into distinct working repositories,
-  independently save uncommitted edits, and do not change shared `main`.
-- Alice commits R8 *locally*; the shared branch remains R7 until Publish.
-- Alice publishes R8; Bob locally commits B8 from R7, then Bob's Publish is
-  rejected. B8 and his unsaved drafts remain intact in his personal DVMDB.
-- Bob fetches R8, reconciles with B8 into a validated successor, then
-  publishes conditionally without losing either user's content.
-- A restarted standalone application or HTTP-connected GUI recovers the
-  correct private draft UUID and pinned base from the same personal repo.
-- A missing private HTTP DVMDB disables editing; public history is still
-  readable when its source remains reachable, without unsafe fallback.
-- Project/branch/revision UUIDs and canonical hashes retain their meanings
-  across repositories; local and shared branch HEADs advance independently
-  even while both use the same logical branch UUIDv7.
-- Two sessions reopen one saved draft: only the live leased/fenced writer
-  with the expected generation can Save or local Commit; expiration/takeover
-  invalidates stale writes without losing the last durable content. A session
-  that took over an expired lease is that writer and may also Commit.
-- After a successful local Commit the draft continues from the new HEAD:
-  its base becomes the committed revision, candidate and event journal are
-  emptied, and its generation increases by one; the lease stays valid. A
-  full event journal (4096 events) or candidate (20000 changes) answers 413
-  until a Commit empties it. `POST /working-copies/{id}/discard` removes a
-  draft for good (fenced like a Save; committed history and local Commit
-  records are unaffected). `GET /working-copies` is paged (`limit`, `after`,
-  optional `projectId`) and returns `nextCursor`.
-- `save-events` checks that the MODEL event journal describes exactly the
-  saved candidate: applied in order, each edit's before-image must equal the
-  entity's current draft (or base) state, and every edited entity's candidate
-  record must be its final after-image (a tombstone for a removal).
-- Lease expiry is persisted as wall-clock milliseconds and shown to clients,
-  but while the granting server runs a lease is enforced against a monotonic
-  deadline, so wall-clock steps neither extend nor shorten it. After a server
-  restart only the persisted expiry is known.
-- A local Commit that failed with an I/O error before HEAD publication stays
-  `pending` only while HEAD is still at its base. Once HEAD has moved without
-  the reserved revision, status lookups and retries report it as
-  `rejected` (`conflict`), because it can no longer be applied.
-- A Publish response is lost after success: status lookup by original
-  operation UUID reports the single successful remote HEAD advancement.
-- Existing projects with previously committed initial R0 retain R0 after
-  upgrade; newly created projects start with unborn `main` and no R0.
-
-**Security limit:** Selecting a private HTTP repository in configuration
-is not access control. Until the dedicated [security plan](security-permissions-design.md)
-is implemented, deployment must isolate these repositories from other users.
+The local Commit ledger implements this today
+([local Commit](working-copies.md#local-commit)); Publish will follow the same
+rules.
 
 ## Checkout of an unborn branch
 
-An unborn root branch has a real UUIDv7 branch identity but no revision, and
-therefore cannot be exported as a revision bundle. To checkout via HTTP, the
-client verifies the source repository ID and queries the branch by UUIDv7,
-requiring an explicit null HEAD and absent fork provenance. It provisions the
-logical project UUID in the private repository using `POST /dvmdb/v1/projects/clone-target`,
-then calls `POST /dvmdb/v1/projects/{projectId}/unborn-checkout` with JSON
-`{"branchId":"<UUIDv7>","name":"main"}`. This route requires the private
-repository role, a provisioned project and no conflicting branches; repeated
-identical requests return the same branch. It publishes neither a model record
-nor an initial revision. The caller verifies the resulting branch by UUID, then
-creates a draft with `baseRevision: null` through `POST /dvmdb/v1/working-copies`.
+An unborn branch has a UUIDv7 but no revision, so it cannot travel in a
+bundle. To check one out over HTTP, the client:
 
-This checkout copies only the root unborn branch. A branch with fork provenance
-is not silently flattened into an independent root. Full hydraulic network
-initialization, editor hydration, automatic Save and local Commit remain separate
-VC-04/VC-05 integration work.
+1. reads the source repository's ID and the branch by UUIDv7, and requires a
+   null HEAD and no fork provenance;
+2. provisions the project with its UUIDv7 in the private repository:
+   `POST /dvmdb/v1/projects/clone-target` (`projectId`, `name`; idempotent);
+3. creates the branch with its UUIDv7:
+   `POST /dvmdb/v1/projects/{projectId}/unborn-checkout` with
+   `{"branchId": "<uuidv7>", "name": "main"}`. This requires the `private`
+   role and a project without conflicting branches; an identical repeat
+   returns the same branch. No record or revision is written;
+4. creates a draft with `baseRevision: null` (`POST /dvmdb/v1/working-copies`).
+
+Only a root unborn branch is copied this way; a branch with fork provenance is
+never flattened into an independent root.
+
+## Acceptance scenarios
+
+1. Two users clone a project at R7 into separate personal repositories and
+   save drafts; shared `main` does not change.
+2. Alice commits R8 locally; shared `main` stays at R7 until she publishes.
+3. Bob's stale Publish from R7 is rejected; B8 and his drafts survive, and
+   after Fetch and a validated merge his Publish succeeds.
+4. A restarted Standalone application or a reconnecting HTTP GUI finds the
+   same draft and pinned base in the same personal repository.
+5. Without a reachable personal repository editing is disabled; published
+   history is still readable if its source is reachable.
+6. Project, branch and revision UUIDs and hashes mean the same in every
+   repository while the HEADs advance independently.
+7. A Commit or Publish whose response was lost is resolved by its operation
+   ID: one result, no duplicate.
+
+**Security:** choosing a private HTTP repository in a configuration is not
+access control. Until there is a [security design](security-permissions-design.md),
+isolate personal repositories by deployment (localhost, private network,
+operating-system permissions).

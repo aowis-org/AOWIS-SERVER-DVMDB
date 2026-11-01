@@ -1,57 +1,65 @@
-# Model-record persistence, working copies and reference indexes
+# Model records, serialization and reference indexes
 
-The generic model-record layer uses canonical `ModelCodec<T>` payloads and
-UUID-keyed references without interpreting every hydraulic-domain field.
-The authoritative commit/working-copy lifecycle is
-[version-control semantics](version-control-semantics.md).
+DVMDB stores models as independently addressed **model records** in a
+UUID-keyed Merkle trie, with a second trie indexing who references whom. This
+page covers the generic record layer; the hydraulic adapter built on top of
+it is in [hydraulic persistence](native-hydraulic-network.md).
 
-## Canonical entity records
+## Who owns what
 
-A `ModelRecord` contains a nonzero kind, canonical payload and required
-referenced entity UUIDs. A `ModelChange` addresses a record (or deletion) by
-its stable UUID. `encodeModelRecord()` uses the canonical `AOMD` envelope,
-including version, kind, sorted/deduplicated required references and
-length-prefixed payload. The native store owns immutable object storage,
-SHA-256 hashing and revision publication.
+| Concern | Owner |
+|---|---|
+| Model types, canonical codec `aowis::model::ModelCodec<T>`, validation, field merge, value rules, MODEL edit transactions | [AOWIS-SERVER-MODEL](../external/AOWIS-SERVER-MODEL/docs/model-serialization.md) (submodule) |
+| `ModelRecord` envelope, reverse-reference index, immutable storage, revisions, drafts, HTTP transport | DVMDB |
+| Bridge from typed hydraulic networks to records (`aowis/dvmdb/hydraulic_network_persistence.h`) | DVMDB, using MODEL's codec |
 
-## Editing and publication
+DVMDB never builds a second serializer: its adapter aliases point at the MODEL
+implementation. The MODEL target checks its 68-structure field manifest and
+its enum and value rules at configure time. The encoding is deterministic
+binary with strict enumerator and value checks; the REST API carries the same
+bytes as base64 inside JSON. Qt Core is needed only for this typed layer; with
+`-DAOWIS_DVMDB_WITH_MODEL_CODEC=OFF` the store and project service build
+without it.
 
-An editor changes a **private mutable working copy**, pinned to an immutable
-base revision UUID or explicit null for an unborn branch. The server
-prepares the candidate complete snapshot from its model changes. No write
-modifies an already committed revision.
+## Records and changes
 
-Before the user commits, validate every required reference in the resulting
-snapshot, including entities created in the same batch; reject deletion of
-still-referenced entities. Maintain the primary UUID-to-model index and
-reverse-reference UUID-to-referrers index consistently.
+A `ModelRecord` is a non-zero `kind`, the canonical payload and the sorted,
+de-duplicated UUIDs of the entities it requires. `encodeModelRecord()` writes
+the `AOMD` envelope ([format](storage-formats.md#model-record-aomd)). A
+`ModelChange` is an entity UUID plus a record, or no record for a deletion.
 
-The commit request must specify target branch UUIDv7, exact
-`expectedHeadRevisionId` (including explicit null for first commit) and a
-working-copy/idempotency identity. The repository compares the expected
-HEAD under its publication lock, durably stores immutable candidate objects
-and a new UUIDv7 revision record with canonical SHA-256 integrity, and
-atomically publishes the new branch HEAD only if the pin is still current.
-Stale commits are rejected without losing the private edits.
+`Repository::commitModel(project, branch, changes, expectedHead, …)` applies a
+batch and publishes one revision. Before anything is written it checks that
+every required reference exists in the resulting snapshot (including entities
+created in the same batch) and that no deleted entity is still referenced, and
+it updates the primary trie and the reverse-reference trie together. A failed
+check publishes nothing.
 
-## Historical reads and imported data
+## Reads
 
-Read APIs resolving more than one entity pin a single immutable revision.
-Explicit historical reads use a committed revision UUIDv7 and never follow
-moving branch HEADs. Reference-index queries return the incoming UUIDs
-corresponding to the same pinned state.
+Every read names an immutable revision: `getModelAtRevision`,
+`referencingModelAtRevision` (sorted UUIDs of the entities that reference a
+key, O(log N + references)), `scanAtRevision`, `diffRevisions`. Reads never
+follow a moving branch HEAD; a client that makes several calls passes the same
+revision UUID to each.
 
-Portable imports recalculate incoming references from canonical model
-records and check the reverse index exactly before publication. Malformed,
-missing, extra or dangling references fail verification. A full storage
-verifier checks immutable Merkle closure, ancestry and reference indexes;
-application-specific hydraulic semantics require the domain adapter.
-See [hydraulic persistence](native-hydraulic-network.md) and
-[repository verification](repository-verification.md).
+## Imports and verification
 
-## Validation boundaries
+Bundle import recomputes the incoming references of every model-indexed
+revision from its records and compares them exactly with the stored reverse
+index before anything is published; missing, extra, dangling or non-canonical
+references are rejected. `aowis-dvmdb-verify` applies the same check to every
+historical revision ([verification](repository-verification.md)).
 
-Reference existence does **not** prove a hydraulic topology is valid. All
-complete-model semantic constraints must be verified before the commit or
-merge becomes visible. Indexing and immutable-subtree reuse may optimize
-preparation without weakening that requirement.
+## What references do not prove
+
+A complete reference graph is not a valid hydraulic model: topology, endpoint
+types, membership and physical rules are checked by the hydraulic layer before
+a commit or merge is published. Indexing and subtree reuse may speed this up
+but never replace it.
+
+## Format changes
+
+Before the first release obsolete encodings need not stay readable. Test a new
+encoding with strict current-format round-trip, corruption, persistence and
+restart tests, not with legacy fixtures ([format policy](format-compatibility.md)).

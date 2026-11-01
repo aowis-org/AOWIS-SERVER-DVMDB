@@ -1,14 +1,14 @@
-# Revision history and branch-local committed HEADs
+# Revision history and branches
 
-This document specifies the native history contract. The authoritative
-behavior is [version-control semantics](version-control-semantics.md).
+Revisions, branches, HEADs and the history and graph reads, natively and over
+HTTP. The rules are in the [version-control contract](version-control-semantics.md).
 
 ## Revisions and identity
 
 A revision is a finalized, immutable whole-model snapshot. Each committed
 revision has a UUIDv7, project UUIDv7, zero/one/two ordered parent revision
-UUIDv7s, immutable metadata, snapshot Merkle roots and an independently
-verified SHA-256 canonical record digest. UUIDv7 is the object's identity;
+UUIDv7s bound to their record hashes, snapshot Merkle roots and a SHA-256
+digest of its canonical record ([layout](storage-formats.md#revision-record-t-2)). UUIDv7 is the object's identity;
 SHA-256 proves content integrity. There is no mutable revision state.
 
 Parent references form a DAG. Commits from multiple branches can share
@@ -18,7 +18,7 @@ convenient projection, never the entire project history.
 
 ## Branches and unborn HEADs
 
-Each named branch has its own UUIDv7, an optional `headRevisionId` and
+Each named branch has its own UUIDv7, a nullable HEAD revision and
 immutable creation provenance (`originBranchId`, `forkRevisionId`). A project
 is created with an unborn `main` branch and **zero committed revisions**.
 Only the first successful commit supplies its first HEAD UUIDv7.
@@ -66,3 +66,24 @@ contribute no revision vertex.
 Read-only operations must never change HEADs, working-copy bases or owner
 session state. See [merge semantics](native-branch-merging.md) and
 [GUI integration](gui-integration-requirements.md).
+
+## API
+
+| Operation | `Repository` | HTTP (`/dvmdb/v1/projects/{id}`) |
+|---|---|---|
+| Create the first, unborn branch | `createUnbornBranch` | `POST /projects` with `unborn: true` creates `main` |
+| Create a branch from a branch UUID, at HEAD or a reachable revision | `createBranchFromId` (retry-safe with a caller-chosen UUID) | `POST …/branches` (`fromBranchId`, optional `revision`, optional `id`) |
+| Rename (keeps UUID, HEAD, provenance) | `renameBranch(…, expectedHead)` | `PATCH …/branches/{branch}` |
+| Branch by UUID | `branchById` | `GET …/branch-ids/{branchId}` |
+| HEAD (null when unborn) | `optionalHead` | `GET …/branches/{branch}/head` |
+| First-parent history, newest first | `history(…, maxCount, after)` | `GET …/branches/{branch}/history?limit&after` |
+| One revision record | `readRevision` | `GET …/revisions/{revision}` |
+| All branches' DAG, pinned and paged | `revisionGraph(…, maxCount, cursor)` | `GET …/revision-graph?limit&cursor` |
+| Ancestry test | `revisionReachableFrom(tip, candidate)` | — |
+| Diff of two revisions (≤ 1000 keys over HTTP) | `diffRevisions` | `GET …/diff?from&to` |
+
+Revision-graph cursors pin the branch HEADs of the first page; they are signed
+with a per-process key, so a cursor is invalid after a server restart or for
+another project. A page holds at most 1,000 revisions and 1,024 branch HEADs.
+`revisionReachableFrom` walks the DAG once and answers `false` for an unknown
+revision without walking.

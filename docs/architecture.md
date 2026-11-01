@@ -1,103 +1,131 @@
-# Native database architecture
+# Architecture
 
-AOWIS uses a content-addressed C++ model database. Its core is a reusable library and the storage foundation of the implemented multi-project HTTP service. This repository owns model serialization and uses `AOWIS-SERVER-MODEL` for canonical model types.
+DVMDB is a C++20 library with an HTTP service on top. The library stores
+versioned engineering models as immutable, content-addressed objects; the
+service hosts many projects in one storage root. Everything below is
+implemented; planned work is in the [roadmap](roadmap.md). Byte layouts are in
+[storage formats](storage-formats.md), product rules in the
+[version-control contract](version-control-semantics.md).
 
 ## Layers
 
-1. **Model definitions and codec:** `AOWIS-SERVER-MODEL` (Git submodule) defines model types; this repository's `ModelCodec<T>` serializes them and checks a 68-structure schema contract.
-2. **Domain persistence:** the hydraulic adapter validates `NetworkHydraulic`, persists network metadata, up to 256 ordered UUIDs per membership chunk, and one independently addressed record per top-level entity.
-3. **Logical object store:** content-addressed immutable values, compressed 16-way UUID Merkle trie, persistent reverse-reference index, revision DAG and named branch refs.
-4. **Physical store:** append-only content-addressed object pack with a derived/rebuildable index.
-5. **Service boundary:** `aowis-server-dvmdb` uses the vendored cpp-httplib over HTTP/TCP (worker thread pool) with a durable UUID-based multi-project catalogue. Native storage/model APIs and the Qt-free project-service library remain directly callable from C++; the HTTP adapters never change stored model identities. Implemented HTTP routes cover catalogue, branches, immutable revisions and diffs, canonical hydraulic reads/edits/merges, and bounded full/incremental bundle transfers.
+| Layer | Code | Responsibility |
+|---|---|---|
+| Model definitions and codec | `external/AOWIS-SERVER-MODEL` (`AOWIS::Model`) | Typed models, canonical `ModelCodec<T>`, validation, value rules, field merge, MODEL edit transactions |
+| Hydraulic persistence | `aowis::dvmdb::hydraulic` (`AOWIS::DvmdbHydraulic`) | Networks as one root record + 256-member membership chunks + one record per entity; indexed edits; hydraulic-aware merges; draft membership materialization |
+| Native store | `aowis::dvmdb::Repository` (`aowis-dvmdb-store`) | Object pack, Merkle tries, reverse-reference index, revisions, branches, merges, diffs, bundles, verification, compaction |
+| Project service | `aowis::dvmdb::ProjectService` (`AOWIS::DvmdbProjectService`, Qt-free) | Catalogue of projects, repository identity, role and tracking, private drafts, local Commit ledger |
+| HTTP service | `aowis-server-dvmdb` (cpp-httplib, `src/dvmdb_http_routes.cpp`) | JSON/binary REST adapter over the project service; no persistence of its own |
+| Tools | `aowis-dvmdb-verify`, `-compact`, `-sync`, `-access`, `tools/offline_backup.py` | Offline verification, compaction, bundle transfer, backup/restore |
 
-## Logical identities and history
+Standalone AOWIS builds can use the library directly, without HTTP. Do not
+point an embedded instance and the HTTP service at the same live root: the
+catalogue lock lets only one of them open it.
 
-[Version-control semantics](version-control-semantics.md) defines the
-normative lifecycle. A project UUIDv7 owns branches identified by UUIDv7;
-committed revisions have distinct UUIDv7 identities and separately verified
-canonical SHA-256 hashes. An individual branch HEAD points to its latest
-**committed immutable revision**, or is **null** for an unborn branch.
+## Identity and history
 
-A project starts with an unborn `main` and **no committed revision**.
-Editors use separate UUIDv7 working copies, each with a private model state
-and exact committed base UUID/null. Successful commits create one immutable
-revision and atomically advance a branch under an expected-HEAD check.
-Branch creation preserves immutable source branch UUID and fork revision UUID;
-it does **not** create a revision. Fork points never move when HEADs advance.
+* Projects, branches, revisions and drafts have **UUIDv7** identities. Names
+  are display data and never storage keys.
+* A revision is an immutable record binding its UUID, project, the model trie
+  root, the reverse-reference trie root and zero, one or two ordered parents
+  together with each parent's record SHA-256. The record's SHA-256 therefore
+  commits to the whole ancestry; SHA-256 is integrity, UUIDv7 is identity.
+* A revision UUID is resolved through a write-once binding to its record hash,
+  so a lookup is O(1): one binding read, one record read, parent bindings
+  checked. Whole-history verification is done by `aowis-dvmdb-verify` and by
+  bundle import, which stops at revisions already trusted locally.
+* A branch record holds a name, a nullable HEAD (null = unborn) and, if
+  created from another branch, the immutable origin branch and fork revision.
+  Provenance is metadata, not an ancestry edge.
+* The model is a path-compressed 16-way Merkle trie from entity UUID to record
+  hash. Unchanged records and subtrees are shared between revisions. A second
+  trie maps each entity to the entities that reference it.
 
-The revision DAG has zero/one/two ordered parent revision UUIDs. Shared
-immutable ancestors may be reached by several branches; branch creation
-provenance is metadata, not an ancestry edge. The Merkle model-object tree
-and reverse-reference tree form part of the complete committed snapshot.
-SHA-256 verifies canonical immutable content; UUIDv7 is logical identity.
+## Catalogue and repositories
 
-- A path-compressed 16-way radix Merkle tree maps entity UUIDs to immutable
-  content-addressed records; unchanged records/subtrees are reused.
-- Each committed model snapshot includes a reverse-reference root for exact
-  incoming UUID references.
-- A draft is not an immutable revision and cannot be exported as committed
-  history until explicitly committed under optimistic concurrency control.
-- Generic reference validation and hydraulic semantic validation both apply
-  before publication. See [merges](native-branch-merging.md) and
-  [native history](native-revision-history.md).
+One storage root holds `catalogue.lock`, `repository.id`, the optional
+`repository.tracking`, `projects/<uuid>/` (manifest + native repository),
+`working-copies/` and `local-commits/` ([layout](storage-formats.md#catalogue-root)).
+Each project's repository is an append-only object pack with a rebuildable
+index, UUID-named branch records and the revision bindings
+([layout](storage-formats.md#native-repository)).
 
-## Default pack layout
+## Writing and durability
 
-```text
-repository/
-├── objects.pack            # initial append-only pack
-├── objects.idx             # recoverable object-location sidecar
-├── objects.current         # optional active compaction generation
-├── objects.<id>.pack       # generated replacement pack
-├── objects.<id>.idx        # its corresponding index
-├── maintenance.lock        # repository lifetime/compaction locking
-├── repo.lock               # repository operation locking
-├── recovered-pack-tails/   # copies of discarded torn pack tails (if any)
-├── tmp/                    # scratch space, mode 0700 (see below)
-└── refs/heads/             # UUIDv7 branch records: nullable committed HEAD, provenance
-```
+* **Commits.** Objects are appended and fsynced before anything refers to
+  them; then the revision binding is written once, then the branch record is
+  replaced atomically (stage, fsync, rename, fsync directory). A crash leaves
+  at most unreachable objects. Every HEAD change is a compare-and-swap on the
+  expected HEAD; an explicit null expectation pins an unborn branch.
+* **Torn pack tail.** On open, if the first invalid record is followed by
+  nothing valid up to EOF and every published HEAD lies before it, the region
+  was never published: it is copied to `recovered-pack-tails/`, fsynced and
+  truncated (`Repository::recoveredPackTailBytes()`). An invalid record followed
+  by a valid one, or damage reaching a published HEAD, is mid-pack corruption:
+  the repository refuses to open and nothing is modified.
+* **Index.** `objects.idx` is derived. A missing or damaged index, or one that
+  is behind the pack, is rebuilt by scanning the pack. Normal open checks the
+  index structure; payload SHA-256 is checked on every read.
+* **Compaction** (offline, exclusive) writes a new pack generation containing
+  everything reachable from any branch or any bound revision, verifies it,
+  then publishes it via `objects.current`. If it fails after that switch, the
+  handle is invalidated and must be reopened.
+* **Catalogue records** (project manifests, repository identity, tracking,
+  drafts, ledger records) are staged and published with no-replace link or
+  atomic rename plus directory fsync. Any publication whose outcome is
+  uncertain (for example a failed directory fsync) marks the service
+  unhealthy: further writes are refused until restart. Crash remnants of all
+  of these are removed when the root or repository is opened.
+* **Scratch space** for import/verification tables and HTTP bundle spools
+  lives in each repository's `tmp/` (nameless `O_TMPFILE` files where
+  available), on the pack's filesystem rather than a RAM-backed `TMPDIR`.
+  C++ callers can use `Repository::createScratchFile()`.
 
-**Scratch space.** Import/verification tables (bundle location index, visit marks, trie summaries, external reference sort) and HTTP bundle spools/exports are nameless files in `tmp/`, created with `O_TMPFILE`; on filesystems without it, `aowis-scratch-*` files are created and unlinked immediately, and any such leftover from a crash is removed on open. Scratch space is therefore on the pack's own filesystem: never in `TMPDIR`, which is often a RAM-backed tmpfs (Fedora, Arch, Debian 13), so "file-backed, evictable" really means disk. A symlinked or non-directory `tmp` is refused. C++ callers can use `Repository::createScratchFile()` together with the descriptor overloads of `importBranchBundle` / `export…BranchBundle`.
+What has and has not been qualified (SIGKILL, real ENOSPC, QEMU power cuts) is
+in [durability qualification](durability-qualification.md) and
+[engineering findings](engineering-findings.md).
 
-Object records use an `AOBJ` header and typed canonical bytes. Index entries contain object hash, physical offset/length and a CRC32 checksum. The index is derived: on damage or absence it can be rebuilt from the authoritative pack. A normal reopen checks index structure but does **not** hash every object; payload reads and explicit verification check SHA-256. Corrupted complete pack records are rejected. A torn pack tail is repaired on open: if the first invalid record (short, zero-filled, or a full-length body whose SHA-256 does not match) is followed by no valid record up to EOF, and every published branch head is still present before it, the region is unpublished by construction. It is copied to `recovered-pack-tails/` (fsynced), then truncated, and `Repository::recoveredPackTailBytes()` reports the amount. An invalid record followed by a valid one, or damage reaching a published head, is mid-pack corruption and fails closed without modifying the pack. A torn region whose payload happens to contain a complete, valid embedded pack record is also refused (fail-closed direction).
+## Concurrency
 
-`aowis-dvmdb-verify` performs physical verification of all stored objects and, by default, traverses every published branch's complete history to validate Merkle structure, typed native records and exact reverse-reference consistency. `--physical` limits verification to physical storage only. The same immutable logical verifier is used during bundle import and on-disk audits. Application-specific hydraulic semantic validation is outside this native storage check; see [repository verification](repository-verification.md). CRC32 is an accidental-corruption check for index entries, **not a signature or authentication mechanism**.
+| Lock | Scope | Held for |
+|---|---|---|
+| `catalogue.lock` (flock, exclusive) | storage root | the lifetime of the owning `ProjectService` |
+| `maintenance.lock` (flock) | repository | shared by every open handle; exclusive for compaction |
+| `repo.lock` (flock) + handle mutex | repository | every repository operation |
+| project operation lock | project | one repository operation at a time per project, with a bounded queue (`max_pending_per_project`; full → 503 `busy`) |
+| per-draft lock | draft | every draft write and local Commit |
+| catalogue mutex | service | short catalogue/health checks only, never across I/O |
 
-## Physical storage
+Lock order: project operation → draft → catalogue mutex. Projects never block
+each other, and a slow draft write or Commit holds up only its own draft and
+project. Draft reads take no lock at all. Multi-call hydraulic reads stay
+consistent by naming one immutable revision.
 
-Every repository uses the same append-only content pack. Object hashes identify
-immutable logical content, while the physical index maps hashes to pack offsets.
-An index suffix lost during a crash is reconstructed by scanning the verified
-pack tail. Compaction writes and verifies a replacement pack before atomically
-publishing its generation pointer. Existing repository handles become unusable
-if that pointer switches and the operation subsequently fails; reopen them
-before retrying writes.
+## Replication
 
-Directories with the obsolete pre-release `storage.format` block marker are
-rejected explicitly. Use an older build to export such a repository to a
-portable bundle before upgrading, then import into a new pack repository.
+A revision bundle carries one branch's history: everything reachable for a
+full bundle, or for an incremental bundle only the revisions not reachable from
+the recipient's base and, per revision, only the trie objects that changed.
+Import verifies hashes, ancestry, trie structure and the exact reverse-reference
+index before writing, and then only creates a branch or fast-forwards it;
+divergent histories are refused. Branch and revision UUIDs are preserved.
+The same code backs the CLI and the bounded HTTP transfer routes
+([synchronization](offline-repository-synchronization.md)).
 
-## Publication, durability and failure handling
+## Errors
 
-- Repository operations coordinate using POSIX locks. Commits preflight references and optimistic expected-head checks under the same lock as branch publication.
-- Newly encoded immutable objects are appended, flushed with `fsync`, and only then does the engine atomically publish a synced branch ref. An interrupted commit may leave unreachable objects but should not expose an incompletely flushed revision through a published ref on supported filesystems.
-- Offline compaction retains **all** objects reachable from every branch's revision ancestry (including merge parents and both Merkle indexes). The replacement generation is synchronized before the active-generation pointer is published. If compaction fails after switching this pointer, the in-memory repository handle is invalidated and must be reopened before any further commit; continuing to write the old pack is prohibited.
-- Compaction requires exclusive lifetime access; do not compact a live service repository. Deterministic process-crash and simulated write-failure recovery tests cover the pack and offline backup/restore. An operator-run QEMU/KVM drill passed four guest-cache-loss cuts each on ext4 and XFS; physical-controller power-loss qualification and online maintenance remain outstanding. Coordinated offline backup/restore is implemented.
+Every engine failure is an `aowis::dvmdb::StorageError` with a
+`StorageErrorKind` (`include/aowis/dvmdb/storage_error.h`); service-level
+failures are `ProjectError` with a `ProjectErrorKind`. Classify by kind, never
+by message text. Load functions return `std::nullopt` only for "not found".
+The HTTP mapping is in the [service guide](native-database-service.md#errors).
 
-## Concurrency and physical limits
+## Limits of the design today
 
-Hydraulic read operations capture one immutable revision and resolve their entire network, membership or targeted entity query against it; multi-call clients can pass the same revision ID explicitly. Full-save/edit preparation also uses revision-pinned reads, with atomic expected-head publication protecting against concurrent writers. The code currently relies on repository-level locking rather than general multi-writer, fine-grained transactional concurrency. Pack repositories permit coordinated concurrent handles; compaction requires exclusive repository lifetime ownership. The HTTP service manages repository handles centrally, with one operation lock and a bounded operation queue per project; projects do not block each other. The database and server are Linux/POSIX-oriented and not yet production hardened.
-
-## Replication independence
-
-Portable `.aowbundle` files contain a complete reachable branch graph or a delta relative to a shared base revision. Import verifies object hashes, graph completeness and canonical Merkle trie structure (including path/UUID correspondence and branch-depth ordering) before creating or fast-forwarding a branch. Every imported model-indexed revision is checked against the exact reverse-reference mapping derived from its canonical model records, including historical revisions and locally borrowed incremental ancestors. Missing, extra and dangling references and noncanonical model reference lists are rejected before writes. Divergent branch heads are refused. The transport format is independent of both disk layouts; Bounded HTTP bundle synchronization and offline CLI transfer both use this core. See [synchronization](offline-repository-synchronization.md).
-
-## API ownership
-
-- `aowis::dvmdb::Repository` — low-level storage, history, compaction, bundles and generic merges.
-- `aowis::dvmdb::ModelCodec<T>` — typed serialization.
-- `aowis::dvmdb::hydraulic` — complete networks, indexed editing, typed validation and hydraulic-aware merging.
-- Implemented `aowis-server-dvmdb` HTTP route handlers — thin REST adapters calling `AOWIS::DvmdbProjectService` and the native database, **not an independent persistence system**. The service also exposes hydraulic edits/merges and bounded full/incremental synchronization.
-
-The binary formats are not yet frozen for a public release. Before the first release, freeze one canonical format; earlier experimental
-formats are not a compatibility target. See the [format compatibility policy](format-compatibility.md) and [roadmap](roadmap.md).
+* Linux/POSIX only (`flock`, `fsync`, `O_TMPFILE`, `renameat2`).
+* One writer per project at a time; no fine-grained multi-writer
+  transactions.
+* No TLS, authentication or authorization
+  ([security backlog](security-permissions-design.md)).
+* The on-disk format is not frozen for a public release
+  ([format policy](format-compatibility.md)).

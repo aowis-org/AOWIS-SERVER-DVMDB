@@ -1,396 +1,180 @@
-# VM filesystem durability qualification and sustained HTTP soak
+# Durability qualification
 
-These are **opt-in**, destructive-on-disposable-data qualification drills, not
-normal unit tests. They do not modify the AOWIS native pack/bundle formats.
-The VM drill runs the production native library, not the fault-injected library.
-Never point the tools at real repositories or physical host disks.
+How DVMDB's crash, disk-full and load behaviour is tested, what each test
+proves and what it does not. The first group runs in every
+`./compile_linux_tests.sh --both`; the second group is opt-in because it needs
+QEMU or takes long. Measured results are in
+[engineering findings](engineering-findings.md); operator procedures are in
+[operations](operations.md).
 
-## Observed qualification baseline
+Every drill works on disposable directories or disks it creates itself.
+Never point these tools at a real storage root or a host block device.
 
-On October 24, 2026, the developer reported a successful **real QEMU/KVM**
-Debian 12 guest-cache-loss drill: four VM terminations on **ext4**, four on
-**XFS**, full verification and continued writes after each reboot, final
-repository sequence 7 on both filesystems, and zero acknowledged commits
-lost. Three rounds per filesystem recovered a fully published additional
-unacknowledged revision. The same source snapshot passed **40/40 Debug and
-40/40 Release CTest suites**. An earlier five-minute real-process HTTP soak
-reported 7,516 imports and 7,516 exports across three projects, zero 503
-admission responses and 12 ms worst health latency. These are measurements
-from specific runs, not long-term SLOs, hardware guarantees or a release
-certificate.
+## In CTest
 
-### Check and retain qualification evidence
+| Test | What it does | What it does not prove |
+|---|---|---|
+| `aowis-dvmdb-recovery-tests` | Links a separate **test-only** build of the engine with deterministic fault points (process exit, simulated ENOSPC, partial writes) across object append, sync, ref publication, incremental import, compaction and stage-file cleanup; checks integrity, references, index rebuild and later writes | behaviour of the production binary under a real kernel failure |
+| `aowis-dvmdb-physical-enospc-tests` | Production library on a private **32 MiB tmpfs** in a new user/mount namespace: fills it until the kernel returns ENOSPC during a commit, a named export and an incremental import, then frees space, reopens, verifies and retries | ext4/XFS journaling, device caches, power loss. **Skips** (not passes) where unprivileged namespaces or tmpfs mounts are forbidden |
+| `aowis-dvmdb-sigkill-restart-tests` | A child process commits and reports each commit through a pipe; the parent `SIGKILL`s it at varying points (after the first acknowledgement), reopens, fully verifies and checks every acknowledged commit is there (at most one more, unacknowledged one may be); a second fixture kills bundle exports and imports every completed bundle | page-cache loss or device flush failure: the kernel keeps running |
+| `aowis-dvmdb-http-transfer-stress-tests` | The real server on a loopback port: staging admission with a one-transfer budget, an aborted upload and download, then six concurrent clients importing, exporting and reading HEADs across three projects; repositories are verified after shutdown | throughput, latency or memory envelopes |
+| `aowis-dvmdb-upgrade-restore-tests` | Four projects with divergent branches and >1 MiB of model data: verified backup, independent restore, checks of IDs, ancestry and payloads, a commit on the restored root, and a second backup/restore of that state | that an older binary reads newer data |
+| `aowis-dvmdb-format-compatibility-tests` | Refuses a frozen pre-release pack and its bundles (`tests/fixtures/pack-20261024`) without modifying the destination, and round-trips the current format | — |
+| `aowis-dvmdb-working-copy-tests`, `aowis-dvmdb-local-commit-tests` | Draft and ledger crash remnants, torn journal tails, damaged files, concurrent readers and writers, failed and interrupted Commits | — |
 
-The QEMU wrapper retains a machine-readable result as
-`build-vm-powercut/run-*/report.json`. The optional
-`tools/qualification_evidence.py` **does not execute tests**: it checks that
-both ext4 and XFS contain at least four consecutively numbered successful
-power-cut rounds, all recoveries preserve acknowledgements, recovered heads
-match acknowledged heads where required, and final sequences match the last
-recovery. It can also check combined Debug/Release CTest output and an HTTP
-soak summary, and record the SHA-256 of each evidence file. Save new run
-outputs explicitly:
+Run one of them verbosely:
+
+```bash
+ctest --test-dir build-linux-tests-release -R '^aowis-dvmdb-sigkill-restart-tests$' --output-on-failure -V
+```
+
+A failed test keeps its private directory and logs under `/tmp` for
+inspection.
+
+## QEMU power-cut drill (opt-in)
+
+Kills a whole virtual machine while the production library commits, on
+**ext4** and **XFS** data disks, and checks that every acknowledged commit
+survives.
+
+```bash
+./qualify_vm_powercut_docker.sh --rounds 4                        # both filesystems
+./qualify_vm_powercut_docker.sh --rounds 24 --filesystems ext4 xfs
+./tools/prepare_vm_powercut_docker.sh                             # optional: build the image only
+```
+
+Only Docker is needed on the Linux x86_64 host. The wrapper builds a Debian 12
+image (cached), compiles the worker inside it, downloads and SHA-512-checks
+the official Debian 12 cloud image, creates a throwaway SSH identity and runs
+`tools/qualify_vm_powercut.py`. `/dev/kvm` is used when accessible; otherwise
+QEMU emulates (much slower). The first run downloads several hundred MiB;
+images are cached in `~/.cache/aowis-dvmdb-powercut/` (`AOWIS_VM_CACHE`),
+results go to `build-vm-powercut/run-*/` (`AOWIS_VM_RESULTS`).
+
+Each round:
+
+1. boot the guest, mount a fresh sparse data disk (`/dev/vdb`) and stage the
+   worker (the guest OS disk may lose unsynced writes too, so the worker is
+   staged on every boot; that never touches the repository);
+2. on later boots, reopen the repository in a new process and run full
+   verification;
+3. the worker commits and prints `ACK <sequence> <record-hash>` after each
+   synchronous commit, then waits for `GO`;
+4. the host confirms the ACK, sends `GO` (allowing one more, possibly
+   in-flight commit) and kills **QEMU** with `SIGKILL`: no sync, no unmount;
+5. reboot on the same disk, let the filesystem replay its journal, verify, and
+   check that the recovered sequence is the last acknowledged one or exactly
+   one more.
+
+Docker uses host networking by default, because bridge DNS often fails while
+building the image (`Temporary failure resolving deb.debian.org` means the
+build container has no DNS; no test ran). `AOWIS_VM_DOCKER_NETWORK=bridge`
+selects bridge networking. The VM's SSH forward binds to 127.0.0.1 only. The
+container runs with your UID/GID and creates a matching passwd entry, which
+OpenSSH needs.
+
+On success the overlays, keys and cloud-init data are deleted and
+`report.json` is kept. On failure everything is kept for inspection, including
+a throwaway private key; delete it afterwards.
+
+**What it proves:** consistency after loss of the guest's RAM and page cache on
+the tested guest, filesystem, virtio disk (`cache=none`) and cut timings.
+**Not:** physical SSD or controller power loss, torn sectors or lying flushes.
+
+### Without Docker
+
+`tools/qualify_vm_powercut.py` runs the same drill with your own guest image:
+a bootable x86_64 qcow2/raw image with an SSH server, util-linux, `mkfs.ext4`,
+`mkfs.xfs` and a compatible C++ runtime, booting from virtio `/dev/vda`, and an
+SSH account that is `root` or has passwordless sudo.
+
+```bash
+cmake --build build-linux-tests-release --target aowis-dvmdb-vm-powercut-worker
+python3 tools/qualify_vm_powercut.py \
+  --guest-image ~/vm-images/test-base.qcow2 --ssh-key ~/.ssh/aowis-vm-test \
+  --guest-user aowis-test --cloud-init-seed /tmp/aowis-vm-seed.img \
+  --worker ./build-linux-tests-release/aowis-dvmdb-vm-powercut-worker \
+  --filesystems ext4 xfs --rounds 24 --kvm \
+  --work-root "$(mktemp -d /tmp/aowis-vm.XXXXXXXX)" \
+  --report-json build-qualification/powercut.json
+```
+
+The guest boots from a new overlay of the image with a new sparse data disk;
+the tool refuses unexpected disk layouts before formatting. An optional
+cloud-init seed (`cloud-localds`) can create the test user and install
+`e2fsprogs`/`xfsprogs`; it is attached read-only and `cloud-init status --wait`
+is checked. Use a throwaway SSH key. `--boot-timeout` helps slow guests.
+
+The CTest `aowis-dvmdb-vm-powercut-worker-smoke` only checks the worker's
+protocol; it does not run QEMU.
+
+## HTTP soak (opt-in)
+
+One server process under six concurrent clients that import multi-MiB bundles
+into new branches, export and byte-compare them and read HEADs across three
+projects, while `/health` is probed continuously. Admission 503s are retried
+and counted. At the end all repositories are reopened, verified and checked
+against the import count.
+
+```bash
+./build-linux-tests-release/aowis-dvmdb-http-transfer-stress-tests \
+  --soak-seconds 3600 ./build-linux-tests-release/aowis-server-dvmdb
+```
+
+The log has a progress line per minute (elapsed seconds, imports, exports,
+503s). The counts are measurements of that run, not service-level objectives.
+This workload creates many branches from repeated transfers; it is not a
+hydraulic edit or merge workload ([benchmarks](benchmark-plan.md)).
+
+### Resource sampling
+
+`tools/qualify_http_resources.py` runs the same soak and samples the server and
+the client harness from `/proc` (RSS and its high-water mark, file descriptors,
+threads, CPU time). Each run gets a new `build-qualification/http-resources-*`
+directory with the soak log, `samples.csv` and a JSON report including host and
+kernel details and the executables' SHA-256.
+
+```bash
+python3 tools/qualify_http_resources.py --seconds 300
+python3 tools/qualify_http_resources.py --seconds 3600 --interval-ms 1000 --max-server-rss-mib 256
+python3 tools/analyze_http_resource_runs.py build-qualification/http-resources-* \
+  --output-json build-qualification/http-resource-analysis.json
+```
+
+`--max-server-rss-mib` is an optional ceiling you choose for that run. The
+analyzer checks each report against its samples and log hash, and reports
+transfers per second (per minute and per quarter of the run), peak RSS and
+descriptors and CPU in core equivalents; it flags runs that are not comparable
+(duration, host, kernel, binaries). RSS grows with retained history and
+caches; growth alone is not a leak.
+
+## Keeping evidence
+
+`tools/qualification_evidence.py` checks saved results; it runs nothing. It
+requires at least `--min-rounds` (default 4) consecutive successful power-cut
+rounds on both ext4 and XFS with every acknowledgement preserved, and can check
+a combined CTest log (`--min-tests`) and a soak log (`--min-soak-seconds`),
+recording each file's SHA-256.
 
 ```bash
 mkdir -p build-qualification
 set -o pipefail
 ./compile_linux_tests.sh --both 2>&1 | tee build-qualification/ctest.log
-./build-linux-tests-release/aowis-dvmdb-http-transfer-stress-tests \
-  --soak-seconds 300 ./build-linux-tests-release/aowis-server-dvmdb \
-  2>&1 | tee build-qualification/http-soak.log
+./build-linux-tests-release/aowis-dvmdb-http-transfer-stress-tests --soak-seconds 300 \
+  ./build-linux-tests-release/aowis-server-dvmdb 2>&1 | tee build-qualification/http-soak.log
 ./qualify_vm_powercut_docker.sh --rounds 4 --filesystems ext4 xfs
-```
-
-Then choose the **actual** latest saved QEMU `report.json` path (the runner
-prints it) and generate a new, non-overwriting evidence summary:
-
-```bash
 python3 tools/qualification_evidence.py \
-  --qemu-report build-vm-powercut/run-REPLACE_WITH_ACTUAL_RUN/report.json \
-  --ctest-log build-qualification/ctest.log \
-  --soak-log build-qualification/http-soak.log \
+  --qemu-report build-vm-powercut/run-<id>/report.json \
+  --ctest-log build-qualification/ctest.log --soak-log build-qualification/http-soak.log \
   --require-all --output build-qualification/evidence.json
 ```
 
-If only a VM report is available, omit the other inputs and `--require-all`;
-the summary explicitly identifies them as `not_supplied`. Higher thresholds
-can be set using `--min-rounds`, `--min-tests` and `--min-soak-seconds`.
-Preserve the **original input logs and JSON report** with the summary. File
-hashes detect later modifications when compared with the summary, but are
-not signed provenance or proof that the tests really executed on a claimed
-machine. Do not interpret `validated_report` as a production release or
-hardware durability certification.
+Keep the original logs and reports with the summary. Hashes detect later
+changes; they are not signed provenance, and a validated summary is not a
+release or hardware certificate.
 
-## One-command Docker workflow (recommended)
+## Still open
 
-The top-level `qualify_vm_powercut_docker.sh` is a containerized **launcher for QEMU**, not a replacement for QEMU. Docker supplies the guest-compatible build tools, QEMU binaries and cloud-image provisioning. The actual durability operation still boots a full Linux guest and abruptly kills the entire QEMU process. **Only a working
-Docker installation is required on the Linux x86_64 host.** It builds the
-Debian 12 qualification image (cached across runs), compiles the production
-worker **inside the Debian 12 container**, downloads and SHA-512-verifies the
-official Debian 12 genericcloud guest image, generates a new disposable
-cloud-init/SSH identity, and launches `tools/qualify_vm_powercut.py`. The
-**actual** drill repeatedly kills QEMU and reboots its disposable data disk.
-It is not the QEMU-free CTest worker smoke test.
-
-Run from the repository root:
-
-```bash
-./qualify_vm_powercut_docker.sh --rounds 4
-```
-
-For the more thorough run (24 power cuts for each filesystem):
-
-```bash
-./qualify_vm_powercut_docker.sh --rounds 24 --filesystems ext4 xfs
-```
-
-You can prepare the reusable container separately without starting QEMU:
-
-```bash
-./tools/prepare_vm_powercut_docker.sh
-```
-
-The script automatically passes `/dev/kvm` if it is usable by your account;
-otherwise QEMU uses software emulation, which can be **much slower**. The
-host is not required to install QEMU, `mkfs`, a compiler or `cloud-localds`
-directly. Docker uses **host networking by default** for both image building and
-qualification execution. This avoids Docker bridge DNS failures when Debian
-packages or the guest image must be downloaded, and provides network access
-for cloud-init inside the QEMU guest. The VM's SSH port forwarding binds only
-to 127.0.0.1. Host networking gives the container access to the host network
-namespace; use only in a trusted qualification environment. Set
-`AOWIS_VM_DOCKER_NETWORK=bridge` to explicitly use Docker bridge networking
-if your host supports functional DNS there. Neither mode requires
-`--privileged`, host block disks or a writable source checkout.
-
-### Docker DNS troubleshooting
-
-A Docker build error such as `Temporary failure resolving deb.debian.org`
-during `apt-get update` means the Docker **build container** cannot resolve
-Debian package servers; it is not a storage-engine failure and no QEMU test
-has run. The wrapper now uses `docker build --network host` (including with
-the legacy Docker builder) rather than relying on bridge DNS. The same network
-choice applies to `docker run`. If this still fails, first check that the
-host itself resolves `deb.debian.org`, Docker's proxy configuration and
-local firewall/network policy. Fix the underlying Docker/host networking
-before treating any qualification attempt as an executed test. Do not silently
-skip package installation or mistake the QEMU-free CTest worker smoke for a
-successful VM drill. The explicit bridge option is primarily useful on hosts
-whose Docker bridge DNS is already functional.
-
-The official Debian cloud image and compiled worker are cached in
-`~/.cache/aowis-dvmdb-powercut/`. Logs and the JSON qualification reports are
-saved under `build-vm-powercut/run-*/`. First execution requires internet
-access both to build the container/download the guest image and for the guest
-to install ext4/XFS utilities using Debian package repositories. Subsequent
-runs reuse the verified image and build cache; `--refresh-image` explicitly
-updates the cached guest. A first-time run can download hundreds of megabytes.
-A full run may require gigabytes of scratch space for VM overlays and images.
-
-The Docker container runs with your UID/GID. Its image build also creates a
-matching account entry when that numeric UID is absent from Debian's
-`/etc/passwd`; this is required by OpenSSH's `ssh-keygen`. Merely passing
-`docker run --user UID:GID` is insufficient because it does not create the
-account. The runner checks this immediately, before downloading an image or
-compiling the worker. No production repositories or real host block devices
-are mounted. VM data disks are **new sparse files**.
-The test refuses unexpected in-guest disk layouts before formatting. On
-failure, isolated evidence (which may include an ephemeral SSH private key)
-is retained under `build-vm-powercut/` for inspection; protect or delete it
-after diagnosis. On success, private keys and cloud-init artifacts are removed
-and the JSON result is retained. To override locations, set `AOWIS_VM_CACHE`
-or `AOWIS_VM_RESULTS` in the shell environment.
-
-A successful Docker-launched QEMU run qualifies *guest cache loss on disposable ext4/XFS
-virtual disks*. It does **not** prove physical SSD/controller power-loss
-semantics. The manual runner below remains available for custom distributions
-and guest images.
-
-## 1. Manual guest-cache-loss drill (QEMU, ext4 and XFS)
-
-`tools/qualify_vm_powercut.py` boots an x86_64 Linux guest from a **new qcow2
-overlay** of a pre-existing boot image and attaches a **new sparse raw data
-disk** at `/dev/vdb`. Nothing is formatted or mounted on the host. The test
-checks that `/dev/vda` is the guest boot disk, `/dev/vdb` is a separate disk,
-and the AOWIS test directory really resolves to its mount before writing.
-
-Each round uses the following protocol:
-
-1. Boot Linux, mount the disposable ext4/XFS data disk at `/mnt/aowis-powercut`.
-   Stage the guest-compatible worker executable on **every** boot. Its installation
-   is on the guest OS overlay, not the data disk being tested; unsynchronized OS
-   writes can disappear when QEMU is killed. Re-staging the test executable is
-   separate from recovery of the AOWIS repository and must not repair or
-   reinitialize that repository.
-2. On first boot, initialize the native repository. On later boots, reopen it
-   in a new process and run full `Repository::verifyRepository()`.
-3. Start an independent write worker. After every synchronous commit it emits
-   an `ACK <sequence> <revision-sha256>`, then waits for the host's `GO`.
-4. The host confirms the ACK, sends `GO` to permit **one** more potentially
-   in-flight commit, then kills **QEMU itself** with `SIGKILL` (no guest sync,
-   unmount or orderly shutdown).
-5. Reboot the same guest overlay and data disk. Linux replays the filesystem
-   journal on mounting. Verify the entire native repository and check the
-   recovered counter is either the last acknowledged sequence or exactly one
-   greater (an unacknowledged publication). Continue from the recovered head.
-6. Repeat with a **separate freshly created disk** for the other filesystem.
-
-### Requirements
-
-- Linux x86_64 host with `qemu-system-x86_64`, `qemu-img`, OpenSSH client and
-  optionally accessible `/dev/kvm` for acceleration. KVM is strongly preferred.
-- A **pre-existing, user-supplied** bootable x86_64 Linux qcow2/raw image with
-  SSH server, util-linux (`lsblk`, `mount`, `findmnt`), `mkfs.ext4`, `mkfs.xfs`,
-  and the required C++ runtime. The image must boot from virtio `/dev/vda`.
-- SSH access via a dedicated test key, as `root` or an account with passwordless
-  `sudo`; SSH forwards to loopback only. Test binaries must be ABI-compatible
-  with the guest distro. No production storage or host block-device privileges
-  are needed.
-- Enough free space for one OS overlay and a sparse data disk for each test
-  filesystem. Each run uses a **randomized private directory**.
-
-A cloud-init-compatible Fedora (or other matching-distro) cloud image is one
-possible guest base. If you have `cloud-localds`, you can create a seed disk for
-SSH test-user provisioning. For example, after creating a **new throwaway**
-SSH key:
-
-```bash
-ssh-keygen -t ed25519 -N '' -f "$HOME/.ssh/aowis-vm-test"
-cat > /tmp/aowis-vm-user-data <<EOF
-#cloud-config
-users:
-  - name: aowis-test
-    groups: [wheel]
-    shell: /bin/bash
-    sudo: 'ALL=(ALL) NOPASSWD:ALL'
-    ssh_authorized_keys:
-      - $(cat "$HOME/.ssh/aowis-vm-test.pub")
-packages: [e2fsprogs, xfsprogs, util-linux]
-EOF
-cloud-localds /tmp/aowis-vm-seed.img /tmp/aowis-vm-user-data
-```
-
-Use a cloud image containing a working SSH server and cloud-init, with guest
-package repositories available if the necessary formatting tools are not
-already installed. Do not reuse a real SSH identity or production VM disk.
-The seed is attached **read-only** as the guest's third virtio disk, and
-`cloud-init status --wait` is checked before starting the first filesystem
-operation. A guest may require several minutes on the first boot to provision.
-
-Build the production worker (the test build includes the same production native
-store; unlike the injected-fault tests it does not use special hooks):
-
-```bash
-cmake --build build-linux-tests-release --target aowis-dvmdb-vm-powercut-worker --parallel
-```
-
-Run the ext4/XFS drill, using an existing downloaded, bootable **test** guest
-image and your guest test credentials:
-
-```bash
-work_root="$(mktemp -d /tmp/aowis-vm-qualification.XXXXXXXX)"
-python3 tools/qualify_vm_powercut.py \
-  --guest-image "$HOME/vm-images/fedora-test-base.qcow2" \
-  --cloud-init-seed /tmp/aowis-vm-seed.img \
-  --ssh-key "$HOME/.ssh/aowis-vm-test" \
-  --guest-user aowis-test \
-  --worker ./build-linux-tests-release/aowis-dvmdb-vm-powercut-worker \
-  --filesystems ext4 xfs --rounds 24 --kvm \
-  --work-root "$work_root"
-```
-
-Without cloud-init, omit `--cloud-init-seed` and use a **pre-provisioned** SSH
-account and filesystem tools. Omit `--kvm` when acceleration is unavailable
-(TCG is much slower). `--boot-timeout` can be raised for slow guest startups.
-
-On success, the randomized overlay and raw data disks are deleted; the host
-prints a per-round summary. On failure, the work directory is preserved,
-including `serial.log`, SSH worker stderr, and the **disposable** raw image.
-Keep these as evidence and inspect before cleanup. A failed drill must not be
-reported as a pass. This drill is not in default CTest, because provisioning
-QEMU, a guest and suitable test keys is explicitly an operator action.
-
-**Critical evidence limitation:** killing the guest VM drops guest RAM and
-its kernel page cache, and `cache=none` avoids ordinary host page-cache writes
-for the virtual disks. It does **not** power off the host storage controller or
-prove behavior under torn sector writes, lying flush implementations, device
-cache loss, or a physical server's sudden power removal. Real hardware and
-hypervisor/device-cache qualification remain separate deployment requirements.
-Successful verification establishes observed consistency only for the
-specified guest, filesystem, virtio device and tested power-cut timings.
-
-## 2. Sustained multi-project HTTP soak
-
-The existing `aowis-dvmdb-http-transfer-stress-tests` binary has an **opt-in**
-mode that holds **one HTTP server process** for the requested duration. Six
-concurrent workers continuously import immutable multi-MiB native bundles into
-new branches across three projects, export them, byte-compare bundle contents,
-read the branch heads and continuously probe `/dvmdb/v1/health`. Legitimate
-admission-budget 503 responses are retried and counted. When time expires,
-the server is stopped and **all** project repositories are reopened, fully
-verified and checked against the completed import count. Failure preserves the
-fixture directory and server log for investigation.
-
-```bash
-./compile_linux_tests.sh --both
-./build-linux-tests-release/aowis-dvmdb-http-transfer-stress-tests \
-  --soak-seconds 3600 ./build-linux-tests-release/aowis-server-dvmdb
-```
-
-A short developer smoke can use `--soak-seconds 30`. This sustained mode is
-not registered in normal CTest: test duration is controlled explicitly. Its
-reported import/export counts, staging-busy responses and worst health time
-are **measurements**, not promised production SLOs.
-
-### Reproducible Linux HTTP resource measurements
-
-Use `tools/qualify_http_resources.py` to run **the same** production HTTP
-soak while sampling the actual child server process and its client harness
-from Linux `/proc`. The executable first creates a disposable multi-megabyte
-bundle, starts a real HTTP server, and uses three independent projects. The
-monitor adds no requests or database operations and never opens a production
-repository. It observes process RSS, high-water memory, file descriptors,
-threads and user+system CPU. One unique run directory contains the raw soak
-log, a per-process sample CSV and a machine-readable JSON report with
-kernel/machine information and SHA-256 hashes of the executable files:
-
-```bash
-python3 tools/qualify_http_resources.py --seconds 300
-# One-hour run, sampled every second:
-python3 tools/qualify_http_resources.py --seconds 3600 --interval-ms 1000
-```
-
-By default these use the compiled test and server executables in
-`build-linux-tests-release` and create fresh `build-qualification/http-resources-*`
-subdirectories. Override `--stress-binary`, `--server-binary` and
-`--output-root` when needed. The monitor retains evidence if the workload
-fails, is interrupted, or the server cannot be observed. Optional
-`--max-server-rss-mib N` applies an **operator-selected** memory ceiling to
-that run; no universal ceiling is baked into the database or the tests.
-
-Review one or more **completed** run directories without executing another
-soak:
-
-```bash
-python3 tools/analyze_http_resource_runs.py \
-  build-qualification/http-resources-kdp3qcyi \
-  build-qualification/http-resources-dtjr8g4m
-# Optional machine-readable derived evidence:
-python3 tools/analyze_http_resource_runs.py \
-  build-qualification/http-resources-kdp3qcyi \
-  build-qualification/http-resources-dtjr8g4m \
-  --output-json build-qualification/http-resource-baseline-analysis.json
-```
-
-The analyzer validates the original JSON statistics against `samples.csv`
-and the `soak.log` SHA-256, and independently checks that the log's terminal
-soak counters match the JSON report. It reports normalized transfers/s,
-peak RSS/FDs, CPU time expressed as average logical-core **equivalents**,
-and central-window server RSS medians (samples in 10–25% and 75–90% of the
-run). Current stress-harness builds additionally write one-minute progress lines
-(`elapsed_s`, import/export counts, 503 count) to the original `soak.log`.
-A dedicated six-second CTest smoke verifies that elapsed-time progress is
-actually emitted by a real HTTP server; only short smoke workloads use
-one-second checkpoints. The analyzer validates monotonic progress and shows
-rates for each interval plus four time-weighted equal-duration throughput
-quarters. These window averages do not assume checkpoint times coincide with
-quarter boundaries. The first/last interval and first/last quarter changes
-are descriptive, not a fixed performance pass/fail threshold;
-these checkpoints perform no extra HTTP operations and do not affect the
-engine or report schema. Pre-existing runs without checkpoints remain
-compatible but cannot be retrospectively separated into throughput phases.
-It clearly marks differences in run duration, host/kernel or executable
-hashes as not fully comparable. It **does not**
-control CPU contention or prove a memory leak from normal retained-history
-and allocator growth. The original evidence files are never modified.
-
-The first two five-minute runs on the operator's eight-CPU Linux system passed
-with 7,505 and 7,459 imports/exports each, a 37-descriptor peak, zero 503s
-and approximately 28.1 MiB peak sampled server RSS in both. See
-[engineering findings](engineering-findings.md) for the full measured numbers.
-A one-hour run (`--seconds 3600 --interval-ms 1000`) was also completed:
-67,747 imports, 67,747 exports, zero 503s, sampled server-RSS peak 35.4 MiB,
-36 peak descriptors and 10 ms worst health latency. Its ~37.64 transfers/s
-was below the mean ~49.88 transfers/s of the two five-minute runs. That
-historical one-hour log has no interval counters, so the result **does not
-establish a within-run slowdown**. For a repeat run with the updated stress
-executable, inspect the printed minute-by-minute rates before evaluating
-branch-history cost. Avoid heavy competing CPU/disk work for a clean
-baseline, then separately test intentional contention.
-
-A later optimized and instrumented hour-long run completed **110,733
-imports and 110,733 exports**, no 503s, a **28.0 MiB** sampled peak RSS,
-37 peak descriptors and a 10 ms worst health latency. The four quarter-hour
-rates were **62.01 / 58.70 / 61.56 / 63.81 transfers/s**; this run had no
-persistent throughput decline as branches accumulated. The operator's saved
-evidence can be analyzed with:
-
-```bash
-python3 tools/analyze_http_resource_runs.py \
-  build-qualification/http-resources-lqle9235
-```
-
-The earlier hour-long run used other executables and has no interval records,
-so its 37.64/s average cannot be assigned to a specific stage of the hour.
-The two runs were not controlled for background machine load; the post-change
-61.52/s does not define a portable throughput SLA. See
-[engineering findings](engineering-findings.md) for full details.
-
-The short Python CTest named `aowis-dvmdb-http-resource-monitor-tests`
-checks process discovery, sample recording, success parsing, and rejection of
-misleading success text without a server. It uses a synthetic *process tree*,
-not QEMU or a live HTTP service. The production HTTP soak remains opt-in.
-
-RSS naturally grows with retained branch history and physical index/cache
-working sets; growth alone is not evidence of a leak. CPU totals cover the
-monitored server and harness processes only. `/proc` measurements are
-sampling observations, not precise peak allocation or hardware counters.
-Use repeated workloads with the same duration, dataset, host, kernel and
-storage stack before defining a resource envelope. Include disk-space,
-I/O and latency measurements under representative workloads separately;
-this sampler does not establish those guarantees.
-
-It is not a full replication conflict/fuzz test, does not emulate a failing
-physical device, and does not replace a real power-loss drill. Additional
-production qualification should cover repeated cold-cache runs, larger
-replica divergence/merging, degraded devices and more varied model workloads.
+Repeated power-cut and soak runs on the final first-release build, physical
+power-loss tests on production hardware, degraded devices, cold-cache
+workloads, larger divergent replicas and fuzzing of transfers.

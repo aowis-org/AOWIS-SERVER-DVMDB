@@ -42,3 +42,24 @@ before retrying.
 
 Both native and REST frontends must implement equivalent validation,
 concurrency checks, immutable revision records and durable publication.
+
+## API
+
+`Repository::mergeBranches(project, target, source, expectedTarget,
+expectedSource, options)` is the generic record-level three-way merge: domain
+callbacks in `MergeOptions` can choose conflict sides, resolve records and
+validate the candidate; both pins are checked under the publication lock, and
+a conflicting merge leaves both heads and the pack unchanged. It does **no**
+hydraulic validation of its own; branches holding hydraulic networks must use
+`hydraulic::mergeHydraulicBranches` ([hydraulic merging](native-hydraulic-merging.md)).
+
+HTTP: `POST /dvmdb/v1/projects/{id}/merges` (generic) and
+`POST /dvmdb/v1/projects/{id}/hydraulic-merges`, both with `target`, `source`,
+`expectedTargetHead` and `expectedSourceHead`. The answer has `status`
+(`up_to_date`, `fast_forward`, `merged` or `conflicts`), `base`,
+`targetBefore`, `sourceHead`, `head` and `conflicts` (entity UUID, base,
+target and source record hashes, reason); `conflicts` is returned with HTTP
+409. The merge base is the unique lowest common ancestor. A criss-cross
+history with several independent lowest common ancestors is refused with a
+conflict ("multiple independent merge bases require recursive merging");
+recursive virtual merge bases are not implemented.

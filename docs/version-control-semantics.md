@@ -1,15 +1,13 @@
 # AOWIS / DVMDB version-control contract
 
-**Normative product and system-design specification.** All native storage,
-service, REST, replication and GUI behavior must conform to this contract.
-This document defines behavior; it does not claim that every operation is
-already implemented. [Native architecture](architecture.md),
-[revision API](native-revision-history.md),
-[merge semantics](native-branch-merging.md), and
-[GUI integration](gui-integration-requirements.md), and
-[private working repositories](private-working-repositories.md) elaborate the same model.
-The step-by-step cross-project delivery sequence and remaining **decision gates**
-are in the [DVMDB implementation roadmap](roadmap.md).
+**The normative specification.** Native storage, the service, REST,
+replication and the GUI must all follow it. It defines behaviour, not what is
+built: the [roadmap](roadmap.md#c-status) says which parts exist. The same
+model is elaborated in [architecture](architecture.md),
+[revision history](native-revision-history.md),
+[branch merging](native-branch-merging.md),
+[private working repositories](private-working-repositories.md) and
+[GUI integration](gui-integration-requirements.md).
 
 ## 1. Concepts and terminology
 
@@ -51,10 +49,11 @@ need to be a leaf in the project-wide ancestry graph.
   identities stable across rename, export/import, server transport and
   repository reopening. UUIDv7 ordering is **not** commit ancestry.
 - Compute SHA-256 over a **canonical, versioned, immutable revision record**
-  that binds revision UUID, project UUID, ordered parent revision UUIDs,
-  immutable metadata, snapshot root and relevant integrity roots. Include
-  parent record-hash bindings, or verify them through a canonical parent map,
-  so changing an ancestor cannot pass verification unnoticed.
+  that binds revision UUID, project UUID, ordered parent revision UUIDs with
+  each parent's record hash, the snapshot root and the reference-index root,
+  so changing an ancestor cannot pass verification unnoticed
+  ([record layout](storage-formats.md#revision-record-t-2)). The record holds no
+  author, message or time; the UUIDv7 carries the creation time.
 - The snapshot's Merkle roots recursively bind **all** committed hydraulic
   and model objects; the complete model need not be copied into one flat hash
   input for each commit. Shared immutable subtrees may be deduplicated.
@@ -266,8 +265,8 @@ The API contract must make these distinct operations explicit:
 - list/get branches -> UUID, name, nullable HEAD, `originBranchId`,
   `forkRevisionId`;
 - checkout/start working copy -> UUID, ownership, exact base revision/null;
-- read immutable revision/snapshot -> UUID, SHA-256 record/snapshot roots,
-  ordered parents and immutable metadata;
+- read immutable revision/snapshot -> UUID, SHA-256 record/snapshot roots
+  and ordered parents with their record hashes;
 - create branch from **committed** revision, with optional source branch UUID;
 - save drafts and commit locally in the personal repository with exact
   expected **local** HEAD and idempotent result;
@@ -337,11 +336,11 @@ is in [private working repositories](private-working-repositories.md):
 - New local branches retain their UUIDv7 at first explicit remote publication;
   a missing remote branch and a null-HEAD remote branch are different cases.
 
-Still to define per milestone are *engineering parameters*: exact record and
-HTTP schemas, lease TTL/renewal, fencing-token encoding, draft quota and
-retention, durable operation-status retention, merge-conflict payloads, and
-SQLite/PostgreSQL transaction implementations with identical externally
-visible semantics. Git-style lane placement and legibility are GUI layout
+Still to define in their milestones are *engineering parameters*: draft
+quotas and retention, operation-status retention and the merge-conflict
+report. Lease duration (1–120 s), fencing tokens (UUIDv7) and the draft and
+ledger formats are already fixed ([working copies](working-copies.md),
+[storage formats](storage-formats.md)). Git-style lane placement is GUI layout
 work, not a change to ancestry.
 
 Authentication, authorization, audit and permissions are outside the

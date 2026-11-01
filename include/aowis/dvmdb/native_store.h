@@ -285,7 +285,7 @@ public:
     // Branches. A repository's first branch is created unborn (no revision,
     // null HEAD); later branches start at an existing committed revision.
     // createBranch without a source still writes an empty root revision for
-    // the first branch (removed with the HTTP cutover; prefer createUnbornBranch).
+    // the first branch; new code uses createUnbornBranch (see docs/roadmap.md, VC-01).
     RevisionId createBranch(const ProjectId& project, std::string_view name,
                               std::optional<std::string_view> from = std::nullopt);
     // Return the new branch UUID and fork metadata from the same locked write.

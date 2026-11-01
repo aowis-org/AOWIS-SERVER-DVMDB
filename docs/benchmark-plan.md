@@ -137,79 +137,23 @@ production mixed workloads, or network-service contention.
 
 ## Sustained HTTP resource envelope
 
-For repeatable Linux process measurements, run the existing real HTTP bundle
-soak through `tools/qualify_http_resources.py` rather than scraping PID values
-from a separately launched server. It measures the same six-client/three-project
-workload, saves a raw observation CSV, an immutable-per-run JSON summary and
-the original soak log under a fresh `build-qualification/http-resources-*`
-directory. Two same-binary, 300-second operator runs now form a measured
-baseline: 50.03 and 49.73 combined transfers/s; approximately 28.1 MiB peak
-sampled server RSS in both, with 37 peak open descriptors and zero admission
-503s. A subsequent 3,600-second run completed **67,747 imports and
-67,747 exports**, zero admission 503s and a 35.4 MiB sampled RSS peak at
-**37.64 transfers/s**. The lower hour-long average could not be assigned to
-history-growth cost or external contention without per-minute progress data.
-A later 900-second run **with** checkpoints exhibited a 63.28/s to 41.75/s
-first-to-last-minute decline as branch refs accumulated. This exposed a
-single-branch lookup path that scanned the entire branch catalogue. After
-switching to direct regular-ref lookups, another 900-second run completed
-28,675 import/export pairs, at 63.72 combined transfers/s versus 54.14/s
-previously. Its first/last-minute rates were 64.82/s and 63.10/s. The before
-and after reports have different executable hashes and were not instrumented
-for background host load, so this is useful evidence, not a controlled
-portable speedup estimate. The saved before/after reports remain useful.
-The subsequently completed **optimized 3,600-second** run retained the same
-Release executable hashes as the post-change 900-second run: 110,733
-imports and exports each (221,466 transfers, **61.52/s**), **zero 503s**,
-28.0 MiB peak sampled server RSS and 10 ms worst health latency. Quarter-hour
-throughput averages were **62.01 / 58.70 / 61.56 / 63.81 transfers/s**,
-showing no sustained decline with the growing branch catalogue. This run
-used different binaries from the previous uninstrumented 3,600-second run,
-and does not establish a portable 63.5% causal speedup claim. Detailed
-figures and caveats are retained in [engineering findings](engineering-findings.md).
+Use `tools/qualify_http_resources.py`, which runs the real six-client,
+three-project HTTP bundle soak and samples the server from `/proc`, and
+`tools/analyze_http_resource_runs.py` to compare saved runs. Commands and
+interpretation are in [durability qualification](durability-qualification.md#resource-sampling);
+the measured runs (including the branch-lookup fix that removed a throughput
+decline as branches accumulated) are in
+[engineering findings](engineering-findings.md#measured-sustained-linux-http-resource-envelope).
+Keep the original run directories: the analyzer needs their CSV, JSON and log.
 
-These are observed workloads, not resource guarantees. Run additional longer
-periods (e.g. 21600 seconds) only if relevant to deployment workloads, and
-prioritize representative hydraulic model traffic, actual disk use and cold
-reopening on target hardware. The stress harness now prints one-minute
-import/export checkpoints to `soak.log` without extra HTTP requests. Use
-`tools/analyze_http_resource_runs.py` to validate saved JSON/CSV/log evidence,
-compare throughput and central-window RSS medians, and report within-run
-minute-by-minute transfer rates, first-to-last interval changes and
-four time-weighted quarter-run throughput averages when checkpoints are
-available. The analysis explicitly distinguishes same-binary
-repeats from ordered cross-build comparisons, and reports ordered overall
-throughput change without implying causal attribution. For example, on the
-operator's Linux machine with the original run directories still present:
-
-```bash
-python3 tools/analyze_http_resource_runs.py \
-  build-qualification/http-resources-ha2jc118 \
-  build-qualification/http-resources-m5po2jr0
-
-# A longer same-binary trend on the optimized build:
-python3 tools/analyze_http_resource_runs.py \
-  build-qualification/http-resources-lqle9235
-```
-
-Older run logs have only total throughput; their per-minute history cannot
-be inferred. Keep original run directories because their raw CSV, JSON and
-soak log evidence are required by the analysis tool.
-Do not presume linear memory growth. See
-[durability qualification](durability-qualification.md) for commands and
-interpretation limits.
-
-The existing fixture exercises multi-MiB bundle transfers and increasing
-branch counts. It is **not** a replacement for representative hydraulic
-model reads/writes, large object deltas, high-divergence merges, disk I/O
-profiling or real-world client latency. Record those separately before
-publishing a deployment resource envelope.
+This workload transfers bundles and creates branches; it is not representative
+hydraulic edit traffic, disk-use or cold-reopen measurement.
 
 ## Representative canonical hydraulic workload qualification
 
 The `aowis-dvmdb-hydraulic-edit-benchmark` uses **real serialized
-NetworkHydraulic objects** on one project-scoped UUIDv7 revision DAG, not
-SHA-based legacy branches or a synthetic model-record topology benchmark.
+NetworkHydraulic objects** on one project-scoped UUIDv7 revision DAG, not a
+synthetic model-record topology.
 Every measured edit passes the precise expected UUIDv7 HEAD; branch diff and
 hydraulic merge operate on immutable project-qualified revision IDs. The
 `engine=pack` metric remains unchanged for existing qualification tooling; it

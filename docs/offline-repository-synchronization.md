@@ -1,140 +1,115 @@
-# UUIDv7 portable and incremental repository synchronization
+# Synchronization with revision bundles
 
-The canonical DVMDB synchronization CLI and HTTP bundle routes transfer
-**immutable UUIDv7 revisions**, including both ordered parents of merge
-revisions. A revision UUIDv7 is its stable logical identity; SHA-256 hashes
-authenticate its canonical record and Merkle/model data. Bundle imports do
-not silently merge divergent histories or assign a new identity to an
-existing revision.
+A **revision bundle** carries one branch's committed history between
+independent repositories: by file with the `aowis-dvmdb-sync` CLI, or over
+HTTP. Import verifies everything before writing and then only creates the
+branch or fast-forwards it; it never merges or overwrites divergent work.
+Branch and revision UUIDv7s, nullable HEADs and fork provenance arrive
+unchanged. Drafts are never part of a bundle. Wire format:
+[storage formats](storage-formats.md#revision-bundles-aowrev21aowrev24).
 
-## Native UUIDv7 bundle APIs
+## What a bundle contains
 
-- `Repository::exportRevisionBundleV2(project, branch, fd)` exports a complete
-  `AOWREV21` branch snapshot when no origin is recorded, or `AOWREV23`
-  when immutable fork provenance exists: project UUID, branch UUID,
-  revision UUID, complete ancestry and associated content objects.
-- `Repository::exportIncrementalRevisionBundleV2(project, branch, base, fd)`
-  exports an `AOWREV22` delta (or provenance-aware `AOWREV24`) based on an authenticated UUIDv7 revision and
-  expected record SHA-256. Missing immutable objects must already be present
-  in the recipient repository.
-- `Repository::importRevisionBundleV2(project, fd, localBranch)` verifies the
-  caller-supplied **expected project UUID** against the bundle, checks record
-  and content hashes, verifies both parent links, and creates, fast-forwards
-  or recognizes an already-imported branch HEAD. It rejects divergence and
-  wrong-project histories. Publication occurs only after immutable objects
-  and resolver bindings are synchronized.
+* the project UUIDv7, the branch UUIDv7, its HEAD revision and record hash;
+* for a **full** bundle, every object reachable from the HEAD; for an
+  **incremental** bundle, the revisions not reachable from a recipient base
+  revision and, per revision, only the trie objects that differ from a parent
+  (the rest must already be in the recipient);
+* the branch's origin branch and fork revision, if it has them
+  (`AOWREV23`/`AOWREV24`; without provenance `AOWREV21`/`AOWREV22`).
 
-The native importer uses disk-backed scratch indexes rather than retaining
-all object payloads in memory. The caller can impose maximum byte, object and
-per-object limits. Transfers are not a substitute for authenticated access.
+An unborn branch has no revision and cannot be bundled; copy it with
+`POST /projects/{id}/unborn-checkout` instead
+([private repositories](private-working-repositories.md#checkout-of-an-unborn-branch)).
 
-## CLI usage
+## Import rules
 
-All canonical commands require a project UUIDv7; the revision and branch
-identifiers in their outputs are UUIDv7, not SHA-256 strings.
+Before anything is written the importer checks:
+
+* the bundle's project equals the expected project (the CLI argument or the
+  URL's project);
+* every object's SHA-256, every revision record, parent binding and the full
+  ancestry down to revisions the recipient already trusts;
+* trie structure and, for every model-indexed revision (including locally
+  borrowed ancestors of a delta), the exact reverse-reference index;
+* provenance: a fork revision needs an origin branch and must be an ancestor
+  of the HEAD; importing into an existing branch must not change its recorded
+  provenance;
+* the configured byte, object and per-object limits.
+
+Then it creates the local branch with the bundle's branch UUIDv7, fast-forwards
+it, or reports that it is already up to date. A local HEAD that is not an
+ancestor of the bundle's HEAD is a conflict, and so is a branch UUID that
+already exists under another local name. Objects are fsynced and revision
+bindings written before the branch record moves. Scratch tables live in the
+repository's `tmp/`, not in memory.
+
+## CLI
+
+`REPOSITORY` is one project's repository directory
+(`<root>/projects/<uuid>/repository`). Stop the server or other users of that
+root first, or work on a copy.
 
 ```bash
-project_uuid="<project-uuidv7>"
-./build-linux/aowis-dvmdb-sync head \
-  /path/to/source "$project_uuid" main
-./build-linux/aowis-dvmdb-sync branch-id \
-  /path/to/source "$project_uuid" main
+project="<project-uuidv7>"
+./build-linux/aowis-dvmdb-sync head      /src "$project" main        # HEAD revision UUIDv7
+./build-linux/aowis-dvmdb-sync branch-id /src "$project" main        # branch UUIDv7
 
-./build-linux/aowis-dvmdb-sync export \
-  /path/to/source "$project_uuid" main /tmp/main.aowbundle
-./build-linux/aowis-dvmdb-sync import \
-  /path/to/destination "$project_uuid" /tmp/main.aowbundle remote_main
+./build-linux/aowis-dvmdb-sync export /src "$project" main /tmp/main.aowbundle
+./build-linux/aowis-dvmdb-sync import /dst "$project" /tmp/main.aowbundle main
 
-base="$(./build-linux/aowis-dvmdb-sync head \
-  /path/to/destination "$project_uuid" remote_main)"
-./build-linux/aowis-dvmdb-sync export-incremental \
-  /path/to/source "$project_uuid" main "$base" /tmp/update.aowbundle
-./build-linux/aowis-dvmdb-sync import \
-  /path/to/destination "$project_uuid" /tmp/update.aowbundle remote_main
+base="$(./build-linux/aowis-dvmdb-sync head /dst "$project" main)"
+./build-linux/aowis-dvmdb-sync export-incremental /src "$project" main "$base" /tmp/update.aowbundle
+./build-linux/aowis-dvmdb-sync import /dst "$project" /tmp/update.aowbundle main
 ```
 
-Exports create new files exclusively; they refuse existing bundle filenames,
-invalid project/revision UUIDs and symlink targets. The `-v2`, SHA-bundle,
-identity-manifest and seed-branch-ID CLI commands have been removed. Neither
-`AOWSYNC3` nor `AOWSYNC4` is accepted through this public CLI. There is no
-compatibility migration for older pre-release repositories.
+Exports never replace an existing file or follow a symlink; the bundle appears
+under its name only when complete and fsynced. The import prints `created`,
+`fast-forward` or `up-to-date`, the HEAD and the number of objects imported.
 
-## HTTP synchronization
+## Native API
 
-The canonical HTTP routes are project-scoped:
+```cpp
+repository.exportRevisionBundle(project, "main", "/tmp/main.aowbundle");
+repository.exportIncrementalRevisionBundle(project, "main", base, "/tmp/update.aowbundle");
+const RevisionBundleImport result =
+    repository.importRevisionBundle(project, fd, "main", limits);
+```
 
-- `GET /dvmdb/v1/projects/{projectUuid}/branches/{branch}/bundle`
-  exports a complete `AOWREV21` or provenance-aware `AOWREV23` bundle.
-- `GET .../bundle?base={revisionUuidV7}` exports an `AOWREV22` or
-  provenance-aware `AOWREV24` delta.
-- `POST .../bundle` imports a binary bundle and reports branch creation,
-  fast-forward or idempotent replay; divergent history fails with a conflict.
+Path forms publish atomically with no replace; descriptor forms write to an
+empty caller-owned regular file and leave it empty on failure. `BundleLimits`
+caps total bytes, objects and object size; hard ceilings are 64 GiB,
+1,000,000 objects and 64 MiB per object.
 
-Uploads and downloads use bounded project scratch files and configured HTTP
-transfer quotas. The HTTP server requires separate application-level
-security measures: bundle SHA-256 checks prove integrity, **not** authorship,
-authorization or permission to modify a project. The native verifier checks
-physical and logical integrity, but generic bundle import is not a validator
-of hydraulic engineering semantics.
+## HTTP
 
-## Branch collaboration and retention
+* `GET /dvmdb/v1/projects/{id}/branches/{branch}/bundle` — full bundle;
+  `?base={revision}` for an incremental one. Streamed from a scratch file.
+* `POST` to the same path — import into `{branch}`; `201` when the branch was
+  created, `200` for fast-forward or up to date, with `status`, `head` and
+  `objectsImported`.
 
-Import into a tracking branch, inspect its immutable history and merge it into
-the desired local branch explicitly. Branch IDs survive transfer and rename;
-branch names are metadata inside records stored by UUIDv7 filenames. The
-compactor retains every published UUIDv7 revision mapping, including revisions
-not currently referenced by a HEAD, rather than making stable revision IDs
-invalid. This is conservative retention, not a revision garbage collector.
+Every transfer reserves `max_transfer_mib` of the server-wide staging budget
+for its duration (`503 staging_busy` when none is left); a bundle over the
+limit is `413 transfer_too_large`. Use the CLI for larger transfers. Bundle
+hashes prove integrity, not authorship or permission to change the project.
 
-For the complete frozen bundle wire format and resource limits, see
-[UUIDv7 revision replication](uuidv7-revision-replication-v2.md).
+## Collaboration today
 
-### Branch creation provenance and unborn branches
+Bundles move history one way and only fast-forward. Because a branch keeps its
+UUIDv7, the same branch cannot be imported a second time under another local
+name. When two repositories have both committed to the same branch, the import
+is refused, and reconciling them needs the Fetch/merge workflow below, which is
+not built yet. Different branches (say a `feature` made in another repository)
+import side by side and can then be merged with the hydraulic merge. Compaction keeps every
+revision that was ever bound, so imported revision UUIDs stay readable even
+when no branch points at them.
 
-Every full/incremental transfer preserves the UUIDv7 identity of a branch,
-its nullable committed HEAD, immutable `originBranchId` and exact
-`forkRevisionId` together with all committed revisions and SHA-256 integrity
-bindings. A branch whose HEAD is `null` has no committed revision objects.
-An imported branch must not acquire a guessed fork point or synthetic R0.
-
-Private user working copies are not part of committed revision replication;
-they require a distinct explicitly authorized draft backup/sync facility.
-Conflicting target HEAD updates are rejected unless an explicit validated
-fast-forward or merge policy applies. See
-[replication contract](uuidv7-revision-replication-v2.md).
-
-## Personal working repository and publication
-
-The personal working DVMDB is a separate repository from each shared
-project source. **Local Commit** creates immutable history without advancing
-shared refs; **Publish** first transfers missing verified immutable objects
-and then conditionally advances the shared branch from its expected remote
-HEAD (including null for an unborn branch). Fetch updates remote-tracking
-refs without destroying local commits or private drafts. See
-[private working repositories](private-working-repositories.md) for the
-full two-stage lifecycle. Existing bundle import commands do not by
-themselves implement the entire private working-copy or publication UX.
-
-## Accepted identity and publication semantics for the new working-repo API
-
-For the VC-03 through VC-07 target design, **a logical branch UUIDv7 is
-preserved across repositories**, even while their independently movable HEAD
-refs are keyed by repository UUID + project UUID + branch UUID. An imported
-remote-tracking ref must not overwrite a local development ref. Names such as
-`remote_main` in existing CLI examples represent *storage/selection aliases*;
-they do not authorize inventing another logical branch identity. Current
-bundle CLI behavior is not itself the complete future private Commit/Publish
-protocol.
-
-A genuinely new locally authored branch receives a new UUIDv7 that is reused
-when explicitly provisioned on the selected shared repository. Provisioning
-is idempotent and collision-checked, then Publish uses expected remote HEAD
-(including explicit `null` for unborn refs) and verified fast-forward ancestry.
-An absent branch is **not** the same as an existing unborn branch. Both
-Commit and Publish require recoverable operation UUIDs and cannot discard
-successful local history when remote publication fails.
-
-Existing committed revision UUIDs and previously recorded branch histories
-are never erased to simulate an unborn repository. New project creation
-alone starts with an unborn `main`; existing data requires explicit verified
-metadata transition where applicable.
+The personal/shared repository workflow (Fetch updates remote-tracking state,
+local Commit, conditional Publish with an expected remote HEAD, provisioning a
+new branch on the remote with its UUIDv7) is specified in
+[private working repositories](private-working-repositories.md) and is not
+built yet. Its rules already constrain bundles: a logical branch keeps its
+UUIDv7 in every repository, while each repository moves its own HEAD; an absent
+remote branch is not the same as an unborn one; nothing invents a fork point or
+a synthetic first revision.
