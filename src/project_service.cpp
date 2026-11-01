@@ -1732,6 +1732,29 @@ void ProjectService::provisionUnbornBranch(std::string_view projectId,
     });
 }
 
+BranchId ProjectService::createUnbornBranch(std::string_view projectId,
+                                            std::string_view name,
+                                            std::optional<std::string_view> branchId) {
+    const std::optional<ProjectId> project = ProjectId::parse(projectId);
+    if (!project || !validBranchName(name))
+        throw ProjectError(ProjectErrorKind::InvalidInput,
+                           "unborn branch requires a valid project UUID and name");
+    std::optional<BranchId> identity;
+    if (branchId) {
+        identity = BranchId::parse(*branchId);
+        if (!identity)
+            throw ProjectError(ProjectErrorKind::InvalidInput,
+                               "new branch ID must be UUIDv7");
+    }
+    std::optional<BranchId> result;
+    withRepository(projectId, [&](Repository& repository) {
+        result = translated<BranchId>([&]() {
+            return repository.createUnbornBranch(*project, name, identity);
+        });
+    });
+    return *result;
+}
+
 ProjectInfo ProjectService::createProject(std::string_view name,
                                           const CommitMetadata& rootMetadata) {
     translated<int>([&]() { validateCommitMetadata(rootMetadata); return 0; });

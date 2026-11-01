@@ -1747,9 +1747,27 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 [&service](const httplib::Request& request, httplib::Response& response) {
         guarded(response, [&]() {
             const QJsonObject object = parseBody(request, maxJsonSmallBytes);
-            requireKeys(object, {"name", "fromBranchId", "revision", "id"});
+            requireKeys(object, {"name", "fromBranchId", "revision", "id", "unborn"});
             const std::string project = pathParam(request, "id");
             const std::string name = requiredString(object, "name");
+            if (object.contains("unborn")) {
+                requireInput(object.value("unborn").isBool(), "unborn must be boolean");
+                if (object.value("unborn").toBool()) {
+                    requireInput(!object.contains("fromBranchId") &&
+                                 !object.contains("revision"),
+                                 "unborn branch cannot have an origin revision");
+                    const std::string branchId = object.contains("id")
+                        ? requiredString(object, "id") : BranchId::generate().toString();
+                    const BranchId created = service.createUnbornBranch(
+                        project, name, branchId);
+                    return Reply{201, QJsonObject{
+                        {"id", QJsonValue(QJsonValue::Null)},
+                        {"branch", QString::fromStdString(name)},
+                        {"branchId", QString::fromStdString(created.toString())},
+                        {"originBranchId", QJsonValue(QJsonValue::Null)},
+                        {"forkRevisionId", QJsonValue(QJsonValue::Null)}}};
+                }
+            }
             // The source is addressed by its UUIDv7, never by its renamable
             // name (DG-01). `id` is the new branch's caller-chosen UUIDv7:
             // repeating the request returns the original creation instead of

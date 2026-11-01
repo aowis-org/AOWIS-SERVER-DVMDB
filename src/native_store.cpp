@@ -3421,18 +3421,30 @@ RevisionRecord Repository::branchRevisionLocked(const ProjectId& project,
     return resolved->record;
 }
 
-void Repository::createUnbornBranch(const ProjectId& project, std::string_view name) {
+BranchId Repository::createUnbornBranch(const ProjectId& project, std::string_view name,
+                                         std::optional<BranchId> identity) {
     std::lock_guard<std::mutex> guarded(this->mutex_);
     ScopedFileLock locked(this->lockFd_);
     refreshIndex();
     checkBranch(name);
-    require(Err::Conflict, readStoredBranches(this->directory_).empty(),
-            "unborn branch requires a repository without branches");
-    // The project ownership is pinned by the first immutable revision, as in
-    // createBranch. No UUID revision or pack object is written here.
-    (void)project;
+    // Even unborn repositories have a persistent project identity. This
+    // prevents creating branches with another project's UUID before the first
+    // revision is committed. The resolver publishes only its project manifest
+    // and empty UUID index, never an initial revision.
+    RevisionResolver resolver(this->directory_, project);
+    const std::vector<StoredBranch> branches = readStoredBranches(this->directory_);
+    for (const StoredBranch& stored : branches) {
+        if (identity && stored.id == *identity) {
+            require(Err::Conflict, stored.name == name,
+                    "branch UUID already belongs to another name");
+            return stored.id; // idempotent retry, even if HEAD advanced
+        }
+        require(Err::Conflict, stored.name != name, "branch name already exists");
+    }
+    const BranchId created = identity.value_or(BranchId::generate());
     publishStoredBranch(this->directory_, StoredBranch{
-        BranchId::generate(), std::string(name), Hash{}, std::nullopt, std::nullopt, std::nullopt}, true);
+        created, std::string(name), Hash{}, std::nullopt, std::nullopt, std::nullopt}, true);
+    return created;
 }
 
 void Repository::provisionUnbornBranch(const ProjectId& project, std::string_view name,
@@ -3441,7 +3453,7 @@ void Repository::provisionUnbornBranch(const ProjectId& project, std::string_vie
     ScopedFileLock locked(this->lockFd_);
     refreshIndex();
     checkBranch(name);
-    (void)project;
+    RevisionResolver resolver(this->directory_, project);
     const std::vector<StoredBranch> branches = readStoredBranches(this->directory_);
     if (branches.size() == 1 && branches.front().id == identity &&
         branches.front().name == name && !branches.front().revision &&

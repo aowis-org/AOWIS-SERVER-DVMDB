@@ -176,6 +176,10 @@ public:
     // clone target. Does not make an initial revision. Safe to retry.
     void provisionUnbornBranch(std::string_view projectId, std::string_view name,
                                  std::string_view branchId);
+    // Project-level creation: no source branch or revision. UUIDv7 ID optional
+    // for native callers, required for retry-safe HTTP clients.
+    BranchId createUnbornBranch(std::string_view projectId, std::string_view name,
+                                  std::optional<std::string_view> branchId = std::nullopt);
     RevisionGraphRevision revision(std::string_view projectId, const RevisionId& id);
     void renameBranch(std::string_view projectId, std::string_view previous,
                       std::string_view renamed, const RevisionId& expectedHead);

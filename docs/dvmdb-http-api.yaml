@@ -533,11 +533,12 @@ paths:
     post:
       operationId: createBranch
       description: |
-        Create a UUIDv7 branch reference from the branch identified by
-        fromBranchId (at its HEAD, or at a historical revision reachable from
-        it). No revision is created. With a caller-chosen `id` the request is
-        idempotent: repeating it returns the original creation result with
-        201; the id naming any other branch is 409.
+        With `unborn: true`, create an independent branch with null committed
+        HEAD and no source branch or revision. Otherwise create a UUIDv7 branch
+        reference from `fromBranchId` (at its HEAD, or a historical revision
+        reachable from it). Neither variant creates a revision. With a
+        caller-chosen `id`, an identical retry returns 201 and the same branch
+        identity; a conflicting name or UUID returns 409.
       requestBody:
         required: true
         content:
@@ -545,12 +546,13 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              required: [name, fromBranchId]
+              required: [name]
               properties:
                 id: {type: string, format: uuid, description: Caller-chosen UUIDv7 of the new branch (retry-safe creation)}
                 name: {type: string}
-                fromBranchId: {type: string, format: uuid, description: Source branch UUIDv7}
-                revision: {type: string, format: uuid, description: Historical revision UUIDv7 reachable from the source}
+                unborn: {type: boolean, description: Set true for an independent unborn branch without an origin}
+                fromBranchId: {type: string, format: uuid, description: Required for a derived branch; forbidden when unborn is true}
+                revision: {type: string, format: uuid, description: Historical revision UUIDv7 reachable from the source; forbidden when unborn is true}
       responses:
         '201':
           description: Atomic branch creation result; fork provenance is immutable metadata, not an ancestry edge
@@ -560,7 +562,11 @@ paths:
                 type: object
                 required: [id, branch, branchId, originBranchId, forkRevisionId]
                 properties:
-                  id: {type: string, format: uuid, description: Exact committed fork revision UUIDv7}
+                  id:
+                    oneOf:
+                      - {type: string, format: uuid}
+                      - {type: 'null'}
+                    description: Exact committed fork revision UUIDv7, or null for an unborn branch
                   branch: {type: string, description: Newly created branch name}
                   branchId: {type: string, format: uuid, description: Persistent UUIDv7 of the new branch}
                   originBranchId:

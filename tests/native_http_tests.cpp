@@ -1482,6 +1482,22 @@ void exerciseUnbornProjectHttp() {
         retried += info.name == "Retried project" ? 1 : 0;
     check(retried == 1, "repeated project creation published a second project");
     const QString prefix = projects + "/" + QString::fromStdString(project);
+    const QString unbornBranchId = QString::fromStdString(native::BranchId::generate().toString());
+    const QJsonObject newUnborn{{"name", "independent"}, {"unborn", true}, {"id", unbornBranchId}};
+    const Response firstUnborn = client.call("POST", prefix + "/branches", newUnborn);
+    const Response retryUnborn = client.call("POST", prefix + "/branches", newUnborn);
+    check(firstUnborn.status == 201 && retryUnborn.status == 201 &&
+          firstUnborn.json == retryUnborn.json &&
+          firstUnborn.json.value("branchId").toString() == unbornBranchId &&
+          firstUnborn.json.value("id").isNull() &&
+          firstUnborn.json.value("originBranchId").isNull() &&
+          client.call("GET", prefix + "/branches/independent/head").json.value("id").isNull(),
+          "HTTP independent unborn branch was not created or retried correctly");
+    check(client.call("POST", prefix + "/branches",
+          QJsonObject{{"name", "independent"}, {"unborn", true}}).status == 409 &&
+          client.call("POST", prefix + "/branches",
+          QJsonObject{{"name", "invalid"}, {"unborn", true}, {"fromBranchId", unbornBranchId}}).status == 400,
+          "HTTP unborn branch accepted duplicate name or origin");
     const QString headPath = prefix + "/branches/main/head";
     const QString historyPath = prefix + "/branches/main/history";
     const QString graphPath = prefix + "/revision-graph";
@@ -1493,14 +1509,14 @@ void exerciseUnbornProjectHttp() {
           "HTTP unborn history must be empty");
     const Response graph = client.call("GET", graphPath + "?limit=1");
     const QJsonArray heads = graph.json.value("heads").toArray();
-    check(graph.status == 200 && heads.size() == 1 &&
-          heads.at(0).toObject().value("branch") == "main" &&
-          heads.at(0).toObject().value("revision").isNull() &&
-          heads.at(0).toObject().value("recordHash").isNull() &&
-          native::BranchId::parse(heads.at(0).toObject().value("branchId").toString().toStdString()) &&
+    check(graph.status == 200 && heads.size() == 2 &&
+          heads.at(1).toObject().value("branch") == "main" &&
+          heads.at(1).toObject().value("revision").isNull() &&
+          heads.at(1).toObject().value("recordHash").isNull() &&
+          native::BranchId::parse(heads.at(1).toObject().value("branchId").toString().toStdString()) &&
           graph.json.value("revisions").toArray().isEmpty() &&
           graph.json.value("complete").toBool() && graph.json.value("nextCursor").isNull(),
-          "HTTP unborn graph must have one null HEAD and zero revisions");
+          "HTTP unborn graph must include both independent null HEADs");
     const std::optional<native::ProjectId> id = native::ProjectId::parse(project);
     native::Key key{};
     key[15] = 9;
@@ -1517,8 +1533,8 @@ void exerciseUnbornProjectHttp() {
           firstRevision.json.value("parents").toArray().isEmpty(),
           "HTTP first unborn commit must have no parents");
     const Response after = client.call("GET", graphPath);
-    check(after.status == 200 && after.json.value("heads").toArray().size() == 1 &&
-          after.json.value("heads").toArray().at(0).toObject().value("revision") == firstId &&
+    check(after.status == 200 && after.json.value("heads").toArray().size() == 2 &&
+          after.json.value("heads").toArray().at(1).toObject().value("revision") == firstId &&
           after.json.value("revisions").toArray().size() == 1,
           "HTTP graph did not expose first committed revision");
 }

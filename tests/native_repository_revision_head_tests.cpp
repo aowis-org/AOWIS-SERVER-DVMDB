@@ -52,16 +52,28 @@ void testUnbornNativeRefFoundation() {
               "unborn branch must have empty history");
         rejects([&] { (void)repo.history(project, "main", 10, RevisionId::generate()); },
                 StorageErrorKind::InvalidInput, "unborn history accepted a cursor");
-        rejects([&] { repo.createUnbornBranch(project, "second"); },
-                StorageErrorKind::Conflict, "second unborn branch accepted");
+        const BranchId second = repo.createUnbornBranch(project, "second");
+        check(repo.branchId("second") == second && !repo.optionalHead(project, "second") &&
+              repo.history(project, "second").empty(),
+              "second independent unborn branch missing");
+        rejects([&] { (void)repo.createUnbornBranch(project, "second"); },
+                StorageErrorKind::Conflict, "duplicate unborn branch name accepted");
+        rejects([&] { (void)repo.createUnbornBranch(ProjectId::generate(), "foreign"); },
+                StorageErrorKind::Conflict, "unborn repository accepted a foreign project");
+        check(repo.createUnbornBranch(project, "second", second) == second,
+              "identical unborn branch creation retry changed UUID");
+        rejects([&] { (void)repo.createUnbornBranch(project, "different", second); },
+                StorageErrorKind::Conflict, "branch UUID was rebound to a different name");
         rejects([&] { (void)repo.head(project, "main"); },
                 StorageErrorKind::Unavailable, "required HEAD accepted an unborn branch");
     }
     {
         Repository reopened(temp.path);
         check(reopened.branchId("main") == branch &&
-              !reopened.optionalHead(project, "main"),
-              "unborn branch not durable across reopen");
+              !reopened.optionalHead(project, "main") &&
+              reopened.branchId("second").has_value() &&
+              !reopened.optionalHead(project, "second"),
+              "independent unborn branches not durable across reopen");
         rejects([&] { (void)reopened.commit(project, "main", {}, commitMetadata(), RevisionId::generate()); },
                 StorageErrorKind::Conflict, "unborn commit accepted a non-null expected HEAD");
         const RevisionId first = reopened.commit(project, "main", {{key(1), value("first")}}, commitMetadata());
@@ -71,6 +83,14 @@ void testUnbornNativeRefFoundation() {
         check(bytes && decodeRevisionRecord(*bytes).parents.empty(),
               "first raw revision has a parent");
         check(reopened.branchId("main") == branch, "first commit changed branch identity");
+        const BranchId late = reopened.createUnbornBranch(project, "late");
+        check(reopened.branchId("late") == late && !reopened.optionalHead(project, "late"),
+              "cannot create an independent unborn branch after a commit");
+        const RevisionId independent = reopened.commit(project, "second",
+            {{key(2), value("independent")}}, commitMetadata());
+        const std::optional<Bytes> independentRecord = reopened.readRevision(project, independent);
+        check(independentRecord && decodeRevisionRecord(*independentRecord).parents.empty(),
+              "independent branch inherited another branch's revision");
         rejects([&] { (void)reopened.commit(project, "main", {}, commitMetadata(), RevisionId::generate()); },
                 StorageErrorKind::Conflict, "committed branch accepted stale expected HEAD");
     }

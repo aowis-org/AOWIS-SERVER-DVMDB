@@ -82,7 +82,8 @@ session state. See [merge semantics](native-branch-merging.md) and
 
 | Operation | `Repository` | HTTP (`/dvmdb/v1/projects/{id}`) |
 |---|---|---|
-| Create the first, unborn branch | `createUnbornBranch` | `POST /projects` with `unborn: true` creates `main` |
+| Create project with initial unborn `main` | `ProjectService::createUnbornProject` | `POST /projects` with `unborn: true` |
+| Create another independent unborn branch (same project, no origin revision) | `createUnbornBranch(project, name, optional UUIDv7)` | `POST …/branches` with `name`, `unborn: true`, optional `id` |
 | Create the first branch with an empty first revision | `createRootBranch(…, metadata)` | `POST /projects` without `unborn` (needs `author`; roadmap VC-01) |
 | Create a branch from a branch UUID, at HEAD or a reachable revision | `createBranchFromId` (retry-safe with a caller-chosen UUID) | `POST …/branches` (`fromBranchId`, optional `revision`, optional `id`) |
 | Rename (keeps UUID, HEAD, provenance) | `renameBranch(…, expectedHead)` | `PATCH …/branches/{branch}` |

@@ -103,15 +103,27 @@ void exerciseBackend() {
         require(service.listBranches(firstId) == std::vector<std::string>{"main"}, "missing initial main branch");
         require(!service.optionalHead(firstId, "main") && service.history(firstId, "main", 10).empty(),
                 "new project main is not unborn");
+        const aowis::dvmdb::BranchId scratch = service.createUnbornBranch(firstId, "scratch");
+        require(service.createUnbornBranch(firstId, "scratch", scratch.toString()) == scratch &&
+                !service.optionalHead(firstId, "scratch"),
+                "project service did not create or retry independent unborn branch");
+        expectError([&] { (void)service.createUnbornBranch(firstId, "scratch"); },
+                    ProjectErrorKind::Conflict);
+        require(service.listBranches(secondId) == std::vector<std::string>{"main"},
+                "unborn branch leaked into another project's repository");
         firstHead = service.commitModel(firstId, "main", {{modelKey(1), record(1)}}, commitMetadata());
         require(service.history(firstId, "main", 10).size() == 1, "missing first revision");
+        const aowis::dvmdb::BranchId later = service.createUnbornBranch(firstId, "later");
+        require(service.branchId(firstId, "later") == later &&
+                !service.optionalHead(firstId, "later"),
+                "cannot create a root unborn branch after a committed revision");
         require(service.revision(firstId, firstHead).id == firstHead, "revision lookup failed");
         require(service.history(firstId, "main", 10, firstHead).empty(), "history cursor should be exclusive");
         require(!service.optionalHead(secondId, "main"), "commit leaked across projects");
         const aowis::dvmdb::RevisionId fork = service.createBranchAtRevision(firstId, "design", "main", firstHead);
         require(fork == firstHead, "pinned fork changed revision");
         (void)service.createBranch(firstId, "independent", "main");
-        require(service.listBranches(firstId).size() == 3, "missing new branch");
+        require(service.listBranches(firstId).size() == 5, "missing new branch");
         require(service.listBranches(secondId).size() == 1, "projects are not isolated");
         // The model HTTP adapter's scoped native callback shares the exact
         // project handle and serializes access without exposing its lifetime.

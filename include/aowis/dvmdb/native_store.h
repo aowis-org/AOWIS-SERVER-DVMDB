@@ -313,7 +313,10 @@ public:
     BranchCreationResult createBranchWithIdentity(
         const ProjectId& project, std::string_view name,
         std::optional<std::string_view> from = std::nullopt);
-    void createUnbornBranch(const ProjectId& project, std::string_view name);
+    // Add an independent, unborn branch to this project's repository. The
+    // caller-supplied UUID makes POST retries idempotent; no revision is made.
+    BranchId createUnbornBranch(const ProjectId& project, std::string_view name,
+                                 std::optional<BranchId> identity = std::nullopt);
     // The first branch with an empty first revision. Only for projects that
     // are not created unborn (see docs/roadmap.md, VC-01).
     RevisionId createRootBranch(const ProjectId& project, std::string_view name,
