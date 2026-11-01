@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Never start a stale DVMDB HTTP executable after a failed Release build."""
+"""Build only the DVMDB server and never launch it after a failed build."""
 
 import argparse
 import os
@@ -40,10 +40,10 @@ if [ "$1" = "-S" ] && [ "$GUARD_SCENARIO" = "configure_failure" ]; then
 fi
 if [ "$1" = "--build" ]; then
     case " $* " in
-        *" --target "*)
+        *" --target aowis-server-dvmdb "*)
+            if [ "$GUARD_SCENARIO" = "build_failure" ]; then exit 32; fi
             if [ "$GUARD_SCENARIO" = "target_failure" ]; then exit 33; fi ;;
-        *)
-            if [ "$GUARD_SCENARIO" = "build_failure" ]; then exit 32; fi ;;
+        *) exit 34 ;;
     esac
 fi
 exit 0
@@ -72,9 +72,11 @@ exit 0
     calls = cmake_calls.read_text(encoding="utf-8").splitlines() if cmake_calls.exists() else []
     require(len(calls) == expected_calls,
             f"{scenario}: expected {expected_calls} CMake calls, got {calls}")
-    if expected_calls == 3:
-        require("--target aowis-server-dvmdb" in calls[2],
-                f"{scenario}: final server target build guard missing")
+    if expected_calls == 2:
+        require("--target aowis-server-dvmdb" in calls[1],
+                f"{scenario}: expected only the HTTP server target to be built: {calls}")
+        require("-DBUILD_TESTING=OFF" in calls[0],
+                f"{scenario}: Release configuration should not enable tests: {calls}")
     if scenario in {"configure_failure", "build_failure", "target_failure"}:
         require("server NOT started" in output,
                 f"{scenario}: failure did not clearly prevent launch: {output}")
@@ -92,10 +94,10 @@ def main() -> None:
         for scenario, arguments, exit_code, should_launch, calls in [
             ("configure_failure", [], 31, False, 1),
             ("build_failure", [], 32, False, 2),
-            ("target_failure", [], 33, False, 3),
-            ("missing_binary", [], 1, False, 3),
-            ("successful_build", [], 0, True, 3),
-            ("build_only", ["--build-only"], 0, False, 3),
+            ("target_failure", [], 33, False, 2),
+            ("missing_binary", [], 1, False, 2),
+            ("successful_build", [], 0, True, 2),
+            ("build_only", ["--build-only"], 0, False, 2),
             ("bad_option", ["--unknown"], 2, False, 0),
         ]:
             run_scenario(args.script.resolve(), root, scenario, arguments,

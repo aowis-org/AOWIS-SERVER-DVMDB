@@ -22,23 +22,15 @@ else
     exit "$status"
 fi
 
-# Build all Release utilities and benchmarks as before.
-if cmake --build "$build_dir" --parallel; then
-    :
-else
-    status=$?
-    printf 'DVMDB build failed (exit %d); server NOT started.\n' "$status" >&2
-    exit "$status"
-fi
-
-# Ensure this CMake configuration actually defines the HTTP server target.
-# Otherwise an old executable left in build-linux could be launched despite
-# the current configuration having HTTP disabled.
+# Build only the server and its transitive library dependencies. Building the
+# default ALL target also compiles unrelated command-line tools and benchmarks.
+# An explicit target build fails when the HTTP server target is unavailable;
+# this also prevents an old executable from being launched after reconfiguration.
 if cmake --build "$build_dir" --target aowis-server-dvmdb --parallel; then
     :
 else
     status=$?
-    printf 'DVMDB server target failed (exit %d); server NOT started.\n' "$status" >&2
+    printf 'DVMDB server build failed (exit %d); server NOT started.\n' "$status" >&2
     exit "$status"
 fi
 
@@ -47,7 +39,7 @@ if [[ ! -f "$server" || ! -x "$server" ]]; then
     exit 1
 fi
 
-printf 'AOWIS DVMDB Release binaries and benchmarks built in build-linux.\n'
+printf 'AOWIS DVMDB Release server built in build-linux.\n'
 if [[ "${1:-}" == --build-only ]]; then
     exit 0
 fi
