@@ -172,6 +172,10 @@ public:
     // Provision an empty catalogue project with an existing logical UUIDv7.
     // Only a full verified branch bundle may populate it. Safe to retry.
     ProjectInfo provisionCloneTarget(std::string_view projectId, std::string_view name);
+    // Rename catalogue metadata without changing the project UUID or its repository.
+    // expectedName provides a stale-editor check for concurrent clients.
+    ProjectInfo renameProject(std::string_view projectId, std::string_view expectedName,
+                              std::string_view name);
     // Import the exact identity of a root unborn branch into an empty private
     // clone target. Does not make an initial revision. Safe to retry.
     void provisionUnbornBranch(std::string_view projectId, std::string_view name,
@@ -352,7 +356,7 @@ public:
 private:
     struct Project {
         explicit Project(ProjectInfo value);
-        const ProjectInfo info;
+        ProjectInfo info;
         std::mutex openMutex;                    // guards repository
         std::shared_ptr<Repository> repository;  // opened on first use
         std::mutex operationMutex;               // one scoped operation at a time

@@ -142,6 +142,12 @@ void removeCatalogueRemnants(const std::filesystem::path& root) {
     if (removePrefixed(root / "local-commits", {".creating-", ".updating-"}, false))
         syncDirectory(root / "local-commits");
     if (removePrefixed(root / "projects", {".creating-"}, true)) syncDirectory(root / "projects");
+    for (const std::filesystem::directory_entry& entry :
+         std::filesystem::directory_iterator(root / "projects")) {
+        if (entry.is_directory() && !entry.is_symlink() &&
+            removePrefixed(entry.path(), {".project-meta-updating-"}, false))
+            syncDirectory(entry.path());
+    }
 }
 
 void writeManifest(const std::filesystem::path& path, const ProjectInfo& info) {
@@ -1711,6 +1717,45 @@ ProjectInfo ProjectService::createUnbornProject(std::string_view name,
                                        : std::nullopt);
 }
 
+ProjectInfo ProjectService::renameProject(std::string_view projectId,
+                                         std::string_view expectedName,
+                                         std::string_view name) {
+    std::lock_guard<std::mutex> guard(this->mutex_);
+    ensureHealthy();
+    if (!validProjectId(projectId) || !validName(name))
+        throw ProjectError(ProjectErrorKind::InvalidInput, "invalid project ID or name");
+    const std::map<std::string, std::shared_ptr<Project>>::iterator found =
+        this->entries_.find(std::string(projectId));
+    if (found == this->entries_.end())
+        throw ProjectError(ProjectErrorKind::NotFound, "project not found");
+    if (found->second->info.name != expectedName)
+        throw ProjectError(ProjectErrorKind::Conflict, "project name was changed by another client");
+    if (found->second->info.name == name) return found->second->info;
+
+    ProjectInfo updated = found->second->info;
+    updated.name = std::string(name);
+    const std::filesystem::path directory = this->projects_ / updated.id;
+    const std::filesystem::path staged = directory /
+        (".project-meta-updating-" + UuidV7::generate().toString());
+    bool published = false;
+    try {
+        writeManifest(staged, updated);
+        syscallChecked(::rename(staged.c_str(), (directory / "project.meta").c_str()) == 0,
+                       "publish renamed project manifest");
+        published = true;
+        syncDirectory(directory);
+        found->second->info.name = updated.name;
+    } catch (...) {
+        if (published) this->uncertain_ = true;
+        else {
+            std::error_code ignored;
+            std::filesystem::remove(staged, ignored);
+        }
+        throw;
+    }
+    return updated;
+}
+
 ProjectInfo ProjectService::provisionCloneTarget(std::string_view projectId,
                                                     std::string_view name) {
     if (!ProjectId::parse(projectId))
@@ -2375,7 +2420,15 @@ std::vector<ProjectInfo> ProjectService::listProjects() const {
 }
 
 ProjectInfo ProjectService::project(std::string_view id) const {
-    return findProject(id)->info;
+    if (!validProjectId(id))
+        throw ProjectError(ProjectErrorKind::InvalidInput, "invalid project UUID");
+    std::lock_guard<std::mutex> guard(this->mutex_);
+    ensureHealthy();
+    const std::map<std::string, std::shared_ptr<Project>>::const_iterator found =
+        this->entries_.find(std::string(id));
+    if (found == this->entries_.end())
+        throw ProjectError(ProjectErrorKind::NotFound, "project not found");
+    return found->second->info;
 }
 
 std::vector<std::string> ProjectService::listBranches(std::string_view projectId) {

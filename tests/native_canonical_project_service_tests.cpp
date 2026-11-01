@@ -69,6 +69,36 @@ ModelChange change(std::uint8_t number) {
     return ModelChange{key, record};
 }
 
+void exerciseProjectRename() {
+    TemporaryRoot root;
+    std::string id;
+    {
+        ProjectService service(root.path);
+        const ProjectInfo project = service.createUnbornProject("Original project");
+        id = project.id;
+        const std::optional<BranchId> mainId = service.branchId(id, "main");
+        const ProjectInfo renamed = service.renameProject(id, "Original project", "Updated project");
+        require(renamed.id == id && renamed.name == "Updated project" &&
+                service.project(id).name == "Updated project" &&
+                service.listProjects().front().name == "Updated project", "rename not visible");
+        require(service.branchId(id, "main") == mainId &&
+                !service.optionalHead(id, "main").has_value(), "rename modified unborn HEAD");
+        expectError([&]() { service.renameProject(id, "Original project", "Other"); },
+                    ProjectErrorKind::Conflict);
+        expectError([&]() { service.renameProject(id, "Updated project", ""); },
+                    ProjectErrorKind::InvalidInput);
+        const ProjectInfo again = service.renameProject(id, "Updated project", "Updated project");
+        require(again.name == "Updated project", "idempotent rename failed");
+    }
+    {
+        ProjectService reopened(root.path);
+        require(reopened.project(id).name == "Updated project" &&
+                reopened.branchId(id, "main").has_value() &&
+                !reopened.optionalHead(id, "main").has_value(),
+                "project rename was not durable or changed branch HEAD");
+    }
+}
+
 void exerciseRemoteTracking() {
     using aowis::dvmdb::RepositoryRole;
     using aowis::dvmdb::RemoteTrackingRef;
@@ -387,6 +417,7 @@ void exerciseCloneTargetProvision() {
 int main() {
     try {
         exercise();
+        exerciseProjectRename();
         exerciseRemoteTracking();
         exerciseCloneTargetProvision();
         std::cout << "Canonical UUIDv7 ProjectService tests passed\n";

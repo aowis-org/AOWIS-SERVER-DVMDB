@@ -1771,6 +1771,15 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             return Reply{200, projectJson(service.project(pathParam(request, "id")))};
         });
     });
+    server.Patch("/dvmdb/v1/projects/:id", [&service](const httplib::Request& request,
+                                                    httplib::Response& response) {
+        guarded(response, [&]() {
+            const QJsonObject object = parseBody(request, maxJsonSmallBytes);
+            requireKeys(object, {"name", "expectedName"});
+            return Reply{200, projectJson(service.renameProject(pathParam(request, "id"),
+                requiredString(object, "expectedName"), requiredString(object, "name")))};
+        });
+    });
     registerBundleRoutes(server, service, transferLimits, stagingBudget);
     server.Get(routeBranches, [&service](const httplib::Request& request, httplib::Response& response) {
         guarded(response, [&]() {

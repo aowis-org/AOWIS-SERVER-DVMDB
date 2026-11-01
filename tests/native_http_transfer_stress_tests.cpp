@@ -8,6 +8,7 @@
 #include <atomic>
 #include <array>
 #include <chrono>
+#include <cerrno>
 #include <csignal>
 #include <cstring>
 #include <cstdint>
@@ -231,14 +232,22 @@ public:
     ~RawSocket() { if (this->descriptor_ >= 0) ::close(this->descriptor_); }
     RawSocket(const RawSocket&) = delete;
     RawSocket& operator=(const RawSocket&) = delete;
-    void send(const std::string& content) {
+    // A server may reject and close a streaming upload before the client has
+    // sent its entire declared body. Report this without throwing so the
+    // admission-race fixture can try a fresh connection.
+    bool trySend(const std::string& content) {
         std::size_t written = 0;
         while (written < content.size()) {
             const ssize_t count = ::send(this->descriptor_, content.data() + written,
                                          content.size() - written, MSG_NOSIGNAL);
-            require(count > 0, "raw socket write failed");
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) return false;
             written += static_cast<std::size_t>(count);
         }
+        return true;
+    }
+    void send(const std::string& content) {
+        require(trySend(content), "raw socket write failed");
     }
     void close() {
         if (this->descriptor_ >= 0) ::close(this->descriptor_);
@@ -319,40 +328,53 @@ void tightBudget(unsigned short port, const std::string& a, const std::string& b
     const std::string aRoot = prefix(a);
     const std::string bRoot = prefix(b);
     {
-        RawSocket stalled(port);
-        stalled.send("POST " + aRoot + "stalled/bundle HTTP/1.1\r\nHost: 127.0.0.1\r\n"
-                     "Content-Type: application/vnd.aowis.revision-bundle-v2\r\nContent-Length: 3000000\r\n\r\n" +
-                     fixture.substr(0, 4096));
         bool refused = false;
-        unsigned attempts = 0;
-        std::size_t sent = 4096;
-        const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + 12s;
-        while (std::chrono::steady_clock::now() < deadline) {
-            const HttpResponse result = request(port, "GET", bRoot + "main/bundle");
-            ++attempts;
-            if (result.status == 503) {
-                require(result.retry == "1" && result.body.find("staging_busy") != std::string::npos,
-                        "missing structured global staging rejection");
-                refused = true;
-                break;
+        unsigned competingExports = 0;
+        // The first streaming POST and competing GET are scheduled on distinct
+        // worker threads. If the GET grabs the single 4 MiB staging slot first,
+        // the server correctly rejects and closes the partial POST. That is a
+        // valid admission outcome, not a failed socket implementation: retry
+        // the fixture until the POST is the admitted transfer, then assert
+        // that the GET receives the expected structured 503 response.
+        for (unsigned admissionAttempt = 0; admissionAttempt < 5 && !refused; ++admissionAttempt) {
+            RawSocket stalled(port);
+            stalled.send("POST " + aRoot + "stalled/bundle HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                         "Content-Type: application/vnd.aowis.revision-bundle-v2\r\nContent-Length: 3000000\r\n\r\n" +
+                         fixture.substr(0, 4096));
+            // Allow the server's streaming handler to reserve the slot before
+            // requesting a competing export; still handle scheduler races.
+            std::this_thread::sleep_for(125ms);
+            std::size_t sent = 4096;
+            const std::chrono::steady_clock::time_point deadline =
+                std::chrono::steady_clock::now() + 4s;
+            while (std::chrono::steady_clock::now() < deadline) {
+                const HttpResponse result = request(port, "GET", bRoot + "main/bundle");
+                ++competingExports;
+                if (result.status == 503) {
+                    require(result.retry == "1" && result.body.find("staging_busy") != std::string::npos,
+                            "missing structured global staging rejection");
+                    refused = true;
+                    break;
+                }
+                require(result.status == 200, "unexpected status before staging contention");
+                // An early close means the POST lost the admission race. The
+                // next attempt starts a new partial upload; never complete
+                // the declared 3,000,000-byte request body.
+                const std::size_t chunk = std::min<std::size_t>(256, fixture.size() - sent);
+                require(chunk > 0, "stalled upload fixture exhausted");
+                if (!stalled.trySend(fixture.substr(sent, chunk))) break;
+                sent += chunk;
+                std::this_thread::sleep_for(35ms);
             }
-            require(result.status == 200, "unexpected status before staging contention");
-            // A partial HTTP body must remain in progress until the competing
-            // project observes a real global-budget rejection. Trickle more
-            // bytes to prevent idle-read timeouts on slower/scheduled hosts;
-            // never finish the declared 3,000,000-byte upload.
-            const std::size_t chunk = std::min<std::size_t>(256, fixture.size() - sent);
-            require(chunk > 0, "stalled upload fixture exhausted");
-            stalled.send(fixture.substr(sent, chunk));
-            sent += chunk;
-            std::this_thread::sleep_for(35ms);
+            if (refused) {
+                const std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
+                health(port);
+                require(std::chrono::steady_clock::now() - begin < 2s,
+                        "health blocked by stalled bundle upload");
+            }
         }
         require(refused, "stalled upload did not saturate cross-project transfer budget after " +
-                         std::to_string(attempts) + " competing exports");
-        const auto begin = std::chrono::steady_clock::now();
-        health(port);
-        require(std::chrono::steady_clock::now() - begin < 2s,
-                "health blocked by stalled bundle upload");
+                         std::to_string(competingExports) + " competing exports");
     }
     bool recovered = false;
     const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + 6s;

@@ -513,6 +513,28 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/Project'}
         '404': {$ref: '#/components/responses/NotFound'}
+    patch:
+      operationId: renameProject
+      description: |
+        Persistently change only the project display name. UUIDv7 identity,
+        branches, revisions and network data are unchanged. expectedName is
+        required to reject stale edits from another client (HTTP 409).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedName, name]
+              properties:
+                expectedName: {type: string, description: Name last read from the server}
+                name: {type: string, minLength: 1, maxLength: 200}
+      responses:
+        '200': {description: Updated project identity and name}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
   /projects/{projectId}/branches:
     parameters:
       - {$ref: '#/components/parameters/ProjectId'}
