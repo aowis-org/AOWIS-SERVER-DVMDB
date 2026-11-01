@@ -1234,7 +1234,7 @@ std::vector<StoredBranch> readStoredBranches(const std::filesystem::path& reposi
         if (isUnborn) {
             require(Err::Corruption, bytes.substr(split + 1) == "-\n-\n" &&
                     names.insert(name).second, "invalid unborn UUIDv7 branch record");
-            result.push_back(StoredBranch{*parsed, name, Hash{}, std::nullopt, std::nullopt, std::nullopt});
+            result.push_back(StoredBranch{*parsed, name, Hash{}, std::nullopt, std::nullopt, std::nullopt, BranchMetadata{}});
             continue;
         }
         std::optional<RevisionId> revisionId;
@@ -1278,7 +1278,7 @@ std::vector<StoredBranch> readStoredBranches(const std::filesystem::path& reposi
         catch (const StorageError&) { throw StorageError(Err::Corruption, "invalid UUID branch HEAD hash"); }
         require(Err::Corruption, !isZero(head) && names.insert(name).second,
                 "zero HEAD or duplicate branch name");
-        result.push_back(StoredBranch{*parsed, name, head, revisionId, origin, forkRevision});
+        result.push_back(StoredBranch{*parsed, name, head, revisionId, origin, forkRevision, BranchMetadata{}});
     }
     std::sort(result.begin(), result.end(), [](const StoredBranch& a, const StoredBranch& b) {
         return a.name < b.name;
@@ -2938,7 +2938,7 @@ BranchCreationResult Repository::createBranchAtRevisionLocked(
             "revision is not reachable from source branch");
     const BranchId sourceId = findStoredBranch(this->directory_, sourceBranch)->id;
     publishStoredBranch(this->directory_, StoredBranch{createdId,
-            std::string(name), *selectedHash, revision, sourceId, revision}, true);
+            std::string(name), *selectedHash, revision, sourceId, revision, BranchMetadata{}}, true);
     return BranchCreationResult{createdId, revision, sourceId, revision};
 }
 
@@ -3570,7 +3570,7 @@ void Repository::provisionUnbornBranch(const ProjectId& project, std::string_vie
     require(Err::Conflict, branches.empty(),
             "unborn checkout requires an empty target project or the identical unborn branch");
     publishStoredBranch(this->directory_, StoredBranch{
-        identity, std::string(name), Hash{}, std::nullopt, std::nullopt, std::nullopt}, true);
+        identity, std::string(name), Hash{}, std::nullopt, std::nullopt, std::nullopt, BranchMetadata{}}, true);
 }
 
 std::optional<RevisionId> Repository::optionalHead(
@@ -3820,7 +3820,7 @@ BranchCreationResult Repository::createBranchLocked(
     const std::optional<RevisionId> forkId = from
         ? std::optional<RevisionId>(id) : std::nullopt;
     publishStoredBranch(this->directory_, StoredBranch{createdId, std::string(name),
-                                                        checksum, id, sourceId, forkId}, true);
+                                                        checksum, id, sourceId, forkId, BranchMetadata{}}, true);
     return BranchCreationResult{createdId, id, sourceId, forkId};
 }
 
