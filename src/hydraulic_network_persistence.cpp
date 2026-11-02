@@ -1,6 +1,7 @@
 #include "aowis/dvmdb/hydraulic_network_persistence.h"
 #include "aowis/dvmdb/revision_record.h"
 #include "aowis/dvmdb/storage_error.h"
+#include <aowis/model/edit/hydraulic_root_edit.h>
 
 #include <aowis/dvmdb/model_validation.h>
 #include <aowis/dvmdb/model_field_merge.h>
@@ -1464,6 +1465,46 @@ std::optional<RevisionId> tryIndexedUuidScalarEdits(
 }
 
 } // namespace
+
+ModelChange materializeDraftRootEdit(
+    const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
+    const aowis::model::ModelEntityEdit& edit)
+{
+    if (edit.entityType != QString::fromLatin1(aowis::model::hydraulicRootEditType) ||
+        edit.entityId.isNull() || !edit.before || !edit.after)
+        throw StorageError(StorageErrorKind::InvalidInput, "invalid network-root MODEL event");
+    const Key rootKey = keyFromUuid(edit.entityId);
+    const std::optional<ModelRecord> root = readCurrent(rootKey);
+    if (!root || root->kind != hydraulicNetworkKind)
+        throw StorageError(StorageErrorKind::InvalidInput, "network-root MODEL event has no manifest");
+    Manifest manifest = decodeManifest(qByteArrayFromBytes(root->payload));
+    checkRoot(manifest, *root);
+    if (manifest.metadata.uuid != edit.entityId ||
+        aowis::model::hydraulicRootImage(manifest.metadata) != *edit.before)
+        throw StorageError(StorageErrorKind::Conflict, "stale network-root MODEL before-image");
+    QString error;
+    const std::optional<NetworkHydraulic> after =
+        aowis::model::decodeHydraulicRootImage(*edit.after, &error);
+    if (!after || after->uuid != manifest.metadata.uuid ||
+        after->id.trimmed().isEmpty() || after->id.size() > 255)
+        throw StorageError(StorageErrorKind::InvalidInput,
+                           "invalid network-root MODEL after-image: " + error.toStdString());
+    // Verify references and numeric rules against the entire saved network,
+    // not only the scalar metadata projection.
+    std::optional<NetworkHydraulic> complete =
+        loadDraftHydraulicNetwork(readCurrent, edit.entityId);
+    if (!complete || !aowis::model::applyHydraulicRootMetadata(*complete, *after))
+        throw StorageError(StorageErrorKind::InvalidInput, "cannot update network-root metadata");
+    const aowis::dvmdb::HydraulicDependencyValidation validation =
+        aowis::dvmdb::validateHydraulicNetworkWithDependencies(*complete);
+    if (!validation.report.valid())
+        throw StorageError(StorageErrorKind::InvalidInput,
+                           "invalid network-root metadata: " + validation.report.summary().toStdString());
+    manifest.metadata = *after; // all 18 member lists remain in existing chunks
+    ModelRecord changed = *root;
+    changed.payload = bytesFromQByteArray(encodeManifest(manifest));
+    return ModelChange{rootKey, std::move(changed)};
+}
 
 std::vector<ModelChange> fullDraftHydraulicNetworkChanges(const NetworkHydraulic& network) {
     if (network.uuid.isNull() || network.id.trimmed().isEmpty())

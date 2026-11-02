@@ -1,6 +1,7 @@
 #include "commit_metadata_fixture.h"
 #include "aowis/dvmdb/hydraulic_network_persistence.h"
 #include "aowis/dvmdb/revision_record.h"
+#include <aowis/model/edit/hydraulic_root_edit.h>
 
 #include <aowis/dvmdb/model_validation.h>
 
@@ -17,6 +18,7 @@
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -1658,11 +1660,65 @@ void exerciseUuidV7FastForward() {
     std::filesystem::remove_all(folder, ignored);
 }
 
+void exerciseAtomicRootMetadataEdit() {
+    const NetworkHydraulic before = completeNetwork();
+    const std::vector<native::ModelChange> records =
+        hydraulic::fullDraftHydraulicNetworkChanges(before);
+    std::map<native::Key, native::ModelRecord> state;
+    for (const native::ModelChange& change : records) {
+        if (change.record) state.emplace(change.key, *change.record);
+    }
+    const std::function<std::optional<native::ModelRecord>(const native::Key&)> reader =
+        [&state](const native::Key& key) -> std::optional<native::ModelRecord> {
+        const std::map<native::Key, native::ModelRecord>::const_iterator found = state.find(key);
+        if (found == state.end()) return std::nullopt;
+        return found->second;
+    };
+    NetworkHydraulic changed = before;
+    changed.title_line_2 = QStringLiteral("Root edit saved atomically");
+    changed.id = QStringLiteral("Renamed network ID");
+    changed.options_hydraulic.headloss_formula = HydraulicHeadlossFormula::DarcyWeisbach;
+    aowis::model::ModelEntityEdit edit;
+    edit.entityId = before.uuid;
+    edit.entityType = QString::fromLatin1(aowis::model::hydraulicRootEditType);
+    edit.before = aowis::model::hydraulicRootImage(before);
+    edit.after = aowis::model::hydraulicRootImage(changed);
+    const native::ModelChange materialized =
+        hydraulic::materializeDraftRootEdit(reader, edit);
+    require(materialized.record.has_value() &&
+            materialized.record->kind == hydraulic::hydraulicNetworkKind &&
+            materialized.record->references == reader(materialized.key)->references,
+            "root transaction retains native membership chunk references");
+    state[materialized.key] = *materialized.record;
+    const std::optional<NetworkHydraulic> saved =
+        hydraulic::loadDraftHydraulicNetwork(reader, before.uuid);
+    require(saved.has_value() &&
+            saved->options_hydraulic.headloss_formula == HydraulicHeadlossFormula::DarcyWeisbach &&
+            saved->title_line_2 == changed.title_line_2 &&
+            saved->id == changed.id &&
+            saved->nodes_junctions.size() == before.nodes_junctions.size() &&
+            saved->links_pipes.size() == before.links_pipes.size(),
+            "root edit updates saved options without changing entity collections");
+    bool staleRejected = false;
+    try { (void)hydraulic::materializeDraftRootEdit(reader, edit); }
+    catch (const std::exception&) { staleRejected = true; }
+    require(staleRejected, "stale root before-image rejected");
+    edit.before = aowis::model::hydraulicRootImage(*saved);
+    NetworkHydraulic forged = *saved;
+    forged.uuid = uuid(999);
+    edit.after = aowis::model::hydraulicRootImage(forged);
+    bool identityRejected = false;
+    try { (void)hydraulic::materializeDraftRootEdit(reader, edit); }
+    catch (const std::exception&) { identityRejected = true; }
+    require(identityRejected, "root UUID replacement rejected");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     QCoreApplication application(argc, argv);
     try {
+        exerciseAtomicRootMetadataEdit();
         exerciseUuidV7Hydraulic();
         exerciseUuidV7IndexedReferences();
         exerciseUuidV7IndexedMembership();

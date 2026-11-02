@@ -5,6 +5,7 @@
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
 #include "aowis/dvmdb/hydraulic_network_persistence.h"
 #include <aowis/model/edit/model_edit_transaction.h>
+#include <aowis/model/edit/hydraulic_root_edit.h>
 #endif
 
 #include <httplib.h>
@@ -2242,6 +2243,55 @@ void exerciseUnbornNetworkInitializationHttp() {
               populatedNetwork->nodes_junctions.first().elevation_m == 12 &&
               !service.optionalHead(project.id, "main").has_value(),
               "saved membership did not hydrate canonical draft network");
+        // Root metadata uses the same fenced event journal, but no client
+        // sends native kind-100 manifest bytes or membership chunk records.
+        NetworkHydraulic updatedRoot = *populatedNetwork;
+        updatedRoot.title_line_1 = QStringLiteral("Saved root metadata");
+        updatedRoot.options_hydraulic.headloss_formula = HydraulicHeadlossFormula::DarcyWeisbach;
+        aowis::model::ModelEditTransaction rootEvent;
+        rootEvent.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+        rootEvent.operation = QStringLiteral("hydraulic.network.root.update");
+        rootEvent.edits.append(aowis::model::ModelEntityEdit{
+            networkUuid, QString::fromLatin1(aowis::model::hydraulicRootEditType),
+            aowis::model::hydraulicRootImage(*populatedNetwork),
+            aowis::model::hydraulicRootImage(updatedRoot)});
+        const QByteArray rootFrame = aowis::model::ModelEditTransactionCodec::encode(rootEvent);
+        check(!rootFrame.isEmpty(), "failed to encode hydraulic root transaction");
+        const QJsonObject rootSave{{"sessionId", session}, {"fencingToken", token},
+            {"expectedGeneration", QStringLiteral("2")}, {"changes", QJsonArray{}},
+            {"events", QJsonArray{QString::fromLatin1(rootFrame.toBase64())}}};
+        const Response savedRoot = client.call("POST", path + "/save-events", rootSave);
+        if (savedRoot.status != 200)
+            throw std::runtime_error("root event Save failed: HTTP " +
+                std::to_string(savedRoot.status) + " " +
+                QJsonDocument(savedRoot.json).toJson(QJsonDocument::Compact).toStdString());
+        const Response replayedRoot = client.call("POST", path + "/save-events", rootSave);
+        if (replayedRoot.status != 200)
+            throw std::runtime_error("root event lost-response replay failed: HTTP " +
+                std::to_string(replayedRoot.status) + " " +
+                QJsonDocument(replayedRoot.json).toJson(QJsonDocument::Compact).toStdString());
+        check(savedRoot.json.value("generation") == "3" &&
+              replayedRoot.json.value("generation") == "3",
+              "root event Save or lost-response replay returned the wrong generation");
+        const Response rootView = client.call("GET", path + "/networks/" + networkId);
+        const std::optional<NetworkHydraulic> finalRoot =
+            native::ModelCodec<NetworkHydraulic>::decode(QByteArray::fromBase64(
+                rootView.json.value("payloadBase64").toString().toLatin1()));
+        check(rootView.status == 200 && finalRoot &&
+              finalRoot->options_hydraulic.headloss_formula == HydraulicHeadlossFormula::DarcyWeisbach &&
+              finalRoot->title_line_1 == updatedRoot.title_line_1 &&
+              finalRoot->nodes_junctions.size() == 1 &&
+              finalRoot->nodes_junctions.first().uuid == junctionUuid,
+              "root event Save changed membership or failed to persist hydraulic metadata");
+        aowis::model::ModelEditTransaction stale = rootEvent;
+        stale.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+        const QJsonObject staleSave{{"sessionId", session}, {"fencingToken", token},
+            {"expectedGeneration", QStringLiteral("3")}, {"changes", QJsonArray{}},
+            {"events", QJsonArray{QString::fromLatin1(
+                aowis::model::ModelEditTransactionCodec::encode(stale).toBase64())}}};
+        check(client.call("POST", path + "/save-events", staleSave).status == 409 &&
+              client.call("GET", path).json.value("generation") == "3",
+              "stale network-root before-image changed the saved draft");
         const Response after = client.call("POST", path + "/initialize-network", request);
         check(after.status == 409, "initialization replay was accepted after later edit");
         server.stop();
@@ -2249,17 +2299,17 @@ void exerciseUnbornNetworkInitializationHttp() {
     {
         native::ProjectService reopened(root.root());
         const native::WorkingCopyInfo draft = reopened.workingCopy(draftId);
-        check(!draft.baseRevision && draft.generation == 2 && draft.journal.size() == 1 &&
+        check(!draft.baseRevision && draft.generation == 3 && draft.journal.size() == 2 &&
               draft.candidateChanges.size() >= 3 &&
               !reopened.optionalHead(projectId, "main").has_value(),
-              "first hydraulic network and member did not survive service restart");
+              "first hydraulic network, member and root edit did not survive service restart");
         TestServer server(reopened, native::BundleLimits{4ULL * 1024ULL * 1024ULL,
                                                         10000ULL, 1024ULL * 1024ULL});
         Client client(server.port());
         const QString reopenedPath = QStringLiteral("/dvmdb/v1/working-copies/")
             + QString::fromStdString(draftId);
         const Response recoveredSummary = client.call("GET", reopenedPath + "/networks/summary");
-        check(recoveredSummary.status == 200 && recoveredSummary.json.value("generation") == "2" &&
+        check(recoveredSummary.status == 200 && recoveredSummary.json.value("generation") == "3" &&
               recoveredSummary.json.value("networkCount") == 1 &&
               recoveredSummary.json.value("networks").toArray().first().toObject()
                   .value("counts").toObject().value("junctions") == 1,
@@ -2268,8 +2318,10 @@ void exerciseUnbornNetworkInitializationHttp() {
             + QString::fromStdString(draftId) + "/networks/" + networkId);
         const std::optional<NetworkHydraulic> restored = native::ModelCodec<NetworkHydraulic>::decode(
             QByteArray::fromBase64(recovered.json.value("payloadBase64").toString().toLatin1()));
-        check(recovered.status == 200 && recovered.json.value("generation") == "2" &&
-              restored && restored->nodes_junctions.size() == 1 &&
+        check(recovered.status == 200 && recovered.json.value("generation") == "3" &&
+              restored && restored->title_line_1 == QStringLiteral("Saved root metadata") &&
+              restored->options_hydraulic.headloss_formula == HydraulicHeadlossFormula::DarcyWeisbach &&
+              restored->nodes_junctions.size() == 1 &&
               restored->nodes_junctions.first().uuid == junctionUuid,
               "restart failed to hydrate saved unborn hydraulic draft");
         server.stop();

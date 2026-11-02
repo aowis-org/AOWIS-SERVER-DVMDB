@@ -9,6 +9,7 @@
 #include "aowis/dvmdb/model_codec_adapter.h"
 
 #include <QList>
+#include <aowis/model/edit/model_edit_transaction.h>
 
 #include <optional>
 #include <string_view>
@@ -47,6 +48,15 @@ std::optional<NetworkHydraulic> loadDraftHydraulicNetwork(
     const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
     const QUuid& networkId);
 
+
+// Convert one reversible, metadata-only MODEL root edit to a server-owned
+// kind-100 manifest change. Checks exact before-image, canonical after-image,
+// unchanged network identity, full hydraulic dependencies and chunk ownership.
+// No change is published if validation fails; callers save it atomically with
+// the originating journal event under the draft generation/lease fence.
+ModelChange materializeDraftRootEdit(
+    const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
+    const aowis::model::ModelEntityEdit& edit);
 
 // Add native root/chunk ModelChanges for a bounded batch of validated logical
 // membership intents. `readCurrent` returns the draft BEFORE the incoming

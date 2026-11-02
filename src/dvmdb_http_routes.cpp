@@ -7,6 +7,7 @@
 #include "aowis/dvmdb/hydraulic_network_persistence.h"
 #include <QByteArray>
 #include <aowis/model/edit/model_edit_transaction.h>
+#include <aowis/model/edit/hydraulic_root_edit.h>
 #include <variant>
 #include <type_traits>
 #endif
@@ -343,10 +344,11 @@ QJsonObject workingCopyJson(const WorkingCopyInfo& draft, bool includeChanges = 
 
 // Identical native model-record encoding for committed batches and private
 // draft overlays. Draft saves never invoke the commit operation.
-std::vector<ModelChange> parseModelChanges(const QJsonObject& object, bool forCommit = false) {
+std::vector<ModelChange> parseModelChanges(const QJsonObject& object, bool forCommit = false,
+                                          bool allowEmpty = false) {
     requireInput(object.value("changes").isArray(), "missing changes array");
     const QJsonArray entries = object.value("changes").toArray();
-    requireInput(!entries.isEmpty() && entries.size() <= 128,
+    requireInput((allowEmpty || !entries.isEmpty()) && entries.size() <= 128,
                  forCommit ? "model commit requires 1..128 changes" :
                              "model save requires 1..128 changes");
     std::vector<ModelChange> changes;
@@ -832,6 +834,11 @@ void verifyEditImages(ProjectService& service, const WorkingCopyInfo& draft,
     std::map<Key, std::optional<Bytes>> state;
     for (const aowis::model::ModelEditTransaction& transaction : transactions) {
         for (const aowis::model::ModelEntityEdit& edit : transaction.edits) {
+            // The native root record is a server-owned manifest, not the
+            // MODEL metadata image. A separate materializer verifies its
+            // before-image and creates the matching manifest change.
+            if (edit.entityType == QString::fromLatin1(aowis::model::hydraulicRootEditType))
+                continue;
             const Key key = hydraulic::keyFromUuid(edit.entityId);
             const std::map<Key, std::optional<Bytes>>::const_iterator known = state.find(key);
             const std::optional<Bytes> current = known != state.end() ? known->second : stored(key);
@@ -1599,7 +1606,7 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
         guarded(response, [&]() {
             const QJsonObject body = parseBody(request, maxJsonModelBytes);
             requireKeys(body, {"sessionId", "fencingToken", "expectedGeneration", "changes"});
-            const std::vector<ModelChange> changes = parseModelChanges(body);
+            const std::vector<ModelChange> changes = parseModelChanges(body, false, true);
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
             for (const ModelChange& change : changes)
                 requireInput(!change.record ||
@@ -1706,7 +1713,9 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
         guarded(response, [&]() {
             const QJsonObject body = parseBody(request, maxJsonModelBytes);
             requireKeys(body, {"sessionId", "fencingToken", "expectedGeneration", "changes", "events", "membership"});
-            const std::vector<ModelChange> changes = parseModelChanges(body);
+            // Root-only MODEL events intentionally carry no client model records.
+            // Other empty batches are rejected below after decoding the events.
+            const std::vector<ModelChange> changes = parseModelChanges(body, false, true);
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
             for (const ModelChange& change : changes)
                 requireInput(!change.record ||
@@ -1771,6 +1780,44 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
 #endif
             std::vector<ModelChange> materialized = changes;
             std::optional<std::string> logicalRequestFingerprint;
+#ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
+            // Root metadata is encoded as one reversible MODEL event; the
+            // server creates its private kind-100 manifest record. The client
+            // never sends or guesses manifest/chunk bytes. A zero-record Save
+            // is legal ONLY for this one special edit.
+            bool rootEvent = false;
+            for (const aowis::model::ModelEditTransaction& transaction : transactions)
+                for (const aowis::model::ModelEntityEdit& edit : transaction.edits)
+                    if (edit.entityType == QString::fromLatin1(aowis::model::hydraulicRootEditType))
+                        rootEvent = true;
+            if (rootEvent) {
+                requireInput(transactions.size() == 1 && transactions.front().edits.size() == 1 &&
+                             changes.empty() && !body.contains("membership"),
+                             "root metadata must be one event with no client model records or membership");
+                // Fingerprint the logical request, not generated native bytes,
+                // so replay after lost acknowledgement stays idempotent.
+                const QByteArray bytes = QJsonDocument(body).toJson(QJsonDocument::Compact);
+                logicalRequestFingerprint = QCryptographicHash::hash(
+                    bytes, QCryptographicHash::Sha256).toHex().toStdString();
+                const std::uint64_t expected = strictUint64(body, "expectedGeneration");
+                if (current.generation == expected) {
+                    std::map<Key, std::optional<ModelRecord>> overlay;
+                    for (const ModelChange& change : current.candidateChanges)
+                        overlay.emplace(change.key, change.record);
+                    const std::function<std::optional<ModelRecord>(const Key&)> reader =
+                        [&service, &current, &overlay](const Key& key) -> std::optional<ModelRecord> {
+                        const std::map<Key, std::optional<ModelRecord>>::const_iterator item = overlay.find(key);
+                        if (item != overlay.end()) return item->second;
+                        if (!current.baseRevision) return std::nullopt;
+                        return service.getModelAtRevision(current.projectId, *current.baseRevision, key);
+                    };
+                    materialized.push_back(hydraulic::materializeDraftRootEdit(
+                        reader, transactions.front().edits.front()));
+                }
+            } else {
+                requireInput(!changes.empty(), "ordinary edit events require model records");
+            }
+#endif
             if (body.contains("membership")) {
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
                 requireInput(body.value("membership").isArray(), "membership must be an array");
