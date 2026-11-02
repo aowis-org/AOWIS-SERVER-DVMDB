@@ -997,6 +997,38 @@ void registerBundleRoutes(httplib::Server& server, ProjectService& service, Bund
 }
 
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
+// Both immutable-revision and private-draft summaries use the same entity
+// inventory. Keep the counts derived from the hydrated canonical MODEL object,
+// not from native membership records (which are implementation details).
+QJsonObject hydraulicNetworkSummaryJson(const NetworkHydraulic& network) {
+    const QJsonObject counts{
+        {"junctions", network.nodes_junctions.size()},
+        {"pipes", network.links_pipes.size()},
+        {"reservoirs", network.nodes_reservoirs.size()},
+        {"tanks", network.nodes_tanks.size()},
+        {"pumps", network.links_pumps.size()},
+        {"valves", network.links_valves.size()},
+        {"demandPoints", network.demand_points.size()},
+        {"controls", network.controls_simple.size()},
+        {"rules", network.controls_rules.size()},
+        {"mapLabels", network.map_labels.size()},
+        {"pipeMaterials", network.pipe_materials.size()},
+        {"timePatterns", network.patterns_time.size()},
+        {"tankVolumeCurves", network.curves_tank_volume.size()},
+        {"pumpHeadCurves", network.curves_pump_head.size()},
+        {"pumpEfficiencyCurves", network.curves_pump_efficiency.size()},
+        {"valveHeadlossCurves", network.curves_valve_headloss.size()},
+        {"valveCharacteristicCurves", network.curves_valve_characteristic.size()},
+        {"genericCurves", network.curves_generic.size()}
+    };
+    int total = 0;
+    for (QJsonObject::const_iterator it = counts.constBegin();
+         it != counts.constEnd(); ++it) total += it.value().toInt();
+    return QJsonObject{{"id", uuidString(network.uuid)},
+                       {"title", network.title_line_1},
+                       {"counts", counts}, {"entityCount", total}};
+}
+
 void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
     // Distinct domain-validated merge route; generic merges do not perform
     // hydraulic semantic validation.
@@ -1086,31 +1118,7 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
                     if (!network)
                         throw ProjectError(ProjectErrorKind::Unavailable,
                                            "hydraulic network root could not be loaded");
-                    const QJsonObject counts{
-                        {"junctions", network->nodes_junctions.size()},
-                        {"pipes", network->links_pipes.size()},
-                        {"reservoirs", network->nodes_reservoirs.size()},
-                        {"tanks", network->nodes_tanks.size()},
-                        {"pumps", network->links_pumps.size()},
-                        {"valves", network->links_valves.size()},
-                        {"demandPoints", network->demand_points.size()},
-                        {"controls", network->controls_simple.size()},
-                        {"rules", network->controls_rules.size()},
-                        {"mapLabels", network->map_labels.size()},
-                        {"pipeMaterials", network->pipe_materials.size()},
-                        {"timePatterns", network->patterns_time.size()},
-                        {"tankVolumeCurves", network->curves_tank_volume.size()},
-                        {"pumpHeadCurves", network->curves_pump_head.size()},
-                        {"pumpEfficiencyCurves", network->curves_pump_efficiency.size()},
-                        {"valveHeadlossCurves", network->curves_valve_headloss.size()},
-                        {"valveCharacteristicCurves", network->curves_valve_characteristic.size()},
-                        {"genericCurves", network->curves_generic.size()}};
-                    int total = 0;
-                    for (QJsonObject::const_iterator it = counts.constBegin();
-                         it != counts.constEnd(); ++it) total += it.value().toInt();
-                    networks.append(QJsonObject{{"id", uuidString(id)},
-                                                {"title", network->title_line_1},
-                                                {"counts", counts}, {"entityCount", total}});
+                    networks.append(hydraulicNetworkSummaryJson(*network));
                 }
                 result = QJsonObject{{"scope", "committed"},
                                      {"revision", revisionIdString(revision)},
@@ -1422,6 +1430,61 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
         });
     });
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
+    // Summarize the SAVED candidate of one specific private draft generation.
+    // Unlike the committed branch-tip summary, this includes unpublished edits
+    // and also works for unborn branches. This is read-only and needs no lease.
+    server.Get("/dvmdb/v1/working-copies/:draft/networks/summary",
+               [&service](const httplib::Request& request, httplib::Response& response) {
+        guarded(response, [&]() {
+            const WorkingCopyInfo draft = service.workingCopy(pathParam(request, "draft"), false);
+            std::map<Key, std::optional<ModelRecord>> overlay;
+            for (const ModelChange& change : draft.candidateChanges)
+                requireInput(overlay.emplace(change.key, change.record).second,
+                             "duplicate draft candidate model record");
+            std::set<Key> roots;
+            if (draft.baseRevision) {
+                const std::optional<ProjectId> project = ProjectId::parse(draft.projectId);
+                requireInput(project.has_value(), "invalid private draft project UUIDv7");
+                service.withRepository(draft.projectId, [&](Repository& repository) {
+                    const std::vector<std::pair<Key, Bytes>> records =
+                        repository.scanAtRevision(*project, *draft.baseRevision);
+                    for (const std::pair<Key, Bytes>& item : records)
+                        if (decodeModelRecord(item.second).kind == hydraulic::hydraulicNetworkKind)
+                            roots.insert(item.first);
+                });
+            }
+            for (const std::pair<const Key, std::optional<ModelRecord>>& item : overlay) {
+                if (item.second && item.second->kind == hydraulic::hydraulicNetworkKind)
+                    roots.insert(item.first);
+                else
+                    roots.erase(item.first);
+            }
+            const std::function<std::optional<ModelRecord>(const Key&)> reader =
+                [&service, &draft, &overlay](const Key& key) -> std::optional<ModelRecord> {
+                const std::map<Key, std::optional<ModelRecord>>::const_iterator found = overlay.find(key);
+                if (found != overlay.end()) return found->second;
+                if (!draft.baseRevision) return std::nullopt;
+                return service.getModelAtRevision(draft.projectId, *draft.baseRevision, key);
+            };
+            QJsonArray networks;
+            for (const Key& key : roots) {
+                const QUuid id = hydraulic::uuidFromKey(key);
+                const std::optional<NetworkHydraulic> network =
+                    hydraulic::loadDraftHydraulicNetwork(reader, id);
+                if (!network)
+                    throw ProjectError(ProjectErrorKind::Unavailable,
+                                       "saved draft hydraulic network could not be loaded");
+                networks.append(hydraulicNetworkSummaryJson(*network));
+            }
+            return Reply{200, QJsonObject{
+                {"scope", "working-copy"},
+                {"draftId", QString::fromStdString(draft.id)},
+                {"generation", QString::number(static_cast<qulonglong>(draft.generation))},
+                {"networkCount", networks.size()},
+                {"networks", networks}
+            }};
+        });
+    });
     // Rehydrate one pinned draft candidate without publishing a revision.
     // Read the entire candidate once: no writer can mix generations inside
     // this response, and base records always come from its immutable revision.

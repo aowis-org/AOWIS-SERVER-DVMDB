@@ -188,6 +188,40 @@ paths:
       responses:
         '200': {description: Working-copy metadata, full candidate overlay and event journal}
         '404': {$ref: '#/components/responses/NotFound'}
+  /working-copies/{draftId}/networks/summary:
+    parameters:
+      - {name: draftId, in: path, required: true, schema: {type: string, format: uuid}}
+    get:
+      operationId: getSavedWorkingCopyNetworkSummary
+      description: |
+        Read canonical hydraulic network counts from one exact saved private
+        draft candidate generation, including overlays over a committed base.
+        Unlike the committed revision summary, this also reports uncommitted
+        network data in an unborn HEAD. Does not acquire a lease or mutate data.
+      responses:
+        '200':
+          description: Saved draft identity, exact generation, and network inventory
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [scope, draftId, generation, networkCount, networks]
+                properties:
+                  scope: {type: string, enum: [working-copy]}
+                  draftId: {type: string, format: uuid}
+                  generation: {type: string, description: Decimal saved draft generation}
+                  networkCount: {type: integer, minimum: 0}
+                  networks:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, title, counts, entityCount]
+                      properties:
+                        id: {type: string, format: uuid}
+                        title: {type: string}
+                        counts: {type: object, additionalProperties: {type: integer, minimum: 0}}
+                        entityCount: {type: integer, minimum: 0}
+        '404': {$ref: '#/components/responses/NotFound'}
   /working-copies/{draftId}/networks/{networkId}:
     parameters:
       - {name: draftId, in: path, required: true, schema: {type: string, format: uuid}}

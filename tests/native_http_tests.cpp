@@ -2128,6 +2128,12 @@ void exerciseUnbornNetworkInitializationHttp() {
               "unborn hydraulic draft could not be created");
         draftId = created.json.value("id").toString().toStdString();
         const QString path = listPath + "/" + QString::fromStdString(draftId);
+        const Response emptySummary = client.call("GET", path + "/networks/summary");
+        check(emptySummary.status == 200 && emptySummary.json.value("scope") == "working-copy" &&
+              emptySummary.json.value("generation") == "0" &&
+              emptySummary.json.value("networkCount") == 0 &&
+              emptySummary.json.value("networks").toArray().isEmpty(),
+              "new unborn working copy summary should be empty");
         const Response lease = client.call("POST", path + "/lease",
             QJsonObject{{"sessionId", session}, {"seconds", 60}});
         check(lease.status == 200, "unborn hydraulic draft lease failed");
@@ -2160,6 +2166,14 @@ void exerciseUnbornNetworkInitializationHttp() {
               initialized.json.value("events").toArray().isEmpty() &&
               !service.optionalHead(project.id, "main").has_value(),
               "first network changed committed HEAD or did not save root in unborn draft");
+        const Response firstSummary = client.call("GET", path + "/networks/summary");
+        check(firstSummary.status == 200 && firstSummary.json.value("generation") == "1" &&
+              firstSummary.json.value("networkCount") == 1 &&
+              firstSummary.json.value("networks").toArray().first().toObject()
+                  .value("id") == networkId &&
+              firstSummary.json.value("networks").toArray().first().toObject()
+                  .value("counts").toObject().value("junctions") == 0,
+              "unborn saved network was omitted from private draft summary");
         const Response firstView = client.call("GET", path + "/networks/" + networkId);
         const QByteArray firstPayload = QByteArray::fromBase64(
             firstView.json.value("payloadBase64").toString().toLatin1());
@@ -2206,6 +2220,12 @@ void exerciseUnbornNetworkInitializationHttp() {
         check(saved.status == 200 && saved.json.value("generation") == QStringLiteral("2") &&
               !service.optionalHead(project.id, "main").has_value(),
               "first hydraulic member could not be saved into unborn draft");
+        const Response populatedSummary = client.call("GET", path + "/networks/summary");
+        check(populatedSummary.status == 200 && populatedSummary.json.value("generation") == "2" &&
+              populatedSummary.json.value("networkCount") == 1 &&
+              populatedSummary.json.value("networks").toArray().first().toObject()
+                  .value("counts").toObject().value("junctions") == 1,
+              "private summary missed a saved uncommitted junction");
         const Response populatedView = client.call("GET", path + "/networks/" + networkId);
         const QByteArray populatedPayload = QByteArray::fromBase64(
             populatedView.json.value("payloadBase64").toString().toLatin1());
@@ -2231,6 +2251,14 @@ void exerciseUnbornNetworkInitializationHttp() {
         TestServer server(reopened, native::BundleLimits{4ULL * 1024ULL * 1024ULL,
                                                         10000ULL, 1024ULL * 1024ULL});
         Client client(server.port());
+        const QString reopenedPath = QStringLiteral("/dvmdb/v1/working-copies/")
+            + QString::fromStdString(draftId);
+        const Response recoveredSummary = client.call("GET", reopenedPath + "/networks/summary");
+        check(recoveredSummary.status == 200 && recoveredSummary.json.value("generation") == "2" &&
+              recoveredSummary.json.value("networkCount") == 1 &&
+              recoveredSummary.json.value("networks").toArray().first().toObject()
+                  .value("counts").toObject().value("junctions") == 1,
+              "private network summary was lost after DVMDB restart");
         const Response recovered = client.call("GET", QStringLiteral("/dvmdb/v1/working-copies/")
             + QString::fromStdString(draftId) + "/networks/" + networkId);
         const std::optional<NetworkHydraulic> restored = native::ModelCodec<NetworkHydraulic>::decode(
