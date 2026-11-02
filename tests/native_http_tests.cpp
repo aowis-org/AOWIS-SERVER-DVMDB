@@ -1,3 +1,4 @@
+#include "aowis_model_codec_fingerprint.h"
 #include "commit_metadata_fixture.h"
 #include "model_edit_event_fixture.h"
 #include "aowis/dvmdb/dvmdb_http_routes.h"
@@ -1379,13 +1380,17 @@ void exerciseUnbornProjectHttp() {
     TestServer server(service, native::BundleLimits{4ULL * 1024ULL * 1024ULL, 10000, 1024ULL * 1024ULL});
     Client client(server.port());
     const Response repository = client.call("GET", "/dvmdb/v1/repository");
-    check(repository.status == 200 && repository.json.keys() == QStringList({"repositoryId"})
+    check(repository.status == 200 && repository.json.keys() == QStringList({"modelCodecFingerprint", "repositoryId"})
           && repository.json.value("repositoryId").toString() ==
-              QString::fromStdString(service.repositoryId()),
+              QString::fromStdString(service.repositoryId())
+          && repository.json.value("modelCodecFingerprint").toString() ==
+              QString::fromLatin1(AOWIS_MODEL_CODEC_FINGERPRINT),
           "HTTP repository identity differs from native root UUID");
     const Response emptyTracking = client.call("GET", "/dvmdb/v1/repository/tracking");
     check(emptyTracking.status == 200 &&
           emptyTracking.json.value("repositoryId") == repository.json.value("repositoryId") &&
+          emptyTracking.json.value("modelCodecFingerprint") ==
+              repository.json.value("modelCodecFingerprint") &&
           emptyTracking.json.value("role").toString() == QStringLiteral("unconfigured") &&
           emptyTracking.json.value("remotes").toArray().isEmpty() &&
           emptyTracking.json.value("tracking").toArray().isEmpty(),
@@ -2451,7 +2456,18 @@ void exerciseHydraulicDraftMembershipHttp() {
                             {"expectedGeneration", "0"}, {"changes", QJsonArray{addition}},
                             {"events", QJsonArray{firstEvent}},
                             {"membership", QJsonArray{insertion}}};
+    // A codec disagreement must expose the decoding reason rather than only
+    // a generic invalid_request, while leaving the candidate unchanged.
     QJsonObject invalid = first;
+    invalid.insert("events", QJsonArray{QString::fromLatin1(
+        QByteArrayLiteral("invalid transaction framing").toBase64())});
+    const Response malformedEvent = client.call("POST", path + "/save-events", invalid);
+    check(malformedEvent.status == 400 &&
+          malformedEvent.json.value("error").toObject().value("message").toString()
+              .contains("Invalid edit transaction frame") &&
+          client.call("GET", path).json.value("generation") == QStringLiteral("0"),
+          "invalid MODEL event did not report codec reason without changing draft");
+    invalid = first;
     invalid.insert("membership", QJsonArray{QJsonObject{
         {"networkId", networkId}, {"entityId", newId}, {"kind", 4},
         {"collectionIndex", 9}, {"inserted", true}}});

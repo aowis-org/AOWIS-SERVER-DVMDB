@@ -1,3 +1,4 @@
+#include "aowis_model_codec_fingerprint.h"
 #include "aowis/dvmdb/dvmdb_http_routes.h"
 #include "aowis/dvmdb/storage_error.h"
 #include "aowis/dvmdb/revision_record.h"
@@ -1310,7 +1311,8 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
     });
     server.Get("/dvmdb/v1/repository", [&service](const httplib::Request&, httplib::Response& response) {
         guarded(response, [&]() {
-            return Reply{200, QJsonObject{{"repositoryId", QString::fromStdString(service.repositoryId())}}};
+            return Reply{200, QJsonObject{{"repositoryId", QString::fromStdString(service.repositoryId())},
+                {"modelCodecFingerprint", QString::fromLatin1(AOWIS_MODEL_CODEC_FINGERPRINT)}}};
         });
     });
     // Read-only VC-03 repository-qualified tracking metadata. The registry
@@ -1340,6 +1342,7 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             }
             return Reply{200, QJsonObject{
                 {"repositoryId", QString::fromStdString(service.repositoryId())},
+                {"modelCodecFingerprint", QString::fromLatin1(AOWIS_MODEL_CODEC_FINGERPRINT)},
                 {"role", roleName}, {"remotes", remotes}, {"tracking", tracked}}};
         });
     });
@@ -1733,7 +1736,13 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 QString error;
                 std::optional<aowis::model::ModelEditTransaction> transaction =
                     aowis::model::ModelEditTransactionCodec::decode(decoded, &error);
-                requireInput(transaction.has_value(), "invalid MODEL edit transaction");
+                // The GUI has already decoded this event before sending it.
+                // Preserve the precise reason when this server's MODEL codec
+                // rejects the same frame (for example, a codec-version mismatch).
+                // Never acknowledge or alter the private draft on decode failure.
+                if (!transaction.has_value())
+                    throw ProjectError(ProjectErrorKind::InvalidInput,
+                        "invalid MODEL edit transaction: " + error.toStdString());
                 transactions.push_back(std::move(*transaction));
 #endif
                 events.emplace_back(reinterpret_cast<const std::uint8_t*>(decoded.constData()),

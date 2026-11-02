@@ -104,3 +104,15 @@ persisted operation/draft state before deciding to retry.
 
 See [operations](operations.md) for storage-root selection, backup and
 recovery, and [roadmap](roadmap.md) for unfinished work.
+
+### MODEL source compatibility handshake
+
+`GET /dvmdb/v1/repository` and `GET /dvmdb/v1/repository/tracking`
+return `modelCodecFingerprint`: a lowercase SHA-256 digest of the checked-out
+AOWIS-SERVER-MODEL source/header files and codec schema inputs when the server
+was built. It is **not** a Git revision: uncommitted source edits change it.
+GUI clients must compare this fingerprint with their own build before loading
+MODEL networks or submitting private working-copy changes. Missing or different
+fingerprints are a compatibility failure, not a request to migrate or discard
+queued events. Rebuild both applications against identical MODEL source contents
+and restart both processes. This is a compatibility check, not authentication.

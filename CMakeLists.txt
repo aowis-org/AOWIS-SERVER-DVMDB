@@ -80,6 +80,12 @@ if(BUILD_TESTING)
         COMMAND aowis-dvmdb-transfer-staging-budget-tests)
     set_tests_properties(aowis-dvmdb-transfer-staging-budget-tests PROPERTIES LABELS "aowis")
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_test(NAME aowis-dvmdb-model-fingerprint-tests
+        COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/model_codec_fingerprint_tests.py"
+            --cmake "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ModelCodecFingerprint.cmake"
+            --model "${CMAKE_CURRENT_SOURCE_DIR}/external/AOWIS-SERVER-MODEL")
+    set_tests_properties(aowis-dvmdb-model-fingerprint-tests PROPERTIES LABELS "aowis;qualification")
     # Checks that every canonical UUIDv7 HTTP route matches its OpenAPI
     # method/path, even in native-only builds without Qt development headers.
     add_test(NAME aowis-dvmdb-http-uuidv7-route-contract-tests
@@ -444,6 +450,9 @@ if(AOWIS_DVMDB_WITH_MODEL_CODEC)
             add_subdirectory("${AOWIS_DVMDB_MODEL_SOURCE_DIR}"
                 "${CMAKE_CURRENT_BINARY_DIR}/aowis-server-model")
         endif()
+        include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/ModelCodecFingerprint.cmake")
+        aowis_generate_model_codec_fingerprint("${AOWIS_DVMDB_MODEL_SOURCE_DIR}"
+            "${CMAKE_CURRENT_BINARY_DIR}/model-fingerprint")
         # Canonical serialization, value checks and field-aware merges are
         # compiled exactly once in AOWIS::Model, regardless of host target.
         add_library(aowis-dvmdb-hydraulic STATIC
@@ -521,6 +530,12 @@ if(AOWIS_DVMDB_WITH_HTTP_SERVER)
     add_library(aowis-dvmdb-http STATIC src/dvmdb_http_routes.cpp)
     target_compile_features(aowis-dvmdb-http PUBLIC cxx_std_20)
     target_include_directories(aowis-dvmdb-http PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    if(NOT AOWIS_DVMDB_WITH_MODEL_CODEC)
+        file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/model-fingerprint")
+        file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/model-fingerprint/aowis_model_codec_fingerprint.h"
+            "#pragma once\n#define AOWIS_MODEL_CODEC_FINGERPRINT \"unavailable\"\n")
+    endif()
+    target_include_directories(aowis-dvmdb-http PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/model-fingerprint")
     target_link_libraries(aowis-dvmdb-http PUBLIC aowis-dvmdb-project-service aowis-cpp-httplib Qt6::Core)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(aowis-dvmdb-http PRIVATE -Wall -Wextra)
@@ -535,6 +550,7 @@ if(AOWIS_DVMDB_WITH_HTTP_SERVER)
     if(BUILD_TESTING)
         add_executable(aowis-dvmdb-http-tests tests/native_http_tests.cpp)
         target_link_libraries(aowis-dvmdb-http-tests PRIVATE aowis-dvmdb-http)
+        target_include_directories(aowis-dvmdb-http-tests PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/model-fingerprint")
         add_dependencies(aowis-dvmdb-http-tests aowis-server-dvmdb)
         # Real-server validation of HTTP readiness, the XDG default,
         # automatic legacy-root reuse and explicit CLI/INI overrides.

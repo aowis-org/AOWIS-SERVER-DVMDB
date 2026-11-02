@@ -27,10 +27,11 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [repositoryId]
+                required: [repositoryId, modelCodecFingerprint]
                 additionalProperties: false
                 properties:
                   repositoryId: {type: string, format: uuid}
+                  modelCodecFingerprint: {type: string, pattern: "^[0-9a-f]{64}$", description: SHA-256 of checked-out MODEL include and src content at build time}
   /repository/tracking:
     get:
       operationId: getRepositoryTracking
@@ -46,10 +47,11 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [repositoryId, role, remotes, tracking]
+                required: [repositoryId, modelCodecFingerprint, role, remotes, tracking]
                 additionalProperties: false
                 properties:
                   repositoryId: {type: string, format: uuid}
+                  modelCodecFingerprint: {type: string, pattern: "^[0-9a-f]{64}$"}
                   role: {type: string, enum: [unconfigured, private, shared]}
                   remotes:
                     type: array
