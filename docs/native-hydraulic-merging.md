@@ -5,7 +5,10 @@
 on the native two-parent revision/merge API while validating the combined
 hydraulic model **before any bytes are appended or the target branch ref moves**.
 The operation returns `MergeStatus::Conflicts` with diagnostics on rejected
-merges. It never changes the source branch.
+merges. It never changes the source branch. **This describes the present
+strict API, not the agreed long-term rule:** for version-control merges,
+otherwise representable broken hydraulic networks must be allowed, with
+non-blocking diagnostics. See [INT-04/INT-10](roadmap.md#c1-coordinated-implementation-queue-int-00-through-int-12).
 
 For independently modified fields of the **same** canonical hydraulic entity,
 all three historical model records are decoded and compared field by field. A
@@ -100,8 +103,9 @@ bytes, detects cross-network ownership collisions and orphaned records, revalida
 against canonically extracted model dependencies. Any failure blocks publication.
 
 The plain `Repository::mergeBranches()` remains a Qt-free generic object merge
-with no **implicit** hydraulic validation. AOWIS should use the hydraulic-specific
-API for branches containing hydraulic networks. **Fast-forwards validate the
+with no **implicit** hydraulic validation. The current AOWIS-specific
+path uses the hydraulic-specific API for branches containing hydraulic
+networks; INT-04/INT-10 must make its domain diagnostics non-blocking. **Fast-forwards validate the
 complete immutable source snapshot before publishing the target reference**;
 an invalid snapshot returns `Conflicts` and leaves both heads and the pack
 unchanged. A source snapshot that is not model-indexed is rejected when a

@@ -82,15 +82,23 @@ For private drafts the service adds three hydraulic operations:
 * `GET /working-copies/{id}/networks/{networkId}` rebuilds and validates one
   network from the base plus the candidate.
 
-## Validation boundary
+## Validation boundary (current behavior and planned change)
 
-Committed saves and hydraulic merges validate the complete candidate network;
-edits validate it incrementally on their indexed paths and completely
-otherwise. A local Commit of a draft currently checks only MODEL records and
-references, not the full hydraulic validator; until it does, it must not be
-offered as a GUI Commit ([roadmap](roadmap.md)). A valid reference graph is not
-a valid network: two edits to different entities can still conflict through
-connectivity, endpoint types or membership.
+**Current strict APIs:** committed whole-network saves and hydraulic merges
+validate the complete candidate network; indexed edits check MODEL rules and
+references. The draft Local Commit path checks MODEL records and references
+without the full hydraulic validator, and the GUI Commit action already
+exists. These strict checks may reject some otherwise representable
+incomplete hydraulic states.
+
+**Agreed version-control target:** Save, Commit, Fetch, Publish and Merge
+should preserve any canonically representable network, including broken
+hydraulic references, connectivity and solver constraints. Preserve record
+format, identity, membership, revision ancestry and atomic-write integrity;
+move hydraulic checks into non-mutating diagnostics. The existing strict
+whole-network and merge paths must be audited/refactored or complemented by a
+lossless version-control path before claiming that target is implemented;
+see [roadmap INT-00/INT-04](roadmap.md#c1-coordinated-implementation-queue-int-00-through-int-12).
 
 ## Tests
 

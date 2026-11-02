@@ -170,8 +170,9 @@ revision or either local/shared HEAD as a side effect of ordinary Save.
 **Save / Autosave** durably updates the selected personal working copy;
 it does **not** create a revision or advance a branch HEAD.
 
-**Commit** validates the complete candidate hydraulic model, creates one
-new immutable UUIDv7 revision and SHA-256 record in the personal DVMDB,
+**Commit** accepts any structurally representable candidate, including an
+incomplete or hydraulically invalid network, and creates one new immutable
+UUIDv7 revision and SHA-256 record in the personal DVMDB,
 and atomically advances only its **local** target branch when
 `expectedLocalHeadRevisionId` exactly matches (explicit null for unborn).
 Local commitment and HEAD update are one logical transaction, with
@@ -182,8 +183,9 @@ silently overwrite an existing local commit.
 **Publish / Push** sends missing verified immutable objects from the personal
 DVMDB to the **shared** DVMDB and conditionally advances the shared branch
 from an exact `expectedRemoteHeadRevisionId` (including null for the first
-publication). The shared server verifies identities, ancestry, hashes,
-model semantics and fast-forward/merge rules before durable publication.
+publication). The shared server verifies identities, ancestry, hashes, record integrity
+and fast-forward/merge rules before durable publication. Hydraulic findings
+are reported independently and never veto Publish.
 The remote update is atomic and idempotent; a rejected or timed-out publish
 **never erases the already successful local commit**. Query the shared
 operation status before retrying an ambiguous response. Every Commit and
@@ -194,9 +196,9 @@ or remote advancement. A changed payload under the same ID is invalid.
 **Fetch** only adds/validates immutable history and updates remote-tracking
 refs; it never overwrites private working copies or silently resets local
 branch HEADs. On shared HEAD advance, use an explicit compare/reconcile or
-explicit fast-forward or three-way merge operation. Overlapping entity
-edits and non-overlapping but hydraulically incompatible changes both require
-resolution/validation. The initial implementation does not automatically
+explicit fast-forward or three-way merge operation. Overlapping entity edits require an explicit conflict choice;
+non-overlapping but hydraulically incompatible changes may be preserved as an
+intentionally invalid model, with optional diagnostics. The initial implementation does not automatically
 rebase/replay, force-push, perform octopus merges or silently choose a winner.
 
 Example:
@@ -208,12 +210,31 @@ Bob saves draft B, commits locally B8 (shared HEAD still R7).
 Alice publishes R8 with expected remote HEAD R7 -> shared HEAD R8.
 Bob publishes B8 with expected remote HEAD R7 -> STALE/REJECTED.
 Bob still owns B8 in his personal repository. He fetches R8,
-reconciles and validates, then publishes a new accepted successor.
+reconciles with explicit conflict choices, then publishes a new successor.
 ```
 
 ***Commit and Publish are distinct user actions and API operations.***
 Their exact wire schemas, local tracking-reference behavior and any
 future optional combined command must preserve these invariants.
+
+### Storage integrity versus hydraulic diagnostics
+
+**Storage integrity is mandatory.** Records must be decodable and canonically
+identifiable, revision parents and hashes must be valid, membership/index
+structure must be unambiguous, and transactions, leases and compare-and-swap
+preconditions must hold. **Hydraulic validity is optional:** the network may
+have dangling model-entity UUID references, incomplete topology, disconnected
+components, missing sources or solver failures. These are useful intermediate
+engineering states and must be reconstructable unchanged when representable
+by the MODEL format. Do not confuse a missing hydraulic junction with a
+missing immutable **revision parent**, which is repository corruption.
+
+Validation is an explicit, read-only diagnostic on a pinned revision or saved
+draft generation, not a side effect of Save, Commit, Publish, Fetch or Merge.
+The GUI may display warnings; it must not turn them into blockers for those
+operations. Where existing strict MODEL/network load or hydraulic-merge paths
+reject otherwise representable invalid states, the implementation must be
+changed according to [the roadmap](roadmap.md#c1-coordinated-implementation-queue-int-00-through-int-12).
 
 ## 7. Revision DAG and merging
 
@@ -248,7 +269,9 @@ keep one revision UUID/card and show the real references, never duplicate it.
 Merge must compare both source and target committed HEADs against expected
 values before publishing. An up-to-date merge is a no-op; fast-forward may
 advance the target ref to an already committed descendant; a divergent merge
-creates **one** new immutable two-parent revision only after validation.
+creates **one** new immutable two-parent revision after storage-integrity
+checks and explicit resolution of true edit conflicts. Hydraulic validity is
+not a prerequisite.
 Where editors have uncommitted changes, merging must not silently overwrite
 or consume their private working copies. Source-branch HEAD remains unchanged
 unless an explicit separate operation requests otherwise.
@@ -295,9 +318,10 @@ The API contract must make these distinct operations explicit:
 - get paginated full revision DAG and branch HEADs under a pinned snapshot;
 - compare, reconcile and merge with explicit expected HEADs.
 
-REST errors must distinguish invalid input, missing objects, permission
-failure, stale expected HEAD (`409 Conflict`), semantic validation failure,
-and transient service failure. An absent expected HEAD is **not** equivalent
+REST errors must distinguish malformed storage input, missing objects,
+permission failure, stale expected HEAD (`409 Conflict`), unresolved *edit*
+conflicts, and transient service failure. Hydraulic diagnostics are returned
+separately and do not reject a valid version-control write. An absent expected HEAD is **not** equivalent
 to an explicit null expected HEAD on an unborn branch.
 
 Offline/full/incremental replication must preserve project/branch/revision

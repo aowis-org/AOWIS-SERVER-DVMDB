@@ -16,23 +16,27 @@ The merge engine validates revision ownership and complete two-parent ancestry.
 | Outcome | Semantics |
 |---|---|
 | Up to date | Source already incorporated; do not publish or move a ref |
-| Fast-forward | Target can advance to an existing committed descendant after pinned-head and domain validation |
+| Fast-forward | Target can advance to an existing committed descendant after pinned-head and repository-integrity checks; current hydraulic-specific implementation also imposes stricter domain validation |
 | Merged | Divergent compatible histories yield **one** new UUIDv7 immutable revision with ordered `(target, source)` parents |
 | Stale | One or both expected HEADs changed; reject without modifying either ref |
-| Conflict | Unresolvable record or hydraulic-domain conflict; preserve both branches and all private working copies |
+| Conflict | Unresolved record/field edit collision or invalid repository structure; preserve both branches and all private working copies; hydraulic diagnostics alone are not future merge conflicts |
 
 A successful merge updates only the **target** branch's committed HEAD;
 the source remains unchanged. The merge base comes from actual revision
 ancestry, not branch creation provenance or UUIDv7 time order. Recursive
 virtual merge bases may be computed without creating published revisions.
 
-## Hydraulic-domain safety
+## Hydraulic-domain safety and planned semantics
 
-Distinct record-UUID edits are not automatically a safe hydraulic merge.
-Validate entity kinds, reference closure, membership order, connectivity and
-all application model invariants on the **whole proposed merged snapshot**.
-Overlapping changes require explicit conflict resolution. No last-writer-wins
-fallback or silent force-overwrite is permissible.
+The current hydraulic-specific merge validator rejects some whole-network
+domain failures, and the generic merge engine does not. The agreed target
+is to preserve **representable invalid hydraulic networks** through merge,
+while still enforcing object kind/identity, physical membership, record
+integrity, revision ancestry and pinned-HEAD CAS. Dangling hydraulic model
+references, incomplete topology and solver problems are diagnostics, not
+merge vetoes. Overlapping *edit collisions* require explicit user choices;
+no last-writer-wins fallback or silent force-overwrite is permissible. The
+strict hydraulic path remains a known implementation gap until INT-04/10.
 
 An editor with a private working copy may reconcile it against the newly
 committed target HEAD; this does not by itself publish a new revision. The
@@ -40,8 +44,9 @@ user must explicitly commit the reconciled model under a fresh expected-HEAD
 check. A timeout or ambiguous response requires authoritative verification
 before retrying.
 
-Both native and REST frontends must implement equivalent validation,
-concurrency checks, immutable revision records and durable publication.
+Both native and REST frontends must implement equivalent integrity checks,
+optional hydraulic diagnostics, concurrency checks, immutable revision
+records and durable publication.
 
 ## API
 
@@ -50,8 +55,10 @@ expectedSource, options)` is the generic record-level three-way merge: domain
 callbacks in `MergeOptions` can choose conflict sides, resolve records and
 validate the candidate; both pins are checked under the publication lock, and
 a conflicting merge leaves both heads and the pack unchanged. It does **no**
-hydraulic validation of its own; branches holding hydraulic networks must use
-`hydraulic::mergeHydraulicBranches` ([hydraulic merging](native-hydraulic-merging.md)).
+hydraulic validation of its own; the current stricter hydraulic-specific API
+is `hydraulic::mergeHydraulicBranches` ([hydraulic merging](native-hydraulic-merging.md)).
+Neither path should be described as satisfying the future lossless merge
+contract until the INT-04/INT-10 acceptance cases pass.
 
 HTTP: `POST /dvmdb/v1/projects/{id}/merges` (generic) and
 `POST /dvmdb/v1/projects/{id}/hydraulic-merges`, both with `target`, `source`,

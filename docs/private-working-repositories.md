@@ -63,11 +63,12 @@ not access control.
    *Built* ([working copies](working-copies.md)).
 3. **Save / autosave** into the draft in the personal repository. It never
    creates a revision, moves a HEAD or touches the shared repository. *Built.*
-4. **Commit locally.** Validate the complete model, create one immutable
-   revision in the personal repository and move only the **local** branch,
-   from the exact expected local HEAD (null for the first commit). A failure
-   keeps the draft. *Built as a native API without the full hydraulic
-   validation; no HTTP route yet.*
+4. **Commit locally.** Verify durable record/revision integrity, but do
+   **not** require hydraulic validity; create one immutable revision in the
+   personal repository and move only the **local** branch from the exact
+   expected local HEAD (null for the first commit). A failure keeps the
+   draft. *Built as native and HTTP APIs; invalid-model support and full
+   recovery acceptance remain open.*
 5. **Fetch.** Add the shared repository's missing immutable history and
    update remote-tracking records. Never touches drafts or local HEADs.
    *Not built* (tracking records exist; recording them is native-only).
@@ -77,7 +78,8 @@ not access control.
    local commits and drafts stay. A new local branch is first provisioned on
    the remote with its UUIDv7, as a separate idempotent step. *Not built.*
 7. **Reconcile.** Incorporate new remote commits by explicit fast-forward or
-   a validated three-way merge. No automatic rebase, force push or silent
+   an explicitly resolved three-way merge (hydraulic diagnostics are optional).
+   No automatic rebase, force push or silent
    winner; an unresolved merge stays in a draft. *Merge primitives built;
    the Fetch-based workflow is not.*
 
@@ -137,7 +139,7 @@ never flattened into an independent root.
    save drafts; shared `main` does not change.
 2. Alice commits R8 locally; shared `main` stays at R7 until she publishes.
 3. Bob's stale Publish from R7 is rejected; B8 and his drafts survive, and
-   after Fetch and a validated merge his Publish succeeds.
+   after Fetch and an explicitly resolved merge his Publish succeeds.
 4. A restarted Standalone application or a reconnecting HTTP GUI finds the
    same draft and pinned base in the same personal repository.
 5. Without a reachable personal repository editing is disabled; published

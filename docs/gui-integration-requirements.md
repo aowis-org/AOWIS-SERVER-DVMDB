@@ -34,7 +34,8 @@ commits. Shared sources remain separate. See
    committed revision UUIDv7, or null for an unborn first checkout.
 4. **Edit:** change only that working copy, retaining dirty state and
    revision base across UI navigation or reconnection.
-5. **Commit locally:** validate and create a committed revision in the
+5. **Commit locally:** verify storage integrity and create a committed
+   revision even for a hydraulically invalid, representable network in the
    user's personal DVMDB with an expected **local** HEAD/null and an
    idempotency key, without advancing the shared branch.
 6. **Publish:** transfer missing immutable objects, then conditionally
@@ -45,8 +46,9 @@ commits. Shared sources remain separate. See
    create a revision just to name the branch. Uncommitted edits require an
    explicit commit-first or exclude-edits choice.
 8. **Merge:** use expected source/target committed HEADs, both ordered parent
-   IDs for a divergent merge and hydraulic-aware validation; no silent reset
-   of private working state.
+   IDs for a divergent merge and explicit edit-conflict choices; optional
+   hydraulic diagnostics cannot block the merge; no silent reset of private
+   working state.
 
 ### What exists over HTTP today
 

@@ -169,11 +169,13 @@ reachable from HEAD → `succeeded`; HEAD moved without it → `rejected`
 Commit replay applies it. A crash between outcome and draft update heals on
 the next replay or status lookup.
 
-**Outstanding validation:** the coordinator checks MODEL record and reference
-constraints (`Repository::commitModel`), but complete hydraulic-network
-validation of the candidate is not yet established. The GUI Commit button
-**exists**; do not mistake its presence for full hydraulic or cross-platform
-acceptance. The validator and end-to-end failure-mode tests remain required.
+**Current implementation limitation:** the coordinator checks MODEL record
+and reference constraints (`Repository::commitModel`); some otherwise
+representable incomplete hydraulic states may therefore still be rejected.
+The GUI Commit button **exists**, but source presence is not full recovery or
+invalid-model acceptance. The [roadmap](roadmap.md) requires separating hard
+storage integrity from non-blocking hydraulic diagnostics, plus end-to-end
+failure-mode tests. A complete hydraulic validator is **not** a Commit gate.
 
 ## Limits
 
