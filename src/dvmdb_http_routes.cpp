@@ -1636,10 +1636,12 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 hydraulic::fullDraftHydraulicNetworkChanges(*network);
             const std::string draftId = pathParam(request, "draft");
             const WorkingCopyInfo draft = service.workingCopy(draftId, false);
-            requireInput(!draft.baseRevision.has_value() && draft.candidateChanges.empty() &&
-                         draft.journalCount == 0,
-                         "import requires a new empty unborn draft; existing network data cannot be replaced");
-            requireInput(draft.generation == expected, "working copy generation changed");
+            if (draft.baseRevision.has_value() || !draft.candidateChanges.empty() ||
+                draft.journalCount != 0)
+                throw ProjectError(ProjectErrorKind::Conflict,
+                                   "import requires a new empty unborn draft; existing network data cannot be replaced");
+            if (draft.generation != expected)
+                throw ProjectError(ProjectErrorKind::Conflict, "working copy generation changed");
             const WorkingCopyInfo saved = service.saveWorkingCopyChanges(
                 draftId, session, token, expected, changes);
             return Reply{200, workingCopyJson(saved)};

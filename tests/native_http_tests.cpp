@@ -2320,8 +2320,18 @@ void exerciseCompleteNetworkDraftImportHttp() {
               stored.json.value("dirty").toBool() &&
               !service.optionalHead(project.id, "main").has_value(),
               "full-network import did not atomically save a private unborn candidate");
-        check(client.call("POST", path + "/import-network", request).status == 409,
-              "repeat import overwrote an already populated private HEAD");
+        const Response repeat = client.call("POST", path + "/import-network", request);
+        check(repeat.status == 409 &&
+              repeat.json.value("error").toObject().value("code") == "conflict",
+              "repeat import was not rejected as a conflict");
+        NetworkHydraulic replacement = imported;
+        replacement.nodes_junctions[0].elevation_m = 99;
+        QJsonObject replacementRequest = request;
+        replacementRequest.insert("expectedGeneration", QStringLiteral("1"));
+        replacementRequest.insert("payloadBase64", QString::fromLatin1(
+            native::ModelCodec<NetworkHydraulic>::encode(replacement).toBase64()));
+        check(client.call("POST", path + "/import-network", replacementRequest).status == 409,
+              "populated private HEAD accepted a replacement network");
         const Response summary = client.call("GET", path + "/networks/summary");
         check(summary.status == 200 && summary.json.value("networkCount") == 1 &&
               summary.json.value("networks").toArray().first().toObject()
@@ -2331,8 +2341,10 @@ void exerciseCompleteNetworkDraftImportHttp() {
         const std::optional<NetworkHydraulic> restored = native::ModelCodec<NetworkHydraulic>::decode(
             QByteArray::fromBase64(loaded.json.value("payloadBase64").toString().toLatin1()));
         check(loaded.status == 200 && restored && restored->nodes_junctions.size() == 1
-              && restored->nodes_junctions.first().uuid == junction.uuid,
-              "full import did not round-trip the saved hydraulic model");
+              && restored->nodes_junctions.first().uuid == junction.uuid &&
+              restored->nodes_junctions.first().elevation_m == 17 &&
+              loaded.json.value("generation") == "1",
+              "rejected replacement altered the saved imported hydraulic model");
         server.stop();
     }
     {
