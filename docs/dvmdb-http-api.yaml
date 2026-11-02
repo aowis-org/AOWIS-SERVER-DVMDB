@@ -999,6 +999,46 @@ paths:
         '201': {description: '{"id":"<new UUIDv7 revision>"}'}
         '400': {$ref: '#/components/responses/BadRequest'}
         '409': {$ref: '#/components/responses/Conflict'}
+  /projects/{projectId}/branches/{branch}/networks/summary:
+    parameters:
+      - {$ref: '#/components/parameters/ProjectId'}
+      - {$ref: '#/components/parameters/Branch'}
+      - {name: revision, in: query, required: false, schema: {type: string, format: uuid}, description: Exact immutable revision to summarize; omitted selects the committed branch tip}
+    get:
+      operationId: getCommittedHydraulicNetworkSummary
+      description: |
+        Revision-pinned inventory of canonical hydraulic network roots and
+        their 18 collection counts. This is the COMMITTED snapshot only; an
+        unborn HEAD returns zero committed networks, which does not prove a
+        private working copy contains no network or changes. Clients must
+        not use this endpoint to authorize destructive draft imports.
+      responses:
+        '200':
+          description: Committed revision identity and network counts
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [scope, revision, networkCount, networks]
+                properties:
+                  scope: {type: string, enum: [committed]}
+                  revision:
+                    oneOf:
+                      - {type: string, format: uuid}
+                      - {type: 'null'}
+                  networkCount: {type: integer, minimum: 0}
+                  networks:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, title, counts, entityCount]
+                      properties:
+                        id: {type: string, format: uuid}
+                        title: {type: string}
+                        counts: {type: object, additionalProperties: {type: integer, minimum: 0}}
+                        entityCount: {type: integer, minimum: 0}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
   /projects/{projectId}/branches/{branch}/networks/{networkId}:
     parameters:
       - {$ref: '#/components/parameters/ProjectId'}

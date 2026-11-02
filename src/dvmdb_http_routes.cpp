@@ -1049,6 +1049,77 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
             return Reply{result.status == MergeStatus::Conflicts ? 409 : 200, mergeJson(result)};
         });
     });
+    // Revision-pinned, read-only collection summary for the Projects inspector.
+    // Never infer editable HEAD contents from this response: private drafts may
+    // contain additional uncommitted changes not present in this snapshot.
+    server.Get("/dvmdb/v1/projects/:id/branches/:branch/networks/summary",
+               [&service](const httplib::Request& request, httplib::Response& response) {
+        guarded(response, [&]() {
+            const ProjectId project = requestProject(request);
+            QJsonObject result;
+            service.withRepository(pathParam(request, "id"), [&](Repository& repository) {
+                const std::string branch = pathParam(request, "branch");
+                requireBranch(repository, branch);
+                const std::optional<RevisionId> tip = repository.optionalHead(project, branch);
+                if (!tip) {
+                    if (queryValue(request, "revision"))
+                        throw ProjectError(ProjectErrorKind::NotFound,
+                                           "unborn branch has no committed revision");
+                    result = QJsonObject{{"scope", "committed"},
+                                         {"revision", QJsonValue(QJsonValue::Null)},
+                                         {"networkCount", 0}, {"networks", QJsonArray{}}};
+                    return;
+                }
+                const RevisionId revision = revisionForRead(repository, project, branch, request);
+                requireModelIndexed(repository, project, revision, "hydraulic network not found");
+                QJsonArray networks;
+                // Only canonical network roots (kind 100), never membership
+                // chunks or standalone hydraulic entities, contribute entries.
+                const std::vector<std::pair<Key, Bytes>> records =
+                    repository.scanAtRevision(project, revision);
+                for (const std::pair<Key, Bytes>& item : records) {
+                    const ModelRecord record = decodeModelRecord(item.second);
+                    if (record.kind != hydraulic::hydraulicNetworkKind) continue;
+                    const QUuid id = hydraulic::uuidFromKey(item.first);
+                    const std::optional<NetworkHydraulic> network =
+                        hydraulic::loadHydraulicNetworkAtRevision(repository, project, revision, id);
+                    if (!network)
+                        throw ProjectError(ProjectErrorKind::Unavailable,
+                                           "hydraulic network root could not be loaded");
+                    const QJsonObject counts{
+                        {"junctions", network->nodes_junctions.size()},
+                        {"pipes", network->links_pipes.size()},
+                        {"reservoirs", network->nodes_reservoirs.size()},
+                        {"tanks", network->nodes_tanks.size()},
+                        {"pumps", network->links_pumps.size()},
+                        {"valves", network->links_valves.size()},
+                        {"demandPoints", network->demand_points.size()},
+                        {"controls", network->controls_simple.size()},
+                        {"rules", network->controls_rules.size()},
+                        {"mapLabels", network->map_labels.size()},
+                        {"pipeMaterials", network->pipe_materials.size()},
+                        {"timePatterns", network->patterns_time.size()},
+                        {"tankVolumeCurves", network->curves_tank_volume.size()},
+                        {"pumpHeadCurves", network->curves_pump_head.size()},
+                        {"pumpEfficiencyCurves", network->curves_pump_efficiency.size()},
+                        {"valveHeadlossCurves", network->curves_valve_headloss.size()},
+                        {"valveCharacteristicCurves", network->curves_valve_characteristic.size()},
+                        {"genericCurves", network->curves_generic.size()}};
+                    int total = 0;
+                    for (QJsonObject::const_iterator it = counts.constBegin();
+                         it != counts.constEnd(); ++it) total += it.value().toInt();
+                    networks.append(QJsonObject{{"id", uuidString(id)},
+                                                {"title", network->title_line_1},
+                                                {"counts", counts}, {"entityCount", total}});
+                }
+                result = QJsonObject{{"scope", "committed"},
+                                     {"revision", revisionIdString(revision)},
+                                     {"networkCount", static_cast<int>(networks.size())},
+                                     {"networks", networks}};
+            });
+            return Reply{200, result};
+        });
+    });
     // Canonical hydraulic routes use UUIDv7 revision identities and preserve
     // the existing hydraulic payload codec and semantic validation.
     server.Get("/dvmdb/v1/projects/:id/branches/:branch/networks/:network",
