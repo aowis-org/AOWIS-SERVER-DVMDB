@@ -56,14 +56,15 @@ All routes are under `/dvmdb/v1`. There is no authentication.
 |---|---|---|
 | Service | `GET /health`, `GET /ready` | liveness, catalogue readiness |
 | Repository | `GET /repository`, `GET /repository/tracking`, `POST /repository/role` | identity, role, remote tracking ([details](repository-tracking.md)) |
-| Projects | `GET`/`POST /projects`, `GET /projects/{id}`, `POST /projects/clone-target` | create with `unborn: true` for an unborn `main` (see below) |
-| Branches | `GET`/`POST /projects/{id}/branches`, `PATCH /projects/{id}/branches/{branch}`, `GET …/branches/{branch}/head`, `GET /projects/{id}/branch-ids/{branchId}`, `POST /projects/{id}/unborn-checkout` | create from a source branch UUID (at HEAD or a reachable revision), rename with expected HEAD |
-| History | `GET …/branches/{branch}/history`, `GET /projects/{id}/revisions/{revision}`, `GET /projects/{id}/revision-graph`, `GET /projects/{id}/diff` | first-parent history, one revision, the pinned paged DAG of all branches, record-level diff |
+| Projects | `GET`/`POST /projects`, `GET`/`PATCH /projects/{id}`, `POST /projects/clone-target` | create with `unborn: true` for an unborn `main` (see below) |
+| Branches | `GET`/`POST /projects/{id}/branches`, `PATCH /projects/{id}/branches/{branch}`, `PATCH /projects/{id}/branch-ids/{branchId}`, `GET …/branches/{branch}/head`, `GET /projects/{id}/branch-ids/{branchId}`, `POST /projects/{id}/unborn-checkout` | create independent unborn or from committed revision; identity-based branch metadata/name update supports unborn branches |
+| History | `GET …/branches/{branch}/history`, `GET /projects/{id}/revisions/{revision}`, `PATCH /projects/{id}/revisions/{revision}/message`, `GET /projects/{id}/revision-graph`, `GET /projects/{id}/diff` | first-parent history, one revision, the pinned paged DAG of all branches, record-level diff |
 | Model commits | `POST …/branches/{branch}/model-commits` | generic record batch with reference checks only |
 | Merges | `POST /projects/{id}/merges`, `POST /projects/{id}/hydraulic-merges` | both need both expected HEADs; the hydraulic route validates the whole network and accepts field/object choices |
-| Hydraulic networks | `POST …/branches/{branch}/networks`, `GET …/networks/{networkId}`, `GET …/networks/{networkId}/entities`, `GET …/entities/{entityId}`, `POST …/networks/{networkId}/edits` | whole-network save, pinned reads, indexed edits ([details](native-hydraulic-network.md)) |
+| Hydraulic networks | `POST …/branches/{branch}/networks`, `GET …/branches/{branch}/networks/summary`, `GET …/networks/{networkId}`, `GET …/networks/{networkId}/entities`, `GET …/entities/{entityId}`, `POST …/networks/{networkId}/edits` | whole-network save, pinned reads, indexed edits ([details](native-hydraulic-network.md)) |
 | Bundles | `GET`/`POST …/branches/{branch}/bundle` | full or incremental (`?base=`) export, verified import ([details](offline-repository-synchronization.md)) |
-| Drafts | `GET`/`POST /working-copies`, `GET /working-copies/{id}`, `…/lease`, `…/save`, `…/save-events`, `…/initialize-network`, `…/release`, `…/discard`, `GET …/networks/{networkId}` | private repositories only ([details](working-copies.md)) |
+| Local Commit | `POST /local-commits`, `GET /local-commits/{operationId}` | fenced, idempotent private Commit and outcome lookup |
+| Drafts | `GET`/`POST /working-copies`, `GET /working-copies/{id}`, `…/lease`, `…/save`, `…/save-events`, `…/initialize-network`, `…/import-network`, `…/release`, `…/discard`, `GET …/networks/summary`, `GET …/networks/{networkId}` | private repositories only ([details](working-copies.md)) |
 
 ### Known deviations
 
@@ -71,21 +72,28 @@ All routes are under `/dvmdb/v1`. There is no authentication.
   first revision (which then needs an `author`), which the contract does not
   want for new projects. Clients
   should always send `unborn: true` (it is required with a caller-chosen `id`).
-* `PATCH …/branches/{branch}` (rename) and `POST …/model-commits` require a
-  non-null `expectedHead`, so they do not work on an unborn branch. The first
-  revision of an unborn branch comes from a local Commit of a draft.
+* The older name-addressed branch rename route requires non-null
+  `expectedHead`; use identity-addressed `PATCH /projects/{id}/branch-ids/{branchId}`
+  to rename/update metadata on unborn branches. `POST …/model-commits` still
+  requires a non-null expected HEAD; the first unborn commit uses a private draft.
 
 ## Not built yet
 
 These operations are part of the contract but have no route yet; nothing
 should assume they exist:
 
-* local Commit of a draft and its status lookup (native
-  `commitWorkingCopy` / `localCommitStatus` exist);
 * Fetch and Publish between a personal and a shared repository, including
   branch provisioning on the remote and Publish status lookup;
 * registering remotes and recording tracking observations over HTTP;
 * reconcile/compare of a stale draft against a new HEAD.
+
+The original commit message is still hashed into the canonical revision.
+`PATCH /projects/{id}/revisions/{revision}/message` updates only a separately
+stored displayed annotation, not that canonical message or the record hash.
+A private HEAD summary must read the saved draft (including its committed
+base); committed-only summaries can be empty even when a draft is populated.
+
+For ready-to-use flows, see [HTTP workflows](http-workflows.md).
 
 ## Replication and security notes
 

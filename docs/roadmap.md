@@ -16,8 +16,8 @@ roadmaps and the contract.
 1. Projects, branches, revisions and drafts are distinct UUIDv7 resources.
    SHA-256 is integrity, never identity.
 2. A project starts with an unborn `main` (null HEAD) and no revision; the
-   first commit has zero parents. No branch can be created from an unborn
-   branch.
+   first commit has zero parents. Branching *from uncommitted contents* requires a commit, but a project
+   may contain multiple independent unborn branches.
 3. A branch is a movable ref to an immutable revision; its HEAD is never an
    editable model. Shared and non-leaf HEADs are valid.
 4. Editors change private drafts, never revisions. Standalone uses its
@@ -29,7 +29,8 @@ roadmaps and the contract.
 6. Creating a branch from a revision creates a ref, not a commit, and records
    the origin branch and exact fork revision. Names are UTF-8 labels, not keys.
 7. History is one revision DAG with real zero-, one- and two-parent edges.
-   Branch labels decorate HEADs; drafts are outside the DAG.
+   The GUI shows a writable HEAD card for each branch; those cards are not
+   immutable revision records.
 8. Repository roles, UUIDs, leases and fencing tokens are correctness
    mechanisms, not security. Do not expose unauthenticated writable services
    to untrusted clients.
@@ -52,34 +53,34 @@ operation-result retention, conflict report format.
 
 ## C. Status
 
-As of 2026-11-01. "Built" means implemented with automated tests in this
-repository; nothing below is accepted end to end with the GUI yet.
+Source status reviewed 2026-11-02. "Built" means an implementation path
+exists in this repository, **not** that the full GUI scenario has been
+accepted on every platform. Verify with the current test suite.
 
 | Milestone | Built | Open |
 |---|---|---|
 | **VC-01** unborn projects, nullable HEADs | unborn `main` (`unborn: true`), nullable HEAD in storage, native and REST, history and graph for zero revisions | remove the legacy empty first revision of `POST /projects` without `unborn` (needs the GUI to always send `unborn: true`) |
-| **VC-02** branch creation and provenance | branch from a committed revision or source branch, immutable `originBranchId`/`forkRevisionId`, kept across rename, restart and bundles | rename and model commits on an unborn branch (both require a non-null expected HEAD today) |
+| **VC-02** branch creation and provenance | from committed revision; multiple independent unborn branches; metadata and identity-based rename even when unborn | old name-addressed rename and model-commit endpoints still require non-null HEAD |
 | **VC-03** repository identity and tracking | `repository.id`, one-time role, remote registry, CAS tracking records; `GET /repository/tracking`, `POST /repository/role` | HTTP routes to register remotes and record observations; GUI repository configuration |
-| **VC-04** drafts | create, read, paged list, lease, Save, event Save with MODEL-image checks and server-side membership, first-network initialization, network hydration, discard; incremental on-disk format; crash and concurrency tests | GUI: editor session binding, edit capture and queued autosave, reopen after restart with byte-identical model |
-| **VC-05** local Commit | native `commitWorkingCopy`/`localCommitStatus`: strict nullable-HEAD CAS, reserved revision UUID, durable ledger, replay, recovery of pending outcomes, rebase of the draft after success | full hydraulic validation of the candidate before publication; HTTP Commit and status routes; GUI Commit action |
+| **VC-04** drafts | create/read/list/lease, event Save, first-network initialization, saved draft summary, empty-unborn draft import, network load, discard, crash tests | complete mutation-path and standalone end-to-end verification; general replacement/merge import |
+| **VC-05** local Commit | native + HTTP Commit/status and GUI HEAD Commit action; strict nullable-HEAD CAS, reserved revision UUID, durable ledger, replay, draft rebase after success | complete hydraulic candidate validation and end-to-end failure-mode/platform acceptance |
 | **VC-06** Fetch and clone | verified full/incremental bundles (CLI, HTTP), identity-preserving project and unborn-branch provisioning | Fetch into a personal repository that updates tracking records; pinned remote reads |
 | **VC-07** Publish | — | object transfer plus conditional shared-HEAD move, remote branch provisioning, Publish ledger and status |
 | **VC-08** reconciliation | generic and hydraulic three-way merges with pinned HEADs and explicit choices | compare/reconcile of a draft against a new HEAD; recursive merge bases (criss-cross histories are refused) |
 | **VC-09** history and graph | pinned paged revision DAG of all branches, revision records with parent bindings, author, message and commit time on every revision | inspector fields for local vs shared HEADs |
-| **VC-10** GUI workflows | — | GUI and Standalone/HTTP parity for all actions |
+| **VC-10** GUI workflows | Project/HEAD/Revision Inspectors, HEAD opening, selected revision read-only viewing/export, local Commit and saved draft import/export paths | full GUI/Standalone parity, general import replacement/merge, Fetch/Publish |
 | **VC-11** qualification | crash, ENOSPC, SIGKILL, recovery, stress and backup suites; opt-in QEMU power-cut and HTTP soak drills | format freeze; repeated power-cut and soak runs on the final build; GUI acceptance evidence |
 
-**Next, in order:**
+**Next, in order (unclosed acceptance gates):**
 
-1. GUI: bind first-network initialization and draft hydration to a real editor
-   session; capture, queue and flush edits (including creation and deletion)
-   across reconnects and restarts.
-2. DVMDB: run the complete hydraulic-network validator on the candidate inside
-   `commitWorkingCopy`.
-3. DVMDB: HTTP routes for local Commit and its status, with the same operation
-   ID semantics and the author and message in the request.
-4. GUI: Commit action; prove the first commit of an unborn branch end to end.
-5. Then Fetch (VC-06) and Publish (VC-07).
+1. Prove complete `NetworkHydraulic` editing, persistent metadata, and
+   read-after-restart equivalence for desktop HTTP and embedded Standalone.
+2. Strengthen native whole-candidate hydraulic validation before local Commit
+   and exercise lost acknowledgements, stale generations and process restarts.
+3. Complete network import/replacement semantics beyond the safe
+   empty-unborn-draft case, without discarding unsaved editor changes.
+4. Implement Fetch/Publish and remote-tracking/reconciliation workflows with
+   explicit conflict resolution and no implicit force update.
 
 ## D. Milestones
 
@@ -96,9 +97,10 @@ graph and bundle round trip.
 
 ### VC-02 — Branch creation and provenance
 
-Create branches only from an existing revision (verified same project and, with
-a source branch, reachable from it). Persist name, initial HEAD, origin branch
-and fork revision; rename keeps all of them. **Done when** branching adds no
+Support both independent unborn branches within an existing project and
+branches rooted at a selected committed revision. For the latter, verify
+source project/reachability and persist immutable origin and fork. Names
+are unique and editable without changing UUIDs. **Done when** branching adds no
 revision and does not change the source HEAD, and later commits cannot change a
 recorded fork point.
 

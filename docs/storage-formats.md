@@ -182,13 +182,22 @@ One file per branch, named by the branch UUIDv7. The name is display data.
 | `AOWIS-BRANCH-2` | name, HEAD revision UUIDv7, HEAD record SHA-256 |
 | `AOWIS-BRANCH-3` | name, HEAD revision UUIDv7, origin branch UUIDv7, HEAD record SHA-256 |
 | `AOWIS-BRANCH-5` | name, HEAD revision UUIDv7, origin branch UUIDv7, fork revision UUIDv7, HEAD record SHA-256 |
+| `AOWIS-BRANCH-6` | name, HEAD revision UUID/`-`, origin branch UUID/`-`, fork revision UUID/`-`, record SHA-256/`-`, UTF-8 description encoded as hex, comma-separated hex-encoded UTF-8 tags |
 
 Names are 1–96 bytes of valid UTF-8, unique within the repository, not `.` or
 `..`, without control characters or `/ \ % ? #`, and without leading or
 trailing spaces. A
 record is replaced by writing `.stage-<uuidv7>`, fsync, rename, directory
 fsync; stage files left by a crash are removed at open. The origin branch and
-fork revision never change after creation.
+fork revision never change after creation. Branch name, tags and description
+are mutable metadata; a name change never changes the UUID. The branch-6
+record supports metadata both for unborn and committed branches and keeps
+nullable HEAD/origin/fork explicit. The empty-description representation is
+an empty hex field; metadata is validated on read and write.
+
+A separately stored revision **display-message annotation** may change the
+message returned to GUI clients, while the original hashed message remains
+in the immutable revision record. This is not a rewrite of `AOWREV2x` bytes.
 
 ## Revision bundles (`AOWREV21`–`AOWREV24`)
 

@@ -6,6 +6,11 @@ with the contract, then the page for the layer you work on.
 
 ## Contract
 
+For the live API, see [current HTTP workflows](http-workflows.md), including
+unborn branch creation, saved HEAD summaries, import, local Commit and editable
+display metadata. These are distinct from immutable revision record bytes.
+
+
 | Page | What it settles |
 |---|---|
 | [Version-control contract](version-control-semantics.md) | Projects, branches, revisions, HEADs, drafts, Commit vs Publish — the rules every layer must follow |
@@ -25,6 +30,7 @@ with the contract, then the page for the layer you work on.
 | [Hydraulic persistence](native-hydraulic-network.md) | How networks are stored, read, edited and validated |
 | [Hydraulic merging](native-hydraulic-merging.md) | Field and structural conflicts, explicit choices |
 | [Working copies and local Commit](working-copies.md) | Drafts, leases, autosave of MODEL events, local Commit |
+| [Current HTTP workflows](http-workflows.md) | Readiness, project/branch metadata, network summaries, import and Commit |
 | [Repository tracking](repository-tracking.md) | Repository identity, role, remote registry |
 | [Synchronization](offline-repository-synchronization.md) | Revision bundles: CLI, C++ and HTTP |
 

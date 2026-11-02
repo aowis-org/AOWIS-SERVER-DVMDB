@@ -63,8 +63,8 @@ Invalid values stop the server with exit code 2.
 | Request | Limit |
 |---|---|
 | JSON bodies for projects, branches, role, drafts, leases, release, discard, initialize-network | 16 KiB |
-| Merge requests | 256 KiB |
-| Draft saves, network saves, entity edits, model commits | 8 MiB |
+| Merge requests, local Commit and revision display-message updates | 256 KiB |
+| Draft saves/imports, network saves, entity edits, model commits | 8 MiB |
 | Bundle upload | `max_transfer_mib` |
 | Changes per batch, events per Save, merge choices | 128 |
 | History, revision graph, draft list page | 1–1000 items |

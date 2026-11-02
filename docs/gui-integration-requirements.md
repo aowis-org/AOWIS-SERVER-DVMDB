@@ -12,7 +12,9 @@ UUIDv7 identities. SHA-256 record and snapshot hashes remain **separate
 integrity fields**. A branch record has a nullable committed HEAD and
 immutable `originBranchId` / `forkRevisionId`; it is not a commit vertex.
 A new project creates `main` with no committed HEAD or fabricated initial
-revision. Working copies are independent mutable session state.
+revision. It can also create multiple independent unborn branches. Working
+copies are independent mutable session state; the GUI HEAD **card** is the
+writable workflow tip, not an extra immutable revision.
 
 ## Personal working repository and shared source roles
 
@@ -55,9 +57,12 @@ commits. Shared sources remain separate. See
 | Every write that creates a revision sends `author` (UUIDv7 + name) and `message` | required |
 | Checkout: draft at a HEAD or null; unborn-branch and project provisioning | available |
 | Edit: leased, fenced event Saves with server-side membership; draft network hydration | available |
-| Branch from a revision or source branch | available |
+| Saved draft and pinned committed network summaries | available |
+| First import into untouched private unborn draft | available; replacement/merge not supported |
+| Revision display-message annotation without rewriting hashed commit | available |
+| Branch from revision or create independent unborn branch | available, with identity-based name/tags/description updates |
 | Generic and hydraulic merges with explicit choices | available |
-| Local Commit and its status | native only, no route yet |
+| Local Commit and its status | native and HTTP routes available |
 | Fetch, Publish | not built |
 
 HTTP must distinguish invalid IDs, missing objects, forbidden operations,
@@ -68,14 +73,16 @@ provide equivalent behavior.
 
 ## Graph and inspector invariants
 
-- One Git-style committed revision DAG displays genuine ancestry, with
-  branch-ref labels and optional stable layout lanes; revisions alone form
-  ancestry vertices. A branch is not a leaf dangling from a revision.
+- The GUI graph displays server/project cards, immutable revision cards and
+  **separate writable HEAD cards** labeled with their branches. HEAD cards
+  represent working states, not extra immutable revision records. Revision
+  ancestry edges join only real committed revisions; HEAD-to-base and
+  project-to-unborn-HEAD links are organizational.
 - Shared immutable revisions remain a **single logical UUIDv7 object**.
 - The branch inspector shows `originBranchId` and `forkRevisionId` without
   a second provenance edge in the revision history graph.
-- A private working copy is displayed as an editable workspace, not a
-  committed HEAD node. Its pinned base may differ from current branch HEAD.
+- A private working copy is represented by a writable HEAD card, not a
+  committed revision vertex. Its pinned base may differ from current branch HEAD.
 - A project with no commits displays `main` and `No commits yet`.
 - UI selection/filtering/camera/inspector changes must not mutate refs,
   create revisions or discard uncommitted work.

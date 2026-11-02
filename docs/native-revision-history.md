@@ -10,8 +10,9 @@ revision has a UUIDv7, project UUIDv7, zero/one/two ordered parent revision
 UUIDv7s bound to their record hashes, snapshot Merkle roots, its author
 (UUIDv7 and display name), message and commit time, and a SHA-256 digest of
 its canonical record ([layout](storage-formats.md#revision-record-t-3)). UUIDv7
-is the object's identity; SHA-256 proves content integrity. There is no
-mutable revision state.
+is the object's identity; SHA-256 proves content integrity. There is no mutable *canonical revision record*. A separately stored
+`displayMessage` annotation may override the message shown in the GUI, while
+`originalMessage`, SHA-256 and revision content remain immutable.
 
 Every write that creates a revision takes a `CommitMetadata` (author ID, author
 name, message): `Repository::commit`, `commitModel`, `mergeBranches`,
@@ -32,7 +33,10 @@ convenient projection, never the entire project history.
 Each named branch has its own UUIDv7, a nullable HEAD revision and
 immutable creation provenance (`originBranchId`, `forkRevisionId`). A project
 is created with an unborn `main` branch and **zero committed revisions**.
-Only the first successful commit supplies its first HEAD UUIDv7.
+Only the first successful commit supplies its first committed HEAD UUIDv7.
+Additional independent unborn branches can be created in the same project;
+each has its own name, UUIDv7 and null committed HEAD. No source revision
+is needed for that operation.
 
 The branch HEAD is the latest **committed** revision, not the user's
 working copy. Several branches can point at the same committed revision.
@@ -100,3 +104,12 @@ with a per-process key, so a cursor is invalid after a server restart or for
 another project. A page holds at most 1,000 revisions and 1,024 branch HEADs.
 `revisionReachableFrom` walks the DAG once and answers `false` for an unknown
 revision without walking.
+
+## Revision display messages versus immutable metadata
+
+The original commit message belongs to the canonical hashed record. The
+HTTP revision read also returns `originalMessage` and the optional editable
+`message` display annotation. Editing that annotation via
+`PATCH /projects/{id}/revisions/{revision}/message` does not change content,
+parents, the original commit message or SHA-256. Branch names/tags and
+descriptions are independent mutable branch metadata.

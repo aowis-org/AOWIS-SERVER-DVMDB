@@ -26,8 +26,9 @@ Standalone AOWIS builds link the library directly and need no HTTP server.
   A revision is an immutable whole-model snapshot with zero, one or two
   parents, an author, a message and its commit time; SHA-256 binds its
   content, ancestry and metadata. Branches are movable refs
-  with a nullable HEAD (a new project starts with an unborn `main` and no
-  revision) and immutable fork provenance.
+  with a nullable **committed** HEAD (a new project starts with an unborn
+  `main` and no revision) and immutable fork provenance. Projects may also
+  contain multiple independent unborn branches.
 * **Storage.** One append-only object pack per project with a rebuildable
   index, path-compressed Merkle tries keyed by entity UUID, a reverse-reference
   index, crash-safe ref publication, full verification and offline compaction.
@@ -44,9 +45,9 @@ Standalone AOWIS builds link the library directly and need no HTTP server.
   transfer staging budgets and explicit 409/413/503 semantics.
 
 DVMDB is **pre-release**. There is no TLS, authentication or authorization;
-keep the server on localhost or a trusted network. What is still missing for
-the end-to-end editor workflow (HTTP local Commit, full hydraulic validation
-before Commit, Fetch/Publish) is in the [roadmap](docs/roadmap.md).
+keep the server on localhost or a trusted network. HTTP local Commit and saved-draft network summaries/import are implemented.
+Full hydraulic validation before Commit, Fetch/Publish and broader GUI
+acceptance are tracked in the [roadmap](docs/roadmap.md).
 
 ## Quick start
 
@@ -75,12 +76,16 @@ and project service also build without Qt
 (`-DAOWIS_DVMDB_WITH_MODEL_CODEC=OFF`).
 
 ```bash
-./compile_linux_tests.sh --both   # Debug and Release builds plus all CTest suites
-./compile_linux.sh --build-only   # Release binaries and benchmarks, no server start
+./compile_linux_tests.sh          # current test build and CTest suite
+./compile_linux_tests.sh --both   # optional: independent Debug and Release suites
+./compile_linux.sh --build-only   # build only the Release server and dependencies
 ```
 
-`compile_linux.sh` starts the server only after configuration, the full build
-and the server target all succeeded, so it never runs a stale binary.
+`compile_linux.sh` builds **only** `aowis-server-dvmdb` and its transitive
+dependencies, then starts that freshly built server by default. `--build-only`
+skips launching it. Tests, benchmarks and unrelated CLI tools are not built by
+the normal server script. A failed configuration/build never launches an old
+binary.
 
 | Directory | Contents |
 |---|---|
@@ -95,24 +100,25 @@ and the server target all succeeded, so it never runs a stale binary.
 
 ```cpp
 #include <aowis/dvmdb/native_store.h>
-#include <aowis/dvmdb/hydraulic_network_persistence.h>
 
 using namespace aowis::dvmdb;
 
-Repository repository("/path/to/repository");
+// One native project repository. The ProjectService also owns the catalogue.
+Repository repository("/path/to/project/repository");
 const ProjectId project = ProjectId::generate();
-repository.createUnbornBranch(project, "main");   // no revision yet
 
-// Every revision records who made it and why; the repository adds the time.
-const CommitMetadata metadata{*UuidV7::parse("018f84c0-0000-7000-8000-00000000a001"),
-                              "Alice", "Import the town network"};
-// The first revision comes from a model commit (or a draft's local Commit);
-// later hydraulic saves pin the expected HEAD.
-const RevisionId first = repository.commitModel(project, "main", changes, metadata,
-                                                std::nullopt, true);
-const RevisionId next = hydraulic::saveHydraulicNetwork(
-    repository, project, "main", network, first, metadata);
+const BranchId main = repository.createUnbornBranch(project, "main");
+
+BranchMetadata scenario_metadata;
+scenario_metadata.tags = {"hydraulics", "experiment"};
+scenario_metadata.description = "Alternative network model";
+const BranchId scenario = repository.createUnbornBranch(
+    project, "scenario", std::nullopt, scenario_metadata);
+
+// Both branches have independent UUIDv7 identities and no committed revision.
+// An editor works in a private draft; committing that draft creates a revision.
 ```
+
 
 Engine failures are `StorageError` with a `StorageErrorKind`; service failures
 are `ProjectError` with a `ProjectErrorKind`. Classify by kind, never by
@@ -120,6 +126,9 @@ message text. See [architecture](docs/architecture.md) and the
 [documentation index](docs/README.md).
 
 ## Command-line tools
+
+The normal `compile_linux.sh` does not build these utilities. Build the
+individual CMake target or use a dedicated tools build before invoking one.
 
 ```bash
 ./build-linux/aowis-dvmdb-verify REPOSITORY            # full verification (default)

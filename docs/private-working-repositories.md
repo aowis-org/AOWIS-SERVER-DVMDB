@@ -90,8 +90,9 @@ Bob fetches R8, merges with B8 into M9, publishes M9 expecting R8.
 ```
 
 The first commit of a project needs the local unborn HEAD to be null; its
-first publication needs the shared HEAD to be still null. A branch cannot be
-created from an unborn branch; make the first commit first.
+first publication needs the shared HEAD to be still null. To fork *from uncommitted content* on an unborn branch, make the first
+commit first. This does **not** prohibit creating a different independent
+unborn branch directly within the project.
 
 ## Operation IDs and recovery
 

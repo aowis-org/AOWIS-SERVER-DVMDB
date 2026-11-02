@@ -25,13 +25,20 @@ deployment configuration, not access control.
 | Save MODEL events + changes | `saveWorkingCopyTransactions` | `POST /working-copies/{id}/save-events` |
 | Create the first network (unborn draft) | via `saveWorkingCopyChanges` | `POST /working-copies/{id}/initialize-network` |
 | Read one hydraulic network | — | `GET /working-copies/{id}/networks/{networkId}` |
+| Summarize saved HEAD network(s) | native candidate/materialization | `GET /working-copies/{id}/networks/summary` |
+| Import network into untouched unborn draft | private saved draft import | `POST /working-copies/{id}/import-network` |
 | Release the lease | `releaseWorkingCopyLease` | `POST /working-copies/{id}/release` |
 | Discard | `discardWorkingCopy` | `POST /working-copies/{id}/discard` |
-| Commit locally | `commitWorkingCopy`, `localCommitStatus` | not yet exposed |
+| Commit locally | `commitWorkingCopy`, `localCommitStatus` | `POST /local-commits`, `GET /local-commits/{operationId}` |
 
 Request and response fields are in the [OpenAPI contract](dvmdb-http-api.yaml).
 Generations, lease expiry and other 64-bit values are **decimal strings** in
 JSON, so they survive clients that parse numbers as doubles.
+
+Import is only for an untouched, empty, unborn private draft; it does not
+replace a populated model. A `409` on repeat import protects the existing
+network. Use the draft-scoped summary when showing what will reopen after a
+Commit, since the base revision may now contain all the network data.
 
 ## Creating a draft
 
@@ -132,8 +139,9 @@ local Commit records are unaffected. Repeating it after success answers `404`.
 `ProjectService::commitWorkingCopy(operationId, draftId, sessionId,
 fencingToken, expectedGeneration, expectedLocalHead, metadata)` turns a saved, dirty
 candidate into one new revision on the draft's branch in the same private
-repository. It is a **native API**; the HTTP route and the GUI action are not
-built yet (see the [roadmap](roadmap.md)).
+repository. The operation is available in native code and at `POST /local-commits`;
+`GET /local-commits/{operationId}` reports the recorded outcome. The GUI
+HEAD Inspector exposes it when a saved modified private draft is available.
 
 1. The caller chooses the operation UUIDv7. The request (draft, writer,
    generation, expected HEAD — explicit null for the first commit — and the
@@ -161,11 +169,11 @@ reachable from HEAD → `succeeded`; HEAD moved without it → `rejected`
 Commit replay applies it. A crash between outcome and draft update heals on
 the next replay or status lookup.
 
-**Not yet done:** the coordinator checks MODEL record and reference
-constraints (`Repository::commitModel`) but does not run the complete
-hydraulic-network validator on the candidate. It must not be wired to a GUI
-Commit button until that validator, the HTTP Commit/status routes and an
-end-to-end GUI test exist.
+**Outstanding validation:** the coordinator checks MODEL record and reference
+constraints (`Repository::commitModel`), but complete hydraulic-network
+validation of the candidate is not yet established. The GUI Commit button
+**exists**; do not mistake its presence for full hydraulic or cross-platform
+acceptance. The validator and end-to-end failure-mode tests remain required.
 
 ## Limits
 

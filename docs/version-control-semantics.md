@@ -25,11 +25,13 @@ model is elaborated in [architecture](architecture.md),
 | Record hash | SHA-256 commitment to a canonical immutable revision record | Not an identity | Never changes for a given revision |
 | Snapshot root | Content-addressed Merkle root recursively committing to all persisted model records, references and index roots | Not an identity | Immutable for committed revisions |
 
-**Do not call an uncommitted working copy a revision or HEAD.** A revision is
-created **only** when a commit succeeds. A branch can have no committed HEAD
-(`null`) before its first commit. `HEAD` is AOWIS shorthand for the tip of a
-*specified branch*, not the editable state of a particular user. There is no
-server-wide checked-out branch or single global HEAD.
+**DVMDB distinguishes the committed branch HEAD reference from the GUI HEAD
+card.** In native storage, `headRevisionId` is the branch's latest immutable
+revision or `null` when unborn. A private draft is mutable and is not a
+revision. In the GUI, the **HEAD card** represents the editable working tip
+of a particular branch and can exist before the first commit. The card is a
+UI/workflow concept, **not an extra committed revision**. There is no
+server-wide checked-out branch or globally shared mutable model.
 
 A branch's history consists of the committed revisions reachable from its
 HEAD, including shared ancestors and both parents of merge commits. This
@@ -63,6 +65,9 @@ need to be a leaf in the project-wide ancestry graph.
 - The snapshot's Merkle roots recursively bind **all** committed hydraulic
   and model objects; the complete model need not be copied into one flat hash
   input for each commit. Shared immutable subtrees may be deduplicated.
+- A later edit to a revision's **display message** is a separate mutable
+  annotation; the original hashed commit message remains in the immutable
+  revision record. The UI must not claim the historical record was rewritten.
 - Working copies may have transient checksums, but do not receive a committed
   `recordHash` and cannot be addressed as finalized revisions.
 - Verify canonical hashes, ancestry closure, project ownership, parent
@@ -81,10 +86,11 @@ branch UUIDv7 named `main`, with:
 - no creation-origin branch or fork revision for `main`.
 
 The project and empty branch can be displayed immediately; the history area
-contains **zero committed revision cards**. Starting an editor session makes
-(or opens) a private working copy, not a commit. The first successful commit
-creates immutable revision R0 (zero parents) and moves `main.head` from null
-to R0 in one conditional publication.
+contains **zero immutable revision cards** and the GUI shows an unborn
+**HEAD card** for `main`. Starting an editor session makes (or opens) a
+private working copy, not a commit. The first successful commit creates
+an immutable root revision (zero parents) and atomically moves the branch's
+committed HEAD from null to that revision.
 
 ## 4. Branch lifecycle and provenance
 
@@ -109,9 +115,15 @@ For a new branch from committed Rn:
 Creating a branch from **a user's uncommitted edits** is a different request.
 It must explicitly offer to **commit those edits first** (subject to the
 ordinary concurrency check) or start from the last committed base without
-the edits. Never silently commit someone else's working copy. An unborn
-`main` **cannot** be branched until its first commit succeeds. Do not
-manufacture an empty revision or a second unborn branch as a workaround.
+the edits. Never silently commit someone else's working copy. A different operation, **create independent unborn branch within a project**,
+requires only the project identity and a new unique name, not an existing
+revision or source branch. Multiple independent unborn branches are valid,
+even after another branch has commits. Branching **from uncommitted content**
+still requires first committing that content; do not invent a fork revision.
+
+Branch metadata also contains editable tags and description, separate from
+its stable UUID and immutable creation provenance. This metadata does not
+participate in the canonical revision hash.
 
 Branches support readable UTF-8 names including spaces. Validate UTF-8,
 length and prohibited control/path-delimiter characters; names must be unique
@@ -228,10 +240,10 @@ branches make separate commits**. Example:
 The graph need not render a separate edge for `originBranchId` or
 `forkRevisionId`. These are provenance metadata, shown in the branch
 inspector. Use Git-style revision-ancestry graph lanes as a **layout of one commit DAG**.
-Branch names and HEAD markers decorate their referenced revision nodes; they
-are not lane ownership or extra ancestry vertices. Where many refs share one
-revision, use a compact branch list/inspector or adjacent reference labels
-without piling unrelated cards into the revision itself.
+In the GUI, branch names appear on distinct writable HEAD cards and may
+also annotate immutable revision cards. These HEAD cards are **not** extra
+immutable ancestry vertices. Where many branches share a committed revision,
+keep one revision UUID/card and show the real references, never duplicate it.
 
 Merge must compare both source and target committed HEADs against expected
 values before publishing. An up-to-date merge is a no-op; fast-forward may
@@ -248,11 +260,12 @@ unless an explicit separate operation requests otherwise.
 - History traversal includes every branch HEAD and both parents of merge
   revisions; graph pagination must pin a stable branch-HEAD snapshot and
   validate closure before presenting a complete graph.
-- The GUI shows server/project organization and **one committed revision DAG**
-  with branch-ref labels at their tips and optional routing lanes. Private
-  working copies appear in the editor, **not** as committed revisions.
-- An unborn project displays `main` and a clear **No commits yet** state.
-  It must not display a synthetic R0.
+- The GUI shows server/project organization, **one committed revision DAG**
+  and a distinct **writable HEAD card per branch**. A HEAD card identifies
+  private working state but is **not** a committed revision or ancestry edge.
+- An unborn project displays its initial `main` HEAD card and a clear
+  **No commits yet** state, without a synthetic revision. Multiple independent
+  unborn branches are valid and each gets its own HEAD card.
 - A branch whose HEAD is also another branch's HEAD is legitimate. A HEAD
   may be an ancestor of commits on another branch. Do not assume global DAG
   leaves alone carry HEAD labels.
@@ -305,15 +318,16 @@ a distinct explicitly authorized backup/synchronization protocol.
    publishing conditionally advances only the selected shared branch.
 3. Creating `feature` from committed R0 creates a distinct branch UUIDv7,
    records source branch and exact R0, does not add a revision.
-4. Creating a branch from unborn `main` is rejected until the first commit;
-   uncommitted edits require an explicit commit-first or omit-edits choice.
+4. A project may create another **independent unborn branch** immediately,
+   with no source revision; branching **from the contents of an uncommitted
+   HEAD**, by contrast, requires commit-first or exclude-edits choice.
 5. Alice and Bob have separate personal repositories, each with a draft and
    a local commit based on shared R7; Alice's conditional Publish succeeds,
    Bob's stale Publish is rejected without deleting B8 or his drafts.
 6. Explicit reconciliation incorporates Alice's history, validates the full
    hydraulic model and permits a later conditional Publish.
-7. Shared R0 is one UUIDv7 revision vertex; branch-ref labels and optional
-   Git-style ancestry lanes do not create duplicate revisions or fake edges.
+7. Shared R0 is one UUIDv7 immutable revision card; distinct branch HEAD
+   cards connect to it without duplicating R0 or inventing revision ancestry.
 8. Rename, service restart and bundle import/export preserve branch UUID,
    origin UUID, fork UUID and complete committed ancestry.
 9. Native and REST preserve UUIDv7 identities, SHA hashes, nullable unborn
