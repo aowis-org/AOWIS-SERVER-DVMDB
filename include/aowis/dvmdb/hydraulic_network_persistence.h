@@ -35,6 +35,11 @@ struct DraftMembershipIntent final {
 // No external caller should manufacture kind-100 manifest bytes itself.
 ModelChange emptyDraftHydraulicNetworkRoot(const QUuid& networkId, const QString& name);
 
+// Construct a complete validated hydraulic network as native draft records.
+// This does not commit anything and is only used under a fenced, empty-draft
+// HTTP import transaction. Manifest/chunk bytes remain server-owned.
+std::vector<ModelChange> fullDraftHydraulicNetworkChanges(const NetworkHydraulic& network);
+
 // Read one consistent working-copy view (immutable committed base overlaid by
 // the draft's complete candidate record map). Never reads a mutable HEAD.
 // Validates native chunks, canonical entity payloads and typed dependencies.

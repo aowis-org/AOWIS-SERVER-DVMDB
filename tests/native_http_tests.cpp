@@ -2271,6 +2271,86 @@ void exerciseUnbornNetworkInitializationHttp() {
     }
 }
 
+void exerciseCompleteNetworkDraftImportHttp() {
+    namespace native = aowis::dvmdb;
+    TemporaryRoot root;
+    std::string draftId;
+    QString networkId;
+    {
+        native::ProjectService service(root.root());
+        const native::ProjectInfo project = service.createUnbornProject("imported distribution");
+        service.configureRepositoryRole(native::RepositoryRole::Private);
+        TestServer server(service, native::BundleLimits{4ULL * 1024ULL * 1024ULL,
+                                                       10000ULL, 1024ULL * 1024ULL});
+        Client client(server.port());
+        const QString session = QString::fromStdString(native::UuidV7::generate().toString());
+        const QString branchId = QString::fromStdString(service.branchId(project.id, "main")->toString());
+        const Response created = client.call("POST", "/dvmdb/v1/working-copies",
+            QJsonObject{{"projectId", QString::fromStdString(project.id)},
+                        {"branchId", branchId}, {"baseRevision", QJsonValue::Null},
+                        {"sessionId", session}});
+        check(created.status == 201, "could not create an empty draft for full-network import");
+        draftId = created.json.value("id").toString().toStdString();
+        const QString path = "/dvmdb/v1/working-copies/" + QString::fromStdString(draftId);
+        const Response leased = client.call("POST", path + "/lease",
+            QJsonObject{{"sessionId", session}, {"seconds", 90}});
+        check(leased.status == 200, "could not acquire full-network import lease");
+        NetworkHydraulic imported;
+        imported.uuid = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+        imported.id = QStringLiteral("imported-water");
+        HydraulicNodeJunction junction;
+        junction.uuid = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+        junction.id = QStringLiteral("J-01");
+        junction.elevation_m = 17;
+        imported.nodes_junctions.append(junction);
+        networkId = imported.uuid.toString(QUuid::WithoutBraces);
+        const QByteArray payload = native::ModelCodec<NetworkHydraulic>::encode(imported);
+        const QJsonObject request{{"sessionId", session},
+            {"fencingToken", leased.json.value("token")},
+            {"expectedGeneration", QStringLiteral("0")},
+            {"payloadBase64", QString::fromLatin1(payload.toBase64())}};
+        QJsonObject invalid = request;
+        invalid.insert("payloadBase64", "%%%%");
+        check(client.call("POST", path + "/import-network", invalid).status == 400,
+              "full draft import accepted invalid canonical payload");
+        check(client.call("GET", path).json.value("generation") == "0",
+              "invalid full-network import changed the draft");
+        const Response stored = client.call("POST", path + "/import-network", request);
+        check(stored.status == 200 && stored.json.value("generation") == "1" &&
+              stored.json.value("dirty").toBool() &&
+              !service.optionalHead(project.id, "main").has_value(),
+              "full-network import did not atomically save a private unborn candidate");
+        check(client.call("POST", path + "/import-network", request).status == 409,
+              "repeat import overwrote an already populated private HEAD");
+        const Response summary = client.call("GET", path + "/networks/summary");
+        check(summary.status == 200 && summary.json.value("networkCount") == 1 &&
+              summary.json.value("networks").toArray().first().toObject()
+                  .value("counts").toObject().value("junctions") == 1,
+              "full import did not materialize all network collections");
+        const Response loaded = client.call("GET", path + "/networks/" + networkId);
+        const std::optional<NetworkHydraulic> restored = native::ModelCodec<NetworkHydraulic>::decode(
+            QByteArray::fromBase64(loaded.json.value("payloadBase64").toString().toLatin1()));
+        check(loaded.status == 200 && restored && restored->nodes_junctions.size() == 1
+              && restored->nodes_junctions.first().uuid == junction.uuid,
+              "full import did not round-trip the saved hydraulic model");
+        server.stop();
+    }
+    {
+        native::ProjectService reopened(root.root());
+        TestServer server(reopened, native::BundleLimits{4ULL * 1024ULL * 1024ULL,
+                                                        10000ULL, 1024ULL * 1024ULL});
+        Client client(server.port());
+        const QString path = "/dvmdb/v1/working-copies/" + QString::fromStdString(draftId);
+        const Response summary = client.call("GET", path + "/networks/summary");
+        check(summary.status == 200 && summary.json.value("networkCount") == 1 &&
+              summary.json.value("generation") == "1" &&
+              summary.json.value("networks").toArray().first().toObject()
+                  .value("id") == networkId,
+              "full-network import did not survive a DVMDB restart");
+        server.stop();
+    }
+}
+
 void exerciseHydraulicDraftMembershipHttp() {
     namespace native = aowis::dvmdb;
     TemporaryRoot root;
@@ -2660,6 +2740,7 @@ int main(int argc, char** argv) {
         exerciseWorkingCopyListAndDiscardHttp();
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
         exerciseUnbornNetworkInitializationHttp();
+        exerciseCompleteNetworkDraftImportHttp();
         exerciseHydraulicDraftMembershipHttp();
 #endif
         exerciseUuidv7HistoryHttp();

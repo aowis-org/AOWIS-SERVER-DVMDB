@@ -1465,6 +1465,32 @@ std::optional<RevisionId> tryIndexedUuidScalarEdits(
 
 } // namespace
 
+std::vector<ModelChange> fullDraftHydraulicNetworkChanges(const NetworkHydraulic& network) {
+    if (network.uuid.isNull() || network.id.trimmed().isEmpty())
+        throw StorageError(StorageErrorKind::InvalidInput, "invalid imported hydraulic network identity or name");
+    const aowis::dvmdb::HydraulicDependencyValidation validated =
+        aowis::dvmdb::validateHydraulicNetworkWithDependencies(network);
+    if (!validated.report.valid())
+        throw StorageError(StorageErrorKind::InvalidInput,
+                           "invalid imported hydraulic network: " + validated.report.summary().toStdString());
+    Manifest next = manifestFor(network);
+    const std::set<Key> members = memberKeys(next);
+    const DependencyIndex references = indexedDependencies(validated.dependencies, members);
+    std::vector<ModelChange> changes;
+    changes.reserve(members.size() + 1);
+#define APPEND_IMPORTED_COLLECTION(name, type, kind) \
+    addEntities(network.name, static_cast<std::uint16_t>(kind), references, changes);
+    AOWIS_DVMDB_HYDRAULIC_COLLECTIONS(APPEND_IMPORTED_COLLECTION)
+#undef APPEND_IMPORTED_COLLECTION
+    buildChunks(next, changes);
+    ModelRecord root;
+    root.kind = hydraulicNetworkKind;
+    root.payload = bytesFromQByteArray(encodeManifest(next));
+    root.references = chunkKeys(next);
+    changes.push_back(ModelChange{keyFromUuid(network.uuid), std::move(root)});
+    return changes;
+}
+
 ModelChange emptyDraftHydraulicNetworkRoot(const QUuid& networkId, const QString& name) {
     if (networkId.isNull() || name.trimmed().isEmpty() || name.size() > 255)
         throw StorageError(StorageErrorKind::InvalidInput, "invalid new hydraulic network identity or name");

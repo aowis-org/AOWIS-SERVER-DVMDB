@@ -60,6 +60,7 @@ const char* const routeRepositoryRole = "/dvmdb/v1/repository/role";
 const char* const routeWorkingCopies = "/dvmdb/v1/working-copies";
 const char* const routeWorkingCopySave = "/dvmdb/v1/working-copies/:draft/save";
 const char* const routeWorkingCopyInitializeNetwork = "/dvmdb/v1/working-copies/:draft/initialize-network";
+const char* const routeWorkingCopyImportNetwork = "/dvmdb/v1/working-copies/:draft/import-network";
 const char* const routeWorkingCopyEventSave = "/dvmdb/v1/working-copies/:draft/save-events";
 const char* const routeWorkingCopyLease = "/dvmdb/v1/working-copies/:draft/lease";
 const char* const routeWorkingCopyRelease = "/dvmdb/v1/working-copies/:draft/release";
@@ -798,7 +799,8 @@ std::optional<std::size_t> jsonBodyLimit(const httplib::Request& request) {
         route == routeRepositoryRole || route == routeWorkingCopies || route == routeWorkingCopyLease ||
         route == routeWorkingCopyInitializeNetwork ||
         route == routeWorkingCopyRelease || route == routeWorkingCopyDiscard) return maxJsonSmallBytes;
-    if (route == routeWorkingCopySave || route == routeWorkingCopyEventSave) return maxJsonModelBytes;
+    if (route == routeWorkingCopySave || route == routeWorkingCopyEventSave ||
+        route == routeWorkingCopyImportNetwork) return maxJsonModelBytes;
     if (route == routeMerges ||
         route == routeHydraulicMerges) return maxJsonMergeBytes;
     if (route == routeNetworks || route == routeEdits || route == routeModelCommits) return maxJsonModelBytes;
@@ -1610,6 +1612,39 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
     // Atomic offline-event replay: event bytes and candidate records publish in
     // the same fsynced working-copy record. No event can be acknowledged alone.
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
+    // Import an entire network into an untouched private unborn draft. The
+    // importer cannot write to a project or committed revision. The native
+    // hydraulic adapter owns all manifest/chunk encoding; writer fencing and
+    // generation CAS are enforced by ProjectService's durable Save.
+    server.Post(routeWorkingCopyImportNetwork, [&service](const httplib::Request& request,
+                                                         httplib::Response& response) {
+        guarded(response, [&]() {
+            const QJsonObject body = parseBody(request, maxJsonModelBytes);
+            requireKeys(body, {"sessionId", "fencingToken", "expectedGeneration", "payloadBase64"});
+            const std::string session = requiredString(body, "sessionId");
+            const std::string token = requiredString(body, "fencingToken");
+            const std::uint64_t expected = strictUint64(body, "expectedGeneration");
+            const QByteArray payload = decodePayload(body, "payloadBase64", maxJsonModelBytes);
+            QString error;
+            const std::optional<NetworkHydraulic> network = ModelCodec<NetworkHydraulic>::decode(payload, &error);
+            if (!network || ModelCodec<NetworkHydraulic>::encode(*network) != payload)
+                throw ProjectError(ProjectErrorKind::InvalidInput,
+                                   "invalid canonical imported hydraulic network: " + error.toStdString());
+            requireInput(UuidV7::parse(uuidString(network->uuid).toStdString()).has_value(),
+                         "imported hydraulic network UUID must be UUIDv7");
+            const std::vector<ModelChange> changes =
+                hydraulic::fullDraftHydraulicNetworkChanges(*network);
+            const std::string draftId = pathParam(request, "draft");
+            const WorkingCopyInfo draft = service.workingCopy(draftId, false);
+            requireInput(!draft.baseRevision.has_value() && draft.candidateChanges.empty() &&
+                         draft.journalCount == 0,
+                         "import requires a new empty unborn draft; existing network data cannot be replaced");
+            requireInput(draft.generation == expected, "working copy generation changed");
+            const WorkingCopyInfo saved = service.saveWorkingCopyChanges(
+                draftId, session, token, expected, changes);
+            return Reply{200, workingCopyJson(saved)};
+        });
+    });
     // Bootstrap the first hydraulic network in a private unborn working copy.
     // The server owns manifest encoding. There is no implicit revision, no
     // synthetic initial commit and no direct arbitrary kind-100 client write.

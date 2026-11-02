@@ -259,6 +259,37 @@ paths:
       responses:
         '200': {description: Fresh token UUIDv7, expiresAtMs and generation as decimal strings}
         '409': {description: Draft has another active writer}
+  /working-copies/{draftId}/import-network:
+    parameters:
+      - {name: draftId, in: path, required: true, schema: {type: string, format: uuid}}
+    post:
+      operationId: importHydraulicNetworkIntoEmptyWorkingCopy
+      description: |
+        Atomically import a complete canonical NetworkHydraulic into a private,
+        untouched unborn draft, without creating a commit. Requires a live
+        writer lease, exact saved generation, and an empty candidate and
+        event journal. DVMDB validates all hydraulic dependencies, owns the
+        manifest and membership chunks, and rejects replacement of any
+        existing network. A lost response must be reconciled by reopening
+        the draft; the caller must never retry blindly.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [sessionId, fencingToken, expectedGeneration, payloadBase64]
+              properties:
+                sessionId: {type: string, format: uuid}
+                fencingToken: {type: string, format: uuid}
+                expectedGeneration: {type: string, pattern: '^[0-9]{1,20}$'}
+                payloadBase64: {type: string, description: Canonical ModelCodec NetworkHydraulic bytes}
+      responses:
+        '200': {description: Saved draft with complete imported model and incremented generation}
+        '400': {description: Malformed canonical model or invalid hydraulic dependencies}
+        '409': {description: Nonempty draft, stale generation or invalid writer lease}
+        '413': {description: Model or native candidate exceeds size and record limits}
   /working-copies/{draftId}/initialize-network:
     parameters:
       - {name: draftId, in: path, required: true, schema: {type: string, format: uuid}}
