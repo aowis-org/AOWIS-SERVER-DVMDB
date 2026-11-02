@@ -2644,12 +2644,45 @@ RevisionGraphRevision ProjectService::revision(std::string_view projectId, const
         const RevisionRecord record = decodeRevisionRecord(*bytes);
         RevisionGraphRevision result{record.id, hashRevisionRecord(record),
                                       record.root, record.referencesRoot, record.modelIndexed, {},
-                                      record.metadata, record.committedAtMs};
+                                      record.metadata, record.committedAtMs, std::nullopt};
         result.parents.reserve(record.parents.size());
         for (const RevisionParent& parent : record.parents)
             result.parents.push_back(RevisionGraphParent{parent.id, parent.expectedRecordHash});
         return result;
     });
+}
+
+void ProjectService::updateBranchProperties(std::string_view projectId,
+        std::string_view branchId, std::string_view expectedName, std::string_view name,
+        const BranchMetadata& metadata) {
+    const std::optional<ProjectId> project = ProjectId::parse(projectId);
+    const std::optional<BranchId> branch = BranchId::parse(branchId);
+    if (!project || !branch) throw ProjectError(ProjectErrorKind::InvalidInput, "invalid branch identity");
+    withRepository(projectId, [&](Repository& repository) {
+        repository.updateBranchProperties(*project, *branch, expectedName, name, metadata);
+    });
+}
+
+void ProjectService::updateRevisionDisplayMessage(std::string_view projectId,
+        std::string_view revisionId, std::string_view expected, std::string_view message) {
+    const std::optional<ProjectId> project = ProjectId::parse(projectId);
+    const std::optional<RevisionId> revision = RevisionId::parse(revisionId);
+    if (!project || !revision) throw ProjectError(ProjectErrorKind::InvalidInput, "invalid revision identity");
+    withRepository(projectId, [&](Repository& repository) {
+        repository.updateRevisionDisplayMessage(*project, *revision, expected, message);
+    });
+}
+
+std::optional<std::string> ProjectService::revisionDisplayMessage(std::string_view projectId,
+                                                                   std::string_view revisionId) {
+    const std::optional<ProjectId> project = ProjectId::parse(projectId);
+    const std::optional<RevisionId> revision = RevisionId::parse(revisionId);
+    if (!project || !revision) throw ProjectError(ProjectErrorKind::InvalidInput, "invalid revision identity");
+    std::optional<std::string> result;
+    withRepository(projectId, [&](Repository& repository) {
+        result = repository.revisionDisplayMessage(*project, *revision);
+    });
+    return result;
 }
 
 void ProjectService::renameBranch(std::string_view projectId, std::string_view previous,

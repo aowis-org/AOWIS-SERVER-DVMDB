@@ -21,7 +21,7 @@ def document_routes(text):
             canonical = path.replace('{projectId}', ':id').replace('{branch}', ':branch')
             canonical = canonical.replace('{revision}', ':revision').replace('{networkId}', ':network')
             canonical = canonical.replace('{entityId}', ':entity').replace('{draftId}', ':draft')
-            canonical = canonical.replace('{branchId}', ':branchId')
+            canonical = canonical.replace('{branchId}', ':branchId').replace('{operationId}', ':operationId')
             result.add((method.upper(), '/dvmdb/v1' + canonical))
     return result
 

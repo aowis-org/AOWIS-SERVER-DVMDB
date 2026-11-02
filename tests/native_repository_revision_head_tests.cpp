@@ -119,6 +119,58 @@ void testUnbornNativeRefFoundation() {
               "first model commit did not publish unborn HEAD");
     }
 }
+void testEditableBranchAndRevisionDisplayMetadata() {
+    Temporary temp;
+    const ProjectId project = ProjectId::generate();
+    const CommitMetadata original = commitMetadata();
+    RevisionId revision = RevisionId::generate();
+    Hash canonicalHash{};
+    const BranchMetadata changed{"Independent scenario branch", {"hydraulic", "review"}};
+    {
+        Repository repo(temp.path);
+        const BranchId branch = repo.createUnbornBranch(project, "main");
+        repo.updateBranchProperties(project, branch, "main", "scenario", changed);
+        check(!repo.optionalHead(project, "scenario"),
+              "updating unborn branch metadata created a revision");
+        check(repo.branchById(project, branch)->name == "scenario" &&
+              repo.branchById(project, branch)->metadata == changed,
+              "unborn branch metadata update did not publish atomically");
+        rejects([&] { repo.updateBranchProperties(project, branch, "main", "stale", changed); },
+                StorageErrorKind::Conflict, "stale branch rename accepted");
+        revision = repo.commitModel(project, "scenario", {}, original);
+        const RevisionGraphPage before = repo.revisionGraph(project, 10);
+        check(before.revisions.size() == 1 &&
+              before.revisions.front().metadata.message == original.message &&
+              !before.revisions.front().displayMessage,
+              "canonical initial commit metadata missing");
+        canonicalHash = before.revisions.front().recordHash;
+        repo.updateRevisionDisplayMessage(project, revision, original.message,
+                                          "Corrected display message");
+        rejects([&] { repo.updateRevisionDisplayMessage(project, revision, original.message,
+                                                          "Another message"); },
+                StorageErrorKind::Conflict, "stale display message update accepted");
+        rejects([&] { repo.updateRevisionDisplayMessage(project, revision,
+                            "Corrected display message", " \t\n "); },
+                StorageErrorKind::InvalidInput, "empty annotated message accepted");
+        const RevisionGraphPage after = repo.revisionGraph(project, 10);
+        check(after.revisions.size() == 1 && after.revisions.front().recordHash == canonicalHash &&
+              after.revisions.front().metadata.message == original.message &&
+              after.revisions.front().displayMessage == "Corrected display message",
+              "display annotation changed canonical revision or was not published");
+    }
+    {
+        Repository reopened(temp.path);
+        const RevisionGraphPage page = reopened.revisionGraph(project, 10);
+        check(page.revisions.size() == 1 &&
+              page.revisions.front().displayMessage == "Corrected display message" &&
+              page.revisions.front().recordHash == canonicalHash &&
+              reopened.branchById(project, *reopened.branchId("scenario"))->metadata == changed,
+              "branch metadata or revision annotation did not survive restart");
+        check(reopened.verifyRepository().revisions == 1,
+              "revision message annotation damaged repository integrity");
+    }
+}
+
 void testIdentityPreservingUnbornCheckout() {
     Temporary temp;
     const ProjectId project = ProjectId::generate();
@@ -365,6 +417,7 @@ void testLookupsDoNotWalkHistory() {
 int main() {
     try {
         testUnbornNativeRefFoundation();
+        testEditableBranchAndRevisionDisplayMetadata();
         testIdentityPreservingUnbornCheckout();
         testPublication();
         testObsoleteShaBranchRecordRejected();

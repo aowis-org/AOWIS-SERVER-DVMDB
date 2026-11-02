@@ -186,6 +186,13 @@ public:
                                   std::optional<std::string_view> branchId = std::nullopt,
                                   const BranchMetadata& metadata = {});
     RevisionGraphRevision revision(std::string_view projectId, const RevisionId& id);
+    void updateBranchProperties(std::string_view projectId, std::string_view branchId,
+                                std::string_view expectedName, std::string_view name,
+                                const BranchMetadata& metadata);
+    void updateRevisionDisplayMessage(std::string_view projectId, std::string_view revisionId,
+                                      std::string_view expected, std::string_view message);
+    std::optional<std::string> revisionDisplayMessage(std::string_view projectId,
+                                                       std::string_view revisionId);
     void renameBranch(std::string_view projectId, std::string_view previous,
                       std::string_view renamed, const RevisionId& expectedHead);
     RevisionId createBranch(std::string_view projectId, std::string_view name,

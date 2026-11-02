@@ -100,6 +100,45 @@ paths:
       responses:
         '200': {description: Catalogue is available}
         '503': {description: Catalogue unavailable}
+  /local-commits:
+    post:
+      operationId: commitSavedWorkingCopy
+      description: |
+        Idempotently finalize the exact saved private working-copy candidate
+        using a caller-supplied operation UUIDv7. The expected HEAD may be null
+        for an unborn branch. No commit with an empty or whitespace-only message.
+        Timeout recovery must query the operation UUID, never blindly resubmit
+        a different operation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [operationId, draftId, sessionId, fencingToken, expectedGeneration, expectedHead, author, message]
+              properties:
+                operationId: {type: string, format: uuid}
+                draftId: {type: string, format: uuid}
+                sessionId: {type: string, format: uuid}
+                fencingToken: {type: string, format: uuid}
+                expectedGeneration: {type: string, description: Exact decimal generation}
+                expectedHead: {type: [string, 'null'], format: uuid}
+                author: {type: object}
+                message: {type: string, minLength: 1}
+      responses:
+        '200': {description: Committed with immutable revision UUIDv7}
+        '202': {description: Operation is pending; query status by operation UUIDv7}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /local-commits/{operationId}:
+    parameters:
+      - {name: operationId, in: path, required: true, schema: {type: string, format: uuid}}
+    get:
+      operationId: getLocalCommitStatus
+      description: Read durable succeeded, pending or rejected status of a commit operation.
+      responses:
+        '200': {description: Operation status, revision UUIDv7 when succeeded, rejection reason otherwise}
+        '404': {$ref: '#/components/responses/NotFound'}
   /working-copies:
     get:
       operationId: listWorkingCopies
@@ -637,6 +676,27 @@ paths:
     parameters:
       - {$ref: '#/components/parameters/ProjectId'}
       - {name: branchId, in: path, required: true, schema: {type: string, format: uuid}}
+    patch:
+      operationId: updateBranchProperties
+      description: |
+        Compare-and-swap editable branch name, tags and description, including
+        unborn branches. Revision records and branch UUIDv7 remain unchanged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedName, name, tags, description]
+              properties:
+                expectedName: {type: string}
+                name: {type: string}
+                tags: {type: array, items: {type: string}}
+                description: {type: string}
+      responses:
+        '200': {description: Updated branch metadata}
+        '409': {$ref: '#/components/responses/Conflict'}
     get:
       operationId: getBranchById
       description: The branch with this UUIDv7, whatever its current name. Same fields as a revision-graph HEAD.
@@ -708,6 +768,29 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/Revision'}
         '404': {$ref: '#/components/responses/NotFound'}
+  /projects/{projectId}/revisions/{revision}/message:
+    parameters:
+      - {$ref: '#/components/parameters/ProjectId'}
+      - {name: revision, in: path, required: true, schema: {type: string, format: uuid}}
+    patch:
+      operationId: updateRevisionDisplayMessage
+      description: |
+        Update only mutable display-message annotation using compare-and-swap.
+        The original commit message, immutable record, hashes and UUIDv7 do not change.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedMessage, message]
+              properties:
+                expectedMessage: {type: string}
+                message: {type: string, minLength: 1}
+      responses:
+        '200': {description: Display annotation updated}
+        '409': {$ref: '#/components/responses/Conflict'}
   /projects/{projectId}/revision-graph:
     parameters:
       - {$ref: '#/components/parameters/ProjectId'}

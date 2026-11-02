@@ -401,7 +401,8 @@ QJsonObject revisionJson(const RevisionGraphRevision& revision) {
                        {"author", QJsonObject{
                            {"id", QString::fromStdString(revision.metadata.authorId.toString())},
                            {"name", QString::fromStdString(revision.metadata.authorName)}}},
-                       {"message", QString::fromStdString(revision.metadata.message)},
+                       {"message", QString::fromStdString(revision.displayMessage.value_or(revision.metadata.message))},
+                       {"originalMessage", QString::fromStdString(revision.metadata.message)},
                        {"committedAtMs",
                         QString::number(static_cast<qulonglong>(revision.committedAtMs))}};
 }
@@ -1389,6 +1390,54 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
         });
     });
 #endif
+    // Durable local Commit: the operation UUID pins an exact saved candidate,
+    // lease, generation, expected HEAD and message. Retry with the same ID.
+    server.Post("/dvmdb/v1/local-commits", [&service](const httplib::Request& request,
+                                                     httplib::Response& response) {
+        guarded(response, [&]() {
+            const QJsonObject body = parseBody(request, maxJsonMergeBytes);
+            requireKeys(body, {"operationId", "draftId", "sessionId", "fencingToken",
+                               "expectedGeneration", "expectedHead", "author", "message"});
+            const QJsonValue expectedValue = body.value("expectedHead");
+            requireInput(expectedValue.isString() || expectedValue.isNull(),
+                         "expectedHead must be a revision UUID or null");
+            const std::optional<RevisionId> expected = expectedValue.isNull()
+                ? std::nullopt : std::optional<RevisionId>(parseRevisionId(
+                    requiredString(body, "expectedHead")));
+            const CommitMetadata metadata = parseCommitMetadata(body);
+            requireInput(metadata.message.find_first_not_of(" \t\n\r") != std::string::npos,
+                         "commit message cannot be whitespace only");
+            const LocalCommitInfo result = service.commitWorkingCopy(
+                requiredString(body, "operationId"), requiredString(body, "draftId"),
+                requiredString(body, "sessionId"), requiredString(body, "fencingToken"),
+                strictUint64(body, "expectedGeneration"), expected, metadata);
+            const QString state = result.state == LocalCommitState::Succeeded
+                ? QStringLiteral("succeeded") : result.state == LocalCommitState::Pending
+                    ? QStringLiteral("pending") : QStringLiteral("rejected");
+            return Reply{result.state == LocalCommitState::Succeeded ? 200
+                : result.state == LocalCommitState::Pending ? 202 : 409,
+                QJsonObject{{"operationId", QString::fromStdString(result.id)},
+                            {"state", state},
+                            {"revision", result.state == LocalCommitState::Succeeded
+                                ? QJsonValue(QString::fromStdString(result.reservedRevisionId))
+                                : QJsonValue(QJsonValue::Null)},
+                            {"reason", QString::fromStdString(result.rejection)}}};
+        });
+    });
+    server.Get("/dvmdb/v1/local-commits/:operationId",
+               [&service](const httplib::Request& request, httplib::Response& response) {
+        guarded(response, [&]() {
+            const LocalCommitInfo result = service.localCommitStatus(pathParam(request, "operationId"));
+            const QString state = result.state == LocalCommitState::Succeeded
+                ? QStringLiteral("succeeded") : result.state == LocalCommitState::Pending
+                    ? QStringLiteral("pending") : QStringLiteral("rejected");
+            return Reply{200, QJsonObject{{"operationId", QString::fromStdString(result.id)},
+                {"state", state}, {"revision", result.state == LocalCommitState::Succeeded
+                    ? QJsonValue(QString::fromStdString(result.reservedRevisionId))
+                    : QJsonValue(QJsonValue::Null)},
+                {"reason", QString::fromStdString(result.rejection)}}};
+        });
+    });
     server.Post(routeWorkingCopyLease, [&service](const httplib::Request& request,
                                                   httplib::Response& response) {
         guarded(response, [&]() {
@@ -1864,6 +1913,24 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                                            {"head", revisionIdString(expected)}}};
         });
     });
+    // Identity-addressed metadata update also supports unborn branches.
+    server.Patch("/dvmdb/v1/projects/:id/branch-ids/:branchId",
+                 [&service](const httplib::Request& request, httplib::Response& response) {
+        guarded(response, [&]() {
+            const QJsonObject object = parseBody(request, maxJsonSmallBytes);
+            requireKeys(object, {"expectedName", "name", "description", "tags"});
+            const std::string project = pathParam(request, "id");
+            const std::string branchId = pathParam(request, "branchId");
+            const std::string expected = requiredString(object, "expectedName");
+            const std::string name = requiredString(object, "name");
+            const BranchMetadata metadata = parseBranchMetadata(object);
+            service.updateBranchProperties(project, branchId, expected, name, metadata);
+            return Reply{200, QJsonObject{{"branchId", QString::fromStdString(branchId)},
+                {"name", QString::fromStdString(name)},
+                {"description", QString::fromStdString(metadata.description)},
+                {"tags", branchTagsJson(metadata)}}};
+        });
+    });
     // A branch by UUIDv7 (DG-01): its current name, HEAD and provenance.
     // Clients pin a branch by identity here, then use the name-addressed
     // routes and verify the identity they return (e.g. a bundle header).
@@ -1923,10 +1990,28 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             const Hash digest = hashRevisionRecord(*record);
             RevisionGraphRevision described{record->id, digest, record->root,
                                               record->referencesRoot, record->modelIndexed, {},
-                                              record->metadata, record->committedAtMs};
+                                              record->metadata, record->committedAtMs, std::nullopt};
             for (const RevisionParent& parent : record->parents)
                 described.parents.push_back({parent.id, parent.expectedRecordHash});
+            described.displayMessage = service.revisionDisplayMessage(projectId,
+                revisionId.toString());
             return Reply{200, revisionJson(described)};
+        });
+    });
+    // This changes only the human-facing message annotation, never the
+    // cryptographically authenticated revision record or its original message.
+    server.Patch("/dvmdb/v1/projects/:id/revisions/:revision/message",
+                 [&service](const httplib::Request& request, httplib::Response& response) {
+        guarded(response, [&]() {
+            const QJsonObject object = parseBody(request, maxJsonMergeBytes);
+            requireKeys(object, {"expectedMessage", "message"});
+            const std::string project = pathParam(request, "id");
+            const std::string revision = pathParam(request, "revision");
+            const std::string expected = requiredString(object, "expectedMessage");
+            const std::string message = requiredString(object, "message");
+            service.updateRevisionDisplayMessage(project, revision, expected, message);
+            return Reply{200, QJsonObject{{"revision", QString::fromStdString(revision)},
+                {"message", QString::fromStdString(message)}}};
         });
     });
     server.Get("/dvmdb/v1/projects/:id/revision-graph",

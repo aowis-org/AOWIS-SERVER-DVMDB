@@ -1286,6 +1286,62 @@ std::vector<StoredBranch> readStoredBranches(const std::filesystem::path& reposi
     return result;
 }
 
+// Mutable display-only notes are intentionally outside the canonical revision
+// record. Each note is named by an already validated UUID, never user text.
+std::optional<std::string> readRevisionDisplayNote(const std::filesystem::path& repository,
+                                                    const RevisionId& revision) {
+    const std::filesystem::path path = repository / "refs" / "revision-messages" / revision.toString();
+    if (!std::filesystem::exists(path)) return std::nullopt;
+    const int fd = ::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    systemCall(fd >= 0, "open revision display note");
+    struct stat st{};
+    const bool regular = ::fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+                         st.st_size > 0 && st.st_size <= static_cast<off_t>(maxCommitMessageBytes);
+    if (!regular) { ::close(fd); throw StorageError(Err::Corruption, "invalid revision note"); }
+    std::string value(static_cast<std::size_t>(st.st_size), '\0');
+    std::size_t offset = 0;
+    while (offset < value.size()) {
+        const ssize_t count = ::read(fd, value.data() + offset, value.size() - offset);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) { ::close(fd); throw StorageError(Err::Corruption, "truncated revision note"); }
+        offset += static_cast<std::size_t>(count);
+    }
+    ::close(fd);
+    return value;
+}
+
+void publishRevisionDisplayNote(const std::filesystem::path& repository,
+                                const RevisionId& revision, std::string_view message) {
+    const std::filesystem::path refs = repository / "refs";
+    const std::filesystem::path notes = refs / "revision-messages";
+    if (!std::filesystem::exists(notes)) {
+        systemCall(::mkdir(notes.c_str(), 0700) == 0 || errno == EEXIST,
+                   "create revision note directory");
+        syncDirectory(refs);
+    }
+    require(Err::Corruption, !std::filesystem::is_symlink(notes) &&
+                std::filesystem::is_directory(notes), "unsafe revision note directory");
+    const std::filesystem::path target = notes / revision.toString();
+    const std::filesystem::path stage = notes / (".stage-" + RevisionId::generate().toString());
+    const int fd = ::open(stage.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    systemCall(fd >= 0, "create revision note stage");
+    try {
+        std::size_t offset = 0;
+        while (offset < message.size()) {
+            const ssize_t count = ::write(fd, message.data() + offset, message.size() - offset);
+            if (count < 0 && errno == EINTR) continue;
+            systemCall(count > 0, "write revision note");
+            offset += static_cast<std::size_t>(count);
+        }
+        systemCall(::fsync(fd) == 0, "sync revision note");
+        systemCall(::close(fd) == 0, "close revision note");
+    } catch (...) { ::close(fd); ::unlink(stage.c_str()); throw; }
+    if (::rename(stage.c_str(), target.c_str()) != 0) {
+        ::unlink(stage.c_str()); throwSystemError("publish revision note");
+    }
+    syncDirectory(notes);
+}
+
 std::optional<StoredBranch> findStoredBranch(const std::filesystem::path& repository,
                                              std::string_view name) {
     checkBranch(name);
@@ -3597,7 +3653,7 @@ static RevisionGraphRevision graphRevision(const ResolvedRevision& resolved) {
     RevisionGraphRevision result{resolved.record.id, resolved.recordHash,
         resolved.record.root, resolved.record.referencesRoot,
         resolved.record.modelIndexed, {}, resolved.record.metadata,
-        resolved.record.committedAtMs};
+        resolved.record.committedAtMs, std::nullopt};
     for (const RevisionParent& parent : resolved.record.parents)
         result.parents.push_back({parent.id, parent.expectedRecordHash});
     return result;
@@ -3653,7 +3709,9 @@ std::vector<RevisionGraphRevision> Repository::history(
                 "first-parent ancestry traversal budget exceeded");
         const std::optional<ResolvedRevision> resolved = resolver.resolve(current, reader);
         require(Err::Corruption, resolved.has_value(), "missing first-parent revision");
-        result.push_back(graphRevision(*resolved));
+        RevisionGraphRevision described = graphRevision(*resolved);
+        described.displayMessage = readRevisionDisplayNote(this->directory_, current);
+        result.push_back(std::move(described));
         if (result.size() == maxCount || resolved->record.parents.empty()) break;
         current = resolved->record.parents.front().id;
     }
@@ -3738,7 +3796,9 @@ RevisionGraphPage Repository::revisionGraph(
             page.next = RevisionGraphCursor{page.heads, skip + maxCount};
             break;
         }
-        page.revisions.push_back(graphRevision(resolved));
+        RevisionGraphRevision described = graphRevision(resolved);
+        described.displayMessage = readRevisionDisplayNote(this->directory_, id);
+        page.revisions.push_back(std::move(described));
     }
     require(Err::InvalidInput, !cursor || visited > skip,
             "graph cursor is beyond captured history");
@@ -3761,6 +3821,68 @@ void Repository::renameBranch(const ProjectId& project, std::string_view previou
     require(Err::Internal, existing && existing->revision, "branch disappeared");
     publishStoredBranch(this->directory_, StoredBranch{existing->id, std::string(renamed),
                                  existing->head, existing->revision, existing->originBranchId, existing->forkRevisionId, existing->metadata}, false);
+}
+
+void Repository::updateBranchProperties(const ProjectId& project, const BranchId& branch,
+                                         std::string_view expectedName, std::string_view name,
+                                         const BranchMetadata& metadata) {
+    std::lock_guard<std::mutex> guarded(this->mutex_);
+    ScopedFileLock locked(this->lockFd_);
+    refreshIndex();
+    checkBranch(name);
+    validateBranchMetadata(metadata);
+    // Validate project ownership even when the branch is still unborn.
+    RevisionResolver resolver(this->directory_, project);
+    const std::vector<StoredBranch> branches = readStoredBranches(this->directory_);
+    const StoredBranch* selected = nullptr;
+    for (const StoredBranch& candidate : branches) {
+        if (candidate.id == branch) selected = &candidate;
+        else if (candidate.name == name)
+            throw StorageError(Err::Conflict, "branch name already exists");
+    }
+    require(Err::NotFound, selected != nullptr, "branch UUID not found");
+    require(Err::Conflict, selected->name == expectedName, "branch name changed before update");
+    if (selected->name == name && selected->metadata == metadata) return;
+    publishStoredBranch(this->directory_, StoredBranch{selected->id, std::string(name),
+        selected->head, selected->revision, selected->originBranchId,
+        selected->forkRevisionId, metadata}, false);
+}
+
+void Repository::updateRevisionDisplayMessage(const ProjectId& project, const RevisionId& revision,
+                                              std::string_view expected, std::string_view message) {
+    std::lock_guard<std::mutex> guarded(this->mutex_);
+    ScopedFileLock locked(this->lockFd_);
+    refreshIndex();
+    const CommitMetadata check{UuidV7::generate(), "display message", std::string(message)};
+    validateCommitMetadata(check);
+    require(Err::InvalidInput, message.find_first_not_of(" \t\n\r") != std::string_view::npos,
+            "commit message cannot be whitespace only");
+    RevisionResolver resolver(this->directory_, project);
+    const RevisionObjectReader reader = [this](const Hash& digest) -> std::optional<Bytes> {
+        if (!containsIndex(digest)) return std::nullopt;
+        return load(digest);
+    };
+    const std::optional<ResolvedRevision> saved = resolver.resolve(revision, reader);
+    require(Err::NotFound, saved.has_value(), "revision not found");
+    const std::optional<std::string> existing = readRevisionDisplayNote(this->directory_, revision);
+    const std::string& current = existing ? *existing : saved->record.metadata.message;
+    require(Err::Conflict, current == expected, "revision display message changed");
+    if (current == message) return;
+    publishRevisionDisplayNote(this->directory_, revision, message);
+}
+
+std::optional<std::string> Repository::revisionDisplayMessage(const ProjectId& project,
+                                                               const RevisionId& revision) {
+    std::lock_guard<std::mutex> guarded(this->mutex_);
+    ScopedFileLock locked(this->lockFd_);
+    refreshIndex();
+    RevisionResolver resolver(this->directory_, project);
+    const RevisionObjectReader reader = [this](const Hash& digest) -> std::optional<Bytes> {
+        if (!containsIndex(digest)) return std::nullopt;
+        return load(digest);
+    };
+    require(Err::NotFound, resolver.resolve(revision, reader).has_value(), "revision not found");
+    return readRevisionDisplayNote(this->directory_, revision);
 }
 
 RevisionId Repository::createBranch(const ProjectId& project, std::string_view name,

@@ -226,6 +226,7 @@ struct RevisionGraphRevision {
     std::vector<RevisionGraphParent> parents;
     CommitMetadata metadata;
     std::uint64_t committedAtMs = 0;  // Unix epoch ms (UTC)
+    std::optional<std::string> displayMessage; // Mutable display annotation; canonical metadata and hash stay immutable.
 };
 
 struct BranchMetadata {
@@ -351,6 +352,18 @@ public:
     // One atomically published UUIDv7 record: rename preserves ID and HEAD.
     void renameBranch(const ProjectId& project, std::string_view previous,
                         std::string_view renamed, const RevisionId& expectedHead);
+    // Update branch name and metadata in the same atomic UUID-keyed ref write;
+    // works for unborn branches. Caller pins the old name for CAS.
+    void updateBranchProperties(const ProjectId& project, const BranchId& branch,
+                                std::string_view expectedName, std::string_view name,
+                                const BranchMetadata& metadata);
+    // Commit message edits are separate mutable annotations. A revision record
+    // (and its SHA-256/parents/content) is never rewritten.
+    void updateRevisionDisplayMessage(const ProjectId& project, const RevisionId& revision,
+                                      std::string_view expected, std::string_view message);
+    std::optional<std::string> revisionDisplayMessage(const ProjectId& project,
+                                                       const RevisionId& revision);
+
     // A single validated branch-file lookup, independent of how many other
     // branches are present. A symlink or a non-regular ref is never a branch.
     bool hasBranch(std::string_view branch);
