@@ -2233,6 +2233,71 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                                                       : QJsonValue(QJsonValue::Null)}}};
         });
     });
+    // HIST-02: read-only branch timeline. A Commit is a checkpoint; original
+    // archived action UUIDs appear only when an actual local Commit archive
+    // exists. Draft event pages are separate and generation-labelled.
+    server.Get("/dvmdb/v1/projects/:id/branches/:branch/action-history",
+               [&service](const httplib::Request& request, httplib::Response& response) {
+        guarded(response, [&]() {
+            std::size_t limit = 5;
+            if (const std::optional<std::string> value = queryValue(request, "limit")) {
+                bool ok = false;
+                const unsigned number = QString::fromStdString(*value).toUInt(&ok);
+                requireInput(ok && number >= 1 && number <= 10, "invalid action-history limit");
+                limit = number;
+            }
+            std::optional<RevisionId> after;
+            if (const std::optional<std::string> value = queryValue(request, "after"))
+                after = parseRevisionId(*value);
+            const std::optional<std::string> draft = queryValue(request, "draftId");
+            std::size_t draftOffset = 0;
+            if (const std::optional<std::string> value = queryValue(request, "draftOffset")) {
+                const std::string& text = *value;
+                requireInput(!text.empty() && text.size() <= 5, "invalid draft offset");
+                std::size_t parsed = 0;
+                const std::from_chars_result result =
+                    std::from_chars(text.data(), text.data() + text.size(), parsed);
+                requireInput(result.ec == std::errc() &&
+                             result.ptr == text.data() + text.size() && parsed <= 4096,
+                             "invalid draft offset");
+                draftOffset = parsed;
+            }
+            const BranchActionHistoryPage page = service.branchActionHistory(
+                pathParam(request, "id"), pathParam(request, "branch"), limit, after,
+                draft ? std::optional<std::string_view>(*draft) : std::nullopt,
+                draftOffset);
+            QJsonArray checkpoints;
+            for (const BranchActionHistoryEntry& entry : page.commits) {
+                QJsonArray actions;
+                for (const std::string& id : entry.actionIds)
+                    actions.append(QString::fromStdString(id));
+                checkpoints.append(QJsonObject{
+                    {"revision", revisionJson(entry.revision)},
+                    {"operationId", entry.commitOperationId
+                        ? QJsonValue(QString::fromStdString(*entry.commitOperationId))
+                        : QJsonValue(QJsonValue::Null)},
+                    {"actions", actions},
+                    {"actionCount", static_cast<int>(entry.actionIds.size())},
+                    {"checkpointOnly", entry.actionIds.empty()}});
+            }
+            QJsonValue draftValue = QJsonValue(QJsonValue::Null);
+            if (page.draftId) {
+                QJsonArray actions;
+                for (const std::string& id : page.draftActionIds)
+                    actions.append(QString::fromStdString(id));
+                draftValue = QJsonObject{
+                    {"id", QString::fromStdString(*page.draftId)},
+                    {"generation", QString::number(static_cast<qulonglong>(page.draftGeneration))},
+                    {"journalCount", QString::number(static_cast<qulonglong>(page.draftEventCount))},
+                    {"actions", actions},
+                    {"nextOffset", page.nextDraftOffset
+                        ? QJsonValue(static_cast<int>(*page.nextDraftOffset))
+                        : QJsonValue(QJsonValue::Null)}};
+            }
+            return Reply{200, QJsonObject{{"commits", checkpoints},
+                {"nextCursor", optionalRevisionJson(page.next)}, {"draft", draftValue}}};
+        });
+    });
     server.Get("/dvmdb/v1/projects/:id/branches/:branch/history",
                [&service](const httplib::Request& request, httplib::Response& response) {
         guarded(response, [&]() {

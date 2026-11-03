@@ -127,3 +127,19 @@ MODEL networks or submitting private working-copy changes. Missing or different
 fingerprints are a compatibility failure, not a request to migrate or discard
 queued events. Rebuild both applications against identical MODEL source contents
 and restart both processes. This is a compatibility check, not authentication.
+
+## Read-only branch action history
+
+`GET /dvmdb/v1/projects/{projectId}/branches/{branch}/action-history` returns
+first-parent Commit markers (`commits`) with real archived MODEL action UUIDs.
+`limit=1..10` bounds the checkpoint page; `after` is an exclusive revision
+UUIDv7 cursor and `nextCursor` is null on the last page. Commits without
+retained event frames are explicitly `checkpointOnly`; they remain real
+immutable revisions. Optional `draftId` adds a separate, generation-labelled
+page of up to 100 saved draft action UUIDs. Use `draftOffset` / `nextOffset`
+to advance that journal page independently of `after`. Draft IDs from another
+project or branch are rejected.
+
+The response is read-only: there is **no** state navigation, Undo or Redo
+endpoint yet. See [committed action archive](commit-action-archive.md) for
+current limits and the [History roadmap](history-roadmap.md) for future work.

@@ -1,17 +1,14 @@
 # Durable action history across Commit boundaries — DVMDB roadmap
 
-**HDB-00 contract specified; HDB-01 action archive first slice implemented.**
-See [history-contract.md](history-contract.md) for authoritative identities,
-cross-Commit cursor semantics, durability, future wire endpoints and
-acceptance gates. DVMDB currently has immutable revisions with graph
-history and a bounded journal of MODEL events per active draft. The HIST-02
-local Commit ledger now **archives acknowledged MODEL frames before immutable
-Commit publication** and retains them after draft rebase. That is still
-**not** a navigable Undo/Redo history: there is no branch-timeline index,
-server-owned cursor, navigation command, or paged HTTP history API.
-See [commit action archive](commit-action-archive.md) for the implemented
-contract and its current limits. For the intended user-facing left dock, see the
-[GUI History roadmap](../../AOWIS-SERVER-GUI/docs/history-roadmap.md).
+**Current foundation:** DVMDB stores verified MODEL events in the active
+private draft and retains those events after local Commit in a durable action
+archive. The read-only `branchActionHistory` API and its HTTP route now return
+first-parent Commit markers, real archived action UUIDs and optionally paged
+active-draft action UUIDs. All requests are read-only: there is **no durable
+logical cursor, inverse application, Undo/Redo command or jump-to-state API**.
+See [committed action archives](commit-action-archive.md) for current product
+behavior and [history-contract.md](history-contract.md) for the agreed future
+navigation semantics. The left History dock belongs to the GUI repository.
 
 ## Desired externally visible semantics
 
@@ -42,43 +39,28 @@ lost. A future Commit of that model is a new successor of the branch's
   exposes it to authorized-by-deployment clients (no authentication yet).
 - `commitWorkingCopy` uses a durable UUIDv7 operation ledger, reserves an
   immutable revision and rebases the draft on success, **clearing its journal**.
-- `revision-graph`, revision records and branch histories expose immutable
-  checkpoints, but no permanent per-action record for old commits.
+- `revision-graph` and the read-only `action-history` endpoint expose immutable
+  checkpoints and retained action UUIDs from succeeded local Commits. Older,
+  imported and merge revisions without action archives remain checkpoint-only.
 
 ## Required implementation
 
-### HDB-00 — Versioned action-history contract (specified)
+### HDB-01 — Persistent indexing and full action retrieval (remaining)
 
-The [History contract](history-contract.md) defines history scope, stable
-UUIDv7 action/group and mutation IDs, retained MODEL v1 frames, audit versus
-logical cursor, persisted checkpoint records, first-parent branch narrative,
-snapshot-only gaps, cross-Commit safety, and a versioned proposed transport.
-This is **not** a published or implemented history API. Subsequent stages
-must implement these contracts and verify them with real storage tests.
-
-### HDB-01 — Permanent archive implemented; indexing and pagination open
-
-The **first slice** is complete: `AOWIS-LOCAL-COMMIT-3` freezes accepted MODEL
-frames in the fsynced Commit intent before any immutable revision is
-published, verifies frame and chained digests, and exposes an operation-ID
-read API after success. Native restart, retry, pending-outcome recovery and
-corruption tests exercise this archive. The stable revision UUID is stored in
-that same record. Branch/revision indexing, paged retrieval, non-local
-publication checkpoints and history-specific retention are not yet built.
-
-Persist accepted action frames and related metadata **beyond** draft rebase
-without mutating the immutable revision format unnecessarily. Bind Commit
-markers to exact revisions, parent edge(s), action range and checkpoint.
-Keep the current active-draft journal bounded for Save/recovery; archive
-longer history under explicit retention, hash/integrity and pagination rules.
-Reopen and compaction must preserve navigable history. Older revisions that
-lack archived events remain viewable **checkpoints**, not fake recoverable
-individual steps.
+The immutable archive and basic read-only timeline exist. Remaining work:
+replace the bounded 10,000-record ledger scan with a durable, recoverable
+revision-to-archive index; add paginated retrieval of full archived frames
+and display-ready MODEL action summaries; provide server-side snapshot
+consistency across draft pages and concurrent Commit; and qualify import,
+merge and cross-repository checkpoints. Ensure compaction/recovery preserves
+exact archive identities and never fabricates intermediate edit steps for
+checkpoint-only revisions.
 
 ### HDB-02 — Reconstruction and navigation API
 
-Support ordered/paged read of action summaries, state cursor, checkpoint
-markers and an exact "materialize state" plan. Reconstruct from the nearest
+Build on the existing ordered/paged read-only checkpoint and action-UUID
+listing to add a durable state cursor, display-ready summaries, exact action
+frame retrieval and an exact "materialize state" plan. Reconstruct from the nearest
 immutable model checkpoint plus forward/inverse MODEL transactions, verify
 canonical before/after images and membership, and never silently repair
 missing objects. Do not allow jumps to invent actions between two old

@@ -2460,6 +2460,100 @@ LocalCommitActionHistory ProjectService::localCommitActionHistory(
     return history;
 }
 
+BranchActionHistoryPage ProjectService::branchActionHistory(
+        std::string_view projectId, std::string_view branch, std::size_t limit,
+        std::optional<RevisionId> after,
+        std::optional<std::string_view> draftId, std::size_t draftOffset) {
+    if (limit < 1 || limit > 10 || (draftId && !UuidV7::parse(*draftId)) ||
+        (!draftId && draftOffset != 0) || draftOffset > workingCopyMaxEvents)
+        throw ProjectError(ProjectErrorKind::InvalidInput,
+                           "invalid history page size, draft or draft offset");
+    checkHealthy();
+    BranchActionHistoryPage page;
+    const std::vector<RevisionGraphRevision> revisions =
+        history(projectId, branch, limit + 1, after);
+    const std::size_t included = std::min(revisions.size(), limit);
+    if (revisions.size() > limit && included > 0)
+        page.next = revisions[included - 1].id;
+    page.commits.reserve(included);
+    std::set<std::string> wanted;
+    for (std::size_t index = 0; index < included; ++index) {
+        page.commits.push_back(BranchActionHistoryEntry{revisions[index], std::nullopt, {}});
+        wanted.insert(revisions[index].id.toString());
+    }
+
+    // The existing HIST-02 archive is keyed by Commit operation UUID, not
+    // revision UUID. Until a durable revision index is introduced, resolve
+    // the small requested revision page against a bounded scan of the ledger.
+    // Never return a partial/ambiguous page when the bound is exceeded.
+    if (!wanted.empty()) {
+        const std::filesystem::path directory = localCommitDirectory(this->root_);
+        if (std::filesystem::exists(directory) || std::filesystem::is_symlink(directory)) {
+            check(!std::filesystem::is_symlink(directory) &&
+                  std::filesystem::is_directory(directory),
+                  "unsafe local Commit history directory");
+            std::size_t scanned = 0;
+            std::map<std::string, PersistedLocalCommit> matching;
+            for (const std::filesystem::directory_entry& file :
+                    std::filesystem::directory_iterator(directory)) {
+                const std::string id = file.path().filename().string();
+                // Durable Commit intent staging files are not published.
+                if (!id.empty() && id.front() == '.') continue;
+                check(UuidV7::parse(id).has_value(), "unrecognized local Commit record");
+                if (++scanned > 10000)
+                    throw ProjectError(ProjectErrorKind::Unavailable,
+                        "history ledger needs a revision index before scanning more than 10000 commits");
+                PersistedLocalCommit operation = readLocalCommit(file.path());
+                if (operation.info.repositoryId != this->repository_id_ ||
+                    operation.info.projectId != projectId ||
+                    !wanted.contains(operation.info.reservedRevisionId))
+                    continue;
+                if (operation.info.state == LocalCommitState::Pending) {
+                    // Reconcile interrupted Commit publication before deciding
+                    // that a revision has no archived actions.
+                    const LocalCommitInfo outcome = localCommitStatus(id);
+                    if (outcome.state != LocalCommitState::Succeeded) continue;
+                    operation = readLocalCommit(file.path());
+                }
+                if (operation.info.state != LocalCommitState::Succeeded) continue;
+                const std::string revision = operation.info.reservedRevisionId;
+                check(matching.emplace(revision, std::move(operation)).second,
+                      "multiple local Commit archives claim the same revision");
+            }
+            for (BranchActionHistoryEntry& entry : page.commits) {
+                const std::map<std::string, PersistedLocalCommit>::const_iterator found =
+                    matching.find(entry.revision.id.toString());
+                if (found == matching.end()) continue;
+                entry.commitOperationId = found->second.info.id;
+                for (const WorkingCopyEvent& event : found->second.actions)
+                    entry.actionIds.push_back(event.id);
+            }
+        }
+    }
+
+    if (draftId) {
+        const WorkingCopyInfo draft = workingCopy(*draftId, true);
+        const std::optional<BranchId> selectedBranch = branchId(projectId, branch);
+        if (!selectedBranch || draft.projectId != projectId ||
+            draft.branchId != selectedBranch->toString())
+            throw ProjectError(ProjectErrorKind::Conflict,
+                               "history draft belongs to another project or branch");
+        if (draftOffset > draft.journal.size())
+            throw ProjectError(ProjectErrorKind::InvalidInput,
+                               "draft history offset exceeds current journal");
+        page.draftId = draft.id;
+        page.draftGeneration = draft.generation;
+        page.draftEventCount = draft.journalCount;
+        const std::size_t count = std::min<std::size_t>(100,
+            draft.journal.size() - draftOffset);
+        for (std::size_t index = draftOffset; index < draftOffset + count; ++index)
+            page.draftActionIds.push_back(draft.journal[index].id);
+        if (draftOffset + count < draft.journal.size())
+            page.nextDraftOffset = draftOffset + count;
+    }
+    return page;
+}
+
 void ProjectService::releaseWorkingCopyLease(
         std::string_view draftId, std::string_view sessionId,
         std::string_view fencingToken) {

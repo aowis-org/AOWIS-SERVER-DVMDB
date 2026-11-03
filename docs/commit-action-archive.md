@@ -1,36 +1,70 @@
-# Permanent local Commit action archive
+# Committed MODEL action archive and read-only history
 
-**Implemented in HIST-02 (first slice):** the DVMDB local Commit ledger stores
-all acknowledged MODEL transaction frames with the frozen candidate before a
-revision can be published. Their original UUIDv7s, order and complete bytes
-survive successful Commit, draft rebase, retry, process restart and compaction
-of the underlying native object store. The accepted-action chain is verified
-whenever a Commit record is decoded. Integrity errors are not masked as
-missing history.
+DVMDB retains the exact accepted MODEL transaction frames that were in a
+private working copy when its **local Commit** succeeded. The durable
+`local-commits/<operation UUIDv7>` record is written before the immutable
+revision can be published. It contains the candidate, original action UUIDs
+and frames, action count and SHA-256 chain digest. The format is
+`AOWIS-LOCAL-COMMIT-3`. Recovery and replay do not discard these frames,
+even though the committed draft's *short-lived* event journal is cleared.
 
-The authoritative record is `local-commits/<operation UUIDv7>` with
-`AOWIS-LOCAL-COMMIT-3` format, a count of actions and a chained SHA-256 digest.
-The local Commit operation UUID is its current lookup key. A successful
-`ProjectService::localCommitActionHistory(operationId)` returns the commit
-identity/revision, timestamp and original accepted frames. An unaccepted
-pending/rejected operation does not expose committed history.
+A successful `ProjectService::localCommitActionHistory(operationId)` returns
+the verified archive. A pending operation is reconciled against actual
+revision ancestry before exposing its committed actions; rejected operations
+have no published archive. The immutable revision itself is never changed.
 
-**Not implemented:** persistent branch-timeline indexing, revision-to-action
-pagination, durable user-visible history cursor, inverse/redo operation IDs,
-Undo/Redo materialization, or GUI navigation. `working-copies/<id>` retains
-a bounded active journal and still clears it after Commit; this separate
-committed archive is not subject to that draft journal lifetime. Its size is
-bounded by the existing 4096-event/8-MiB-per-draft journal limit **per
-Commit**, not by a lifetime total. The ledger itself remains retained;
-long-term retention and search optimizations are future work.
+## Branch-aware history reads
 
-A Commit made using `saveWorkingCopyChanges` (rather than acknowledged MODEL
-transactions) has an empty event archive, which means a **checkpoint-only**
-history segment. Do not fabricate edit steps or claim exact action coverage
-for such a segment. Likewise, older revisions without a retained action
-archive are checkpoint-only. Immutable revisions and their hashes remain
-unchanged by this archive. No external HTTP endpoint is introduced by this
-first slice; future history API pagination will be added separately.
+`ProjectService::branchActionHistory(projectId, branch, limit, after,
+optionalDraftId, draftOffset)` returns a **read-only** first-parent timeline:
 
-See [storage formats](storage-formats.md) and
-[History roadmap](history-roadmap.md).
+- Commit checkpoints in newest-first order, each with its immutable revision
+  record, optional local Commit operation UUID and the **actual archived
+  action UUIDs**, in original order.
+- An exclusive revision UUID cursor (`next`) for the next checkpoint page.
+  `limit` is 1–10 checkpoints; the cursor must belong to that branch's
+  first-parent ancestry.
+- If a private draft is selected, its generation, journal count and a page
+  of at most 100 accepted action UUIDs. A separate `nextDraftOffset` pages
+  its journal; the draft must belong to the selected project and branch.
+
+The equivalent HTTP route is
+`GET /dvmdb/v1/projects/{projectId}/branches/{branch}/action-history` with
+`limit`, `after`, `draftId` and `draftOffset` query parameters. The JSON
+response contains `commits`, `nextCursor`, and `draft`. Each Commit has a
+`revision` object, nullable `operationId`, `actions`, `actionCount` and
+`checkpointOnly`; draft generation and journal count are **decimal strings**.
+The route never performs Undo/Redo or changes HEAD.
+
+A revision created by a generic native Commit, a merge, an imported revision,
+or an old local Commit without retained actions is represented as a genuine
+**checkpoint only**. An empty archive is not expanded into hypothetical
+editing actions. Forked branches inherit first-parent Commit checkpoints
+without duplicating archived actions.
+
+## Current operational limits
+
+- The active draft event journal remains bounded at **4,096 events / 8 MiB**.
+  Each local Commit archives up to this journal budget independently.
+- The read-only revision history pages are small, but the current lookup
+  derives revision-to-operation mapping by scanning and verifying published
+  local Commit ledger records. It refuses scans beyond **10,000 operations**
+  instead of returning an incomplete page. A persistent revision index is
+  required for large repositories.
+- HTTP history currently returns original event **UUIDs**, not entire
+  archived MODEL frames or parsed user-facing edit descriptions. The native
+  `localCommitActionHistory` method retrieves the full frames by operation
+  UUID. Paginated frame retrieval and richer summaries are still future work.
+- Draft pages are labelled with a generation; clients must check that value
+  when paging through edits while a second writer may save new events.
+- Action archives are not a durable Undo/Redo cursor. Navigating across
+  Commit markers requires a separate server-owned cursor, canonical inverse
+  materialization, idempotent mutation IDs and recovery logic. None of these
+  navigation commands is implemented yet.
+
+All malformed archived frames and digest mismatches are storage errors; they
+are not silently treated as missing history. No old per-action history can be
+reconstructed for historical revisions whose original journals were discarded.
+
+See [History contract](history-contract.md), [History roadmap](history-roadmap.md)
+and [HTTP workflows](http-workflows.md).

@@ -111,6 +111,15 @@ void testCommittedActionHistory() {
         require(service.saveWorkingCopyTransactions(draftId, session, token, 1,
                     {updated}, {secondFrame}).generation == 2,
                 "second HIST-02 action was not saved");
+        const aowis::dvmdb::BranchActionHistoryPage pending =
+            service.branchActionHistory(projectId, "main", 2, std::nullopt, draftId);
+        require(pending.commits.empty() && pending.draftId == draftId &&
+                pending.draftGeneration == 2 && pending.draftEventCount == 2 &&
+                pending.draftActionIds.size() == 2 &&
+                pending.draftActionIds[0] == service.workingCopy(draftId).journal[0].id &&
+                pending.draftActionIds[1] == service.workingCopy(draftId).journal[1].id &&
+                !pending.next && !pending.nextDraftOffset,
+                "HIST-02 unborn branch timeline lost pending draft actions");
         const LocalCommitInfo commit = service.commitWorkingCopy(operationId, draftId,
             session, token, 2, std::nullopt, commitMetadata());
         require(commit.state == LocalCommitState::Succeeded,
@@ -127,6 +136,16 @@ void testCommittedActionHistory() {
                 service.workingCopy(draftId).journal.empty() &&
                 service.workingCopy(draftId).journalCount == 0,
                 "Commit lost, reordered, or mutated durable actions during draft rebase");
+        const aowis::dvmdb::BranchActionHistoryPage timeline =
+            service.branchActionHistory(projectId, "main", 2);
+        require(timeline.commits.size() == 1 &&
+                timeline.commits[0].commitOperationId == operationId &&
+                timeline.commits[0].revision.id.toString() == revisionId &&
+                timeline.commits[0].actionIds.size() == 2 &&
+                timeline.commits[0].actionIds[0] == archive.actions[0].id &&
+                timeline.commits[0].actionIds[1] == archive.actions[1].id &&
+                !timeline.next && !timeline.draftId,
+                "HIST-02 branch timeline did not expose committed action archive");
         const LocalCommitInfo replay = service.commitWorkingCopy(operationId, draftId,
             session, token, 2, std::nullopt, commitMetadata());
         require(replay.state == LocalCommitState::Succeeded &&
@@ -172,6 +191,41 @@ void testCommittedActionHistory() {
                 reopened.localCommitActionHistory(nextOperation).actions.empty() &&
                 reopened.localCommitActionHistory(operationId).actions.size() == 2,
                 "checkpoint-only Commit fabricated actions or modified older archive");
+        const aowis::dvmdb::BranchActionHistoryPage latest =
+            reopened.branchActionHistory(projectId, "main", 1);
+        require(latest.commits.size() == 1 &&
+                latest.commits[0].commitOperationId == nextOperation &&
+                latest.commits[0].actionIds.empty() && latest.next &&
+                latest.commits[0].revision.id.toString() == next.reservedRevisionId,
+                "HIST-02 page one should be a checkpoint-only newest Commit");
+        const aowis::dvmdb::BranchActionHistoryPage older =
+            reopened.branchActionHistory(projectId, "main", 1, latest.next);
+        require(older.commits.size() == 1 &&
+                older.commits[0].commitOperationId == operationId &&
+                older.commits[0].actionIds.size() == 2 && !older.next,
+                "HIST-02 exclusive revision cursor skipped the earlier actions");
+        const std::string feature = "hist-feature";
+        (void)reopened.createBranchAtRevision(projectId, feature, "main", *RevisionId::parse(revisionId));
+        const aowis::dvmdb::BranchActionHistoryPage inherited =
+            reopened.branchActionHistory(projectId, feature, 2);
+        require(inherited.commits.size() == 1 &&
+                inherited.commits[0].actionIds.size() == 2 &&
+                inherited.commits[0].revision.id.toString() == revisionId,
+                "HIST-02 feature branch did not inherit first-parent action history");
+        bool badCursor = false;
+        try {
+            (void)reopened.branchActionHistory(projectId, feature, 2, *RevisionId::parse(next.reservedRevisionId));
+        } catch (const ProjectError& error) {
+            badCursor = error.kind() == ProjectErrorKind::InvalidInput;
+        }
+        require(badCursor, "HIST-02 cursor accepted a revision outside the branch lineage");
+        bool badDraftOffset = false;
+        try {
+            (void)reopened.branchActionHistory(projectId, "main", 2, std::nullopt, nextDraft, 1);
+        } catch (const ProjectError& error) {
+            badDraftOffset = error.kind() == ProjectErrorKind::InvalidInput;
+        }
+        require(badDraftOffset, "HIST-02 accepted invalid draft event offset");
     }
     // Alter the archival bytes without updating their chain digest: unlike
     // an unavailable old action, corrupted durable history is never silently
@@ -192,11 +246,77 @@ void testCommittedActionHistory() {
     }
     ProjectService corrupted(root.path);
     bool rejected = false;
+    try { (void)corrupted.branchActionHistory(projectId, "main", 2); }
+    catch (const aowis::dvmdb::StorageError& error) {
+        rejected = error.kind() == aowis::dvmdb::StorageErrorKind::Corruption;
+    }
+    require(rejected, "corrupted action archive was exposed in paginated branch history");
+    rejected = false;
     try { (void)corrupted.localCommitActionHistory(operationId); }
     catch (const aowis::dvmdb::StorageError& error) {
         rejected = error.kind() == aowis::dvmdb::StorageErrorKind::Corruption;
     }
     require(rejected, "tampered Commit action was not rejected as corruption");
+}
+
+void testBranchDraftHistoryPaging() {
+    TempRoot root;
+    const std::string session = UuidV7::generate().toString();
+    std::string projectId;
+    std::string draftId;
+    std::vector<std::string> expected;
+    {
+        ProjectService service(root.path);
+        projectId = service.createUnbornProject("HIST-02 draft action pages").id;
+        service.configureRepositoryRole(RepositoryRole::Private);
+        draftId = service.createWorkingCopy(projectId, "main", std::nullopt, session).id;
+        const std::string token = service.acquireWorkingCopyLease(draftId, session, 120).token;
+        for (std::uint64_t index = 0; index < 125; ++index) {
+            const ModelChange change = changeWithValue(static_cast<std::uint8_t>(index + 1));
+            const aowis::dvmdb::Bytes frame = aowis::dvmdb::test::editEvent(
+                UuidV7::generate(), change.key,
+                {static_cast<std::uint8_t>(index)},
+                {static_cast<std::uint8_t>(index + 1)});
+            const WorkingCopyInfo saved = service.saveWorkingCopyTransactions(
+                draftId, session, token, index, {change}, {frame});
+            require(saved.generation == index + 1 && saved.journal.size() == 1,
+                    "HIST-02 repeated draft Save lost the journal event");
+            expected.push_back(saved.journal.front().id);
+        }
+        const aowis::dvmdb::BranchActionHistoryPage first =
+            service.branchActionHistory(projectId, "main", 1, std::nullopt, draftId);
+        const aowis::dvmdb::BranchActionHistoryPage second =
+            service.branchActionHistory(projectId, "main", 1, std::nullopt, draftId, 100);
+        require(first.commits.empty() && !first.next && first.draftGeneration == 125 &&
+                first.draftEventCount == 125 && first.draftActionIds.size() == 100 &&
+                first.nextDraftOffset == 100 &&
+                second.draftActionIds.size() == 25 && !second.nextDraftOffset &&
+                std::equal(expected.begin(), expected.begin() + 100,
+                           first.draftActionIds.begin()) &&
+                std::equal(expected.begin() + 100, expected.end(),
+                           second.draftActionIds.begin()),
+                "HIST-02 draft pagination skipped or duplicated MODEL actions");
+        (void)service.createUnbornBranch(projectId, "other");
+        expectConflict([&]() {
+            (void)service.branchActionHistory(projectId, "other", 1, std::nullopt, draftId);
+        });
+        bool invalidOffset = false;
+        try {
+            (void)service.branchActionHistory(projectId, "main", 1, std::nullopt, draftId, 126);
+        } catch (const ProjectError& error) {
+            invalidOffset = error.kind() == ProjectErrorKind::InvalidInput;
+        }
+        require(invalidOffset, "HIST-02 draft offset past the journal was accepted");
+    }
+    {
+        ProjectService reopened(root.path);
+        const aowis::dvmdb::BranchActionHistoryPage second =
+            reopened.branchActionHistory(projectId, "main", 1, std::nullopt, draftId, 100);
+        require(second.draftGeneration == 125 && second.draftActionIds.size() == 25 &&
+                std::equal(expected.begin() + 100, expected.end(),
+                           second.draftActionIds.begin()),
+                "HIST-02 paginated draft action history changed after restart");
+    }
 }
 
 void testLocalCommitRecovery() {
@@ -901,6 +1021,7 @@ void testCommitRecordsAuthorMessageAndReservedTime() {
 int main() {
     try {
         testCommittedActionHistory();
+        testBranchDraftHistoryPaging();
         testLocalCommitRecovery();
         testConcurrentFirstCommitIsSerialized();
         testRejectedOperationIsDurable();

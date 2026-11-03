@@ -2063,6 +2063,21 @@ void exerciseWorkingCopyHttp() {
               client.call("GET", detailPath).json.value("events").toArray().at(0)
                   .toObject().value("payloadBase64") == encodedEvent,
               "HTTP atomic event Save did not persist event and candidate together");
+        const QString actionHistoryUrl = QStringLiteral("/dvmdb/v1/projects/") +
+            QString::fromStdString(projectId) + QStringLiteral("/branches/main/action-history");
+        const Response draftTimeline = client.call("GET", actionHistoryUrl +
+            QStringLiteral("?draftId=") + QString::fromStdString(draftId));
+        check(draftTimeline.status == 200 &&
+              draftTimeline.json.value("commits").toArray().isEmpty() &&
+              draftTimeline.json.value("nextCursor").isNull() &&
+              draftTimeline.json.value("draft").toObject().value("generation") == "2" &&
+              draftTimeline.json.value("draft").toObject().value("journalCount") == "1" &&
+              draftTimeline.json.value("draft").toObject().value("actions").toArray().size() == 1 &&
+              draftTimeline.json.value("draft").toObject().value("nextOffset").isNull() &&
+              client.call("GET", actionHistoryUrl + "?limit=0").status == 400 &&
+              client.call("GET", actionHistoryUrl + "?draftId=" +
+                  QString::fromStdString(draftId) + "&draftOffset=2").status == 400,
+              "HIST-02 HTTP draft timeline failed to paginate saved MODEL actions");
         const Response replay = client.call("POST", eventSavePath, eventSave);
         check(replay.status == 200 && replay.json.value("generation") == QStringLiteral("2") &&
               replay.json.value("acceptedEventIds").toArray().size() == 1,
@@ -2101,6 +2116,33 @@ void exerciseWorkingCopyHttp() {
               restored.json.value("changes").toArray().size() == 1 &&
               restored.json.value("baseRevision").isNull(),
               "HTTP draft GET lost saved candidate after service restart");
+        const QString timelineUrl = QStringLiteral("/dvmdb/v1/projects/") +
+            QString::fromStdString(projectId) + QStringLiteral("/branches/main/action-history");
+        const Response resumedTimeline = client.call("GET", timelineUrl +
+            "?draftId=" + QString::fromStdString(draftId));
+        check(resumedTimeline.status == 200 &&
+              resumedTimeline.json.value("draft").toObject().value("journalCount") == "1",
+              "HIST-02 HTTP timeline lost the draft event after restart");
+        check(draft.leaseSessionId.has_value(), "HIST-02 draft session lost on restart");
+        const std::string token = reopened.acquireWorkingCopyLease(
+            draftId, *draft.leaseSessionId, 120).token;
+        const std::string operation = native::UuidV7::generate().toString();
+        const native::LocalCommitInfo committed = reopened.commitWorkingCopy(
+            operation, draftId, *draft.leaseSessionId, token, 2, std::nullopt,
+            commitMetadata());
+        const Response committedTimeline = client.call("GET", timelineUrl +
+            "?limit=1&draftId=" + QString::fromStdString(draftId));
+        const QJsonArray commits = committedTimeline.json.value("commits").toArray();
+        check(committed.state == native::LocalCommitState::Succeeded &&
+              committedTimeline.status == 200 && commits.size() == 1 &&
+              commits.first().toObject().value("revision").toObject().value("id") ==
+                  QString::fromStdString(committed.reservedRevisionId) &&
+              commits.first().toObject().value("operationId") == QString::fromStdString(operation) &&
+              commits.first().toObject().value("actionCount") == 1 &&
+              commits.first().toObject().value("actions").toArray().size() == 1 &&
+              !commits.first().toObject().value("checkpointOnly").toBool() &&
+              committedTimeline.json.value("draft").toObject().value("journalCount") == "0",
+              "HIST-02 HTTP timeline lost archived actions after Commit");
         server.stop();
     }
 }

@@ -801,6 +801,56 @@ paths:
                 properties:
                   id: {type: [string, 'null'], format: uuid, description: UUIDv7 revision or null before first commit}
         '404': {$ref: '#/components/responses/NotFound'}
+  /projects/{projectId}/branches/{branch}/action-history:
+    parameters:
+      - {$ref: '#/components/parameters/ProjectId'}
+      - {$ref: '#/components/parameters/Branch'}
+      - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 10, default: 5}}
+      - {name: after, in: query, description: Exclusive first-parent revision UUIDv7 cursor, schema: {type: string, format: uuid}}
+      - {name: draftId, in: query, description: Optional selected private draft UUIDv7, schema: {type: string, format: uuid}}
+      - {name: draftOffset, in: query, description: Offset into the selected draft's saved event journal, schema: {type: integer, minimum: 0, maximum: 4096, default: 0}}
+    get:
+      operationId: getBranchActionHistory
+      description: |
+        Read-only newest-first first-parent Commit checkpoints with exact archived
+        MODEL action UUIDs. A checkpoint with no retained events has actions=[];
+        no intermediate actions are invented. The optional draft section is
+        separately paged, pinned by generation, and never mutates HEAD.
+        The current native archive lookup scans at most 10000 local Commit
+        records; a permanent revision-to-archive index is still needed.
+      responses:
+        '200':
+          description: Commit checkpoint page and optional working-copy event page
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [commits, nextCursor, draft]
+                properties:
+                  commits:
+                    type: array
+                    items:
+                      type: object
+                      required: [revision, operationId, actions, actionCount, checkpointOnly]
+                      properties:
+                        revision: {$ref: '#/components/schemas/Revision'}
+                        operationId: {type: [string, 'null'], format: uuid}
+                        actions: {type: array, items: {type: string, format: uuid}}
+                        actionCount: {type: integer, minimum: 0}
+                        checkpointOnly: {type: boolean}
+                  nextCursor: {type: [string, 'null'], format: uuid}
+                  draft:
+                    type: [object, 'null']
+                    properties:
+                      id: {type: string, format: uuid}
+                      generation: {type: string, pattern: '^[0-9]+$'}
+                      journalCount: {type: string, pattern: '^[0-9]+$'}
+                      actions: {type: array, items: {type: string, format: uuid}}
+                      nextOffset: {type: [integer, 'null'], minimum: 0}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {description: Temporary history lookup capacity unavailable}
   /projects/{projectId}/branches/{branch}/history:
     parameters:
       - {$ref: '#/components/parameters/ProjectId'}

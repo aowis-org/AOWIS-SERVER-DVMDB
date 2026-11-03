@@ -15,6 +15,7 @@ necessary to understand the product.
 | [Working copies and local Commit](working-copies.md) | Leased/fenced events, draft journal, generation, idempotent local Commit |
 | [Private and shared repositories](private-working-repositories.md) | Roles, local vs shared refs, checkout building blocks, current workflow boundary |
 | [Committed revision graph](native-revision-history.md) | Revision records, branch ancestry, graph reads and immutable metadata |
+| [Committed actions and branch timeline](commit-action-archive.md) | Verified MODEL action archives, paged read-only Commit checkpoints and draft event UUIDs |
 | [Hydraulic persistence](native-hydraulic-network.md) | 18 collections, root metadata, chunks, full/read/edit paths |
 | [Model record integrity](model-records.md) | Canonical records, identities, reverse references |
 | [Hydraulic feasibility and storage validity](model-validity-boundary-audit.md) | What is allowed despite solver failure versus what is structurally invalid |
@@ -45,8 +46,9 @@ necessary to understand the product.
   external/embedded persistence acceptance, import/replacement, whole-project
   Fetch, recoverable Publish, UI Merge, scaling and qualification.
 - [Persistent History and cross-Commit Undo/Redo roadmap](history-roadmap.md):
-  a server-owned action history spanning immutable Commit markers, separate
-  from the currently bounded draft journal. **Undo/Redo is not implemented.**
+  persistent action indexing, a durable navigation cursor and cross-Commit
+  Undo/Redo on top of the already implemented read-only action timeline.
+  **Undo/Redo is not implemented.**
 - [Security design](security-permissions-design.md) is explicitly deferred.
   Repository role, UUIDs and fencing are not authentication or authorization.
 

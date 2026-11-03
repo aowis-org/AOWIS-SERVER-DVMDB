@@ -134,6 +134,26 @@ struct LocalCommitActionHistory {
     std::vector<WorkingCopyEvent> actions;
 };
 
+// Read-only first-parent branch timeline. Entries are ordered newest to
+// oldest; a revision without an action archive is a checkpoint-only entry.
+// Action UUIDs are complete for each archived Commit, not guessed from a
+// decoded model diff. The current draft remains a separate, paged section.
+struct BranchActionHistoryEntry {
+    RevisionGraphRevision revision;
+    std::optional<std::string> commitOperationId;
+    std::vector<std::string> actionIds;
+};
+
+struct BranchActionHistoryPage {
+    std::vector<BranchActionHistoryEntry> commits;
+    std::optional<RevisionId> next;
+    std::optional<std::string> draftId;
+    std::uint64_t draftGeneration = 0;
+    std::uint64_t draftEventCount = 0;
+    std::vector<std::string> draftActionIds;
+    std::optional<std::size_t> nextDraftOffset;
+};
+
 struct WorkingCopyLease {
     std::string token;                // UUIDv7, changes on every acquisition
     std::uint64_t expiresAtMs = 0;   // UTC epoch milliseconds
@@ -349,6 +369,16 @@ public:
     // Future timeline APIs will paginate by branch/revision/action; this read
     // is indexed by the stable Commit operation UUIDv7 only.
     LocalCommitActionHistory localCommitActionHistory(std::string_view operationId);
+    // HIST-02 read-only timeline. Pagination is by first-parent revision UUID;
+    // active-draft actions use a separate offset and remain bounded by the
+    // draft's existing journal limits. The returned rows never move HEAD or
+    // perform navigation. Local archival lookup is currently a bounded ledger
+    // scan; a persistent revision index is an explicit scaling follow-up.
+    BranchActionHistoryPage branchActionHistory(
+        std::string_view projectId, std::string_view branch, std::size_t limit = 5,
+        std::optional<RevisionId> after = std::nullopt,
+        std::optional<std::string_view> draftId = std::nullopt,
+        std::size_t draftOffset = 0);
     void releaseWorkingCopyLease(
         std::string_view draftId, std::string_view sessionId,
         std::string_view fencingToken);
