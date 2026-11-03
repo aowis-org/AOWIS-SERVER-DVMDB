@@ -227,6 +227,20 @@ remains open.
   after GUI and server restarts for both ordinary HTTP and embedded
   Standalone, including mixed edits and lost Save acknowledgements.
 
+**INT-05 regression checkpoint (2026-11-03; acceptance pending):** The
+native persistence suite compares the **entire canonical** `NetworkHydraulic`
+image, rather than checking only selected metadata and entity fields. It
+includes a root-metadata materialization followed by immutable Commit,
+repository restart, verify and compaction with all 18 collections present.
+The GUI test independently captures 18 collection insertions and a rich root
+metadata edit in one durable queue, and checks exact equality after queue
+restarts and acknowledgements. **These are separate event transactions:**
+current `POST /working-copies/{draft}/save-events` deliberately prohibits
+combining root edits with typed entity/membership changes in the same event.
+Actual HTTP/Standalone round-trips, every UI setter, undo/redo and mixed
+single-operation atomicity remain implementation/acceptance work. Tests are
+not recorded as passing until executed in the target Qt environment.
+
 ### INT-06 — Define and deliver explicit import operations
 
 * Preserve the existing **first import into an untouched unborn draft**.

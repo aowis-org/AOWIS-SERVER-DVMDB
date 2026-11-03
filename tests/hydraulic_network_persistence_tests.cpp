@@ -124,6 +124,9 @@ NetworkHydraulic completeNetwork() {
 }
 
 void compareNetworks(const NetworkHydraulic& source, const NetworkHydraulic& result) {
+    require(aowis::dvmdb::ModelCodec<NetworkHydraulic>::encode(result) ==
+            aowis::dvmdb::ModelCodec<NetworkHydraulic>::encode(source),
+            "complete canonical NetworkHydraulic changed on reload");
     require(result.uuid == source.uuid && result.id == source.id &&
             result.title_line_1 == source.title_line_1 &&
             result.duration_s == source.duration_s &&
@@ -1755,6 +1758,19 @@ void exerciseAtomicRootMetadataEdit() {
     changed.title_line_2 = QStringLiteral("Root edit saved atomically");
     changed.id = QStringLiteral("Renamed network ID");
     changed.options_hydraulic.headloss_formula = HydraulicHeadlossFormula::DarcyWeisbach;
+    changed.title_line_3 = QStringLiteral("All root metadata persisted");
+    changed.duration_s = 86400;
+    changed.timestep_hydraulic_s = 900;
+    changed.timestep_quality_s = 300;
+    changed.timestep_pattern_s = 1800;
+    changed.timestep_report_s = 1800;
+    changed.timestep_rule_s = 300;
+    changed.start_time_of_day_s = 3600;
+    changed.report_statistic = HydraulicSimulationReportStatistic::Average;
+    changed.options_energy.currency_iso4217 = QStringLiteral("EUR");
+    changed.options_report.summary = false;
+    changed.map_backdrop.file = QStringLiteral("int05-backdrop.png");
+    changed.multi_species.species[0].note = QStringLiteral("Updated MSX root note");
     aowis::model::ModelEntityEdit edit;
     edit.entityId = before.uuid;
     edit.entityType = QString::fromLatin1(aowis::model::hydraulicRootEditType);
@@ -1776,6 +1792,55 @@ void exerciseAtomicRootMetadataEdit() {
             saved->nodes_junctions.size() == before.nodes_junctions.size() &&
             saved->links_pipes.size() == before.links_pipes.size(),
             "root edit updates saved options without changing entity collections");
+    require(saved.has_value() &&
+            aowis::dvmdb::ModelCodec<NetworkHydraulic>::encode(*saved) ==
+            aowis::dvmdb::ModelCodec<NetworkHydraulic>::encode(changed),
+            "INT-05 metadata update preserves all 18 collections and every root byte");
+    // Exercise native persistence, immutable Commit and a newly opened
+    // repository, not only an in-memory manifest materialization.
+    const std::filesystem::path rootPath = tempDir();
+    try {
+        const native::ProjectId project = native::ProjectId::generate();
+        native::RevisionId updatedRevision = native::RevisionId::generate();
+        {
+            native::Repository repository(rootPath);
+            const native::RevisionId emptyHead =
+                repository.createRootBranch(project, "main", commitMetadata());
+            const native::RevisionId originalRevision = repository.commitModel(
+                project, "main", records, commitMetadata(), emptyHead);
+            updatedRevision = repository.commitModel(
+                project, "main", {materialized}, commitMetadata(), originalRevision);
+            const std::optional<NetworkHydraulic> committed =
+                hydraulic::loadHydraulicNetworkAtRevision(
+                    repository, project, updatedRevision, changed.uuid);
+            require(committed.has_value(), "INT-05 committed metadata root not found");
+            compareNetworks(changed, *committed);
+            (void)repository.verifyRepository();
+        }
+        {
+            native::Repository reopened(rootPath);
+            require(reopened.head(project, "main") == updatedRevision,
+                    "INT-05 committed metadata HEAD lost after restart");
+            const std::optional<NetworkHydraulic> restored =
+                hydraulic::loadHydraulicNetworkAtRevision(
+                    reopened, project, updatedRevision, changed.uuid);
+            require(restored.has_value(), "INT-05 complete network lost after restart");
+            compareNetworks(changed, *restored);
+            (void)reopened.verifyRepository();
+            (void)reopened.compact();
+            const std::optional<NetworkHydraulic> compacted =
+                hydraulic::loadHydraulicNetworkAtRevision(
+                    reopened, project, updatedRevision, changed.uuid);
+            require(compacted.has_value(), "INT-05 network lost during compaction");
+            compareNetworks(changed, *compacted);
+        }
+    } catch (...) {
+        std::error_code ignored;
+        std::filesystem::remove_all(rootPath, ignored);
+        throw;
+    }
+    std::error_code ignored;
+    std::filesystem::remove_all(rootPath, ignored);
     bool staleRejected = false;
     try { (void)hydraulic::materializeDraftRootEdit(reader, edit); }
     catch (const std::exception&) { staleRejected = true; }
