@@ -126,18 +126,19 @@ assigned to any current VC milestone.
 - The existing `AccessPolicyStore` and `aowis-dvmdb-access` are provisional
   native policy utilities; they do not enforce authentication at the REST
   boundary. Do not build new GUI authorization features on that assumption.
-- The `private`, `shared` and `unconfigured` repository roles from VC-03
+- The `private`, `shared` and `unconfigured` repository roles
   describe intended repository use, not access rights. Repository UUIDv7,
   branch UUIDv7, SHA-256 digests and tracked remote identities cannot stand
   in for credentials or verified service/user identities.
-- VC-04 leases and fencing tokens are correctness mechanisms for concurrent
-  drafts. VC-05/VC-07 idempotency keys are correctness mechanisms for retries.
+- Working-copy leases and fencing tokens are correctness mechanisms for
+  concurrent drafts. Commit and proposed Publish operation IDs are
+  correctness mechanisms for retries.
   Neither grants a user permission to perform an operation.
 - A future design must choose how native library users, local Standalone
   storage, desktop HTTP clients, browser clients and shared services receive
   consistent security policy. No policy, identity provider or secret format
   is committed by the current project.
 - Keep future security tests and deployment approval requirements in a
-  **separately authorized plan**, not the VC-11 functional qualification
+  **separately authorized plan**, not the current functional qualification
   matrix. Completing the current version-control roadmap neither provides
   nor claims internet-facing/multi-user security.

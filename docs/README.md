@@ -1,70 +1,56 @@
 # DVMDB documentation
 
-DVMDB is AOWIS's native, versioned model database. These pages describe what
-the code does today; planned work is only in the [roadmap](roadmap.md). Start
-with the contract, then the page for the layer you work on.
+DVMDB is AOWIS's **native multi-project, versioned model store** with a C++
+service API and HTTP endpoints. The pages linked here describe behavior
+present in the source snapshot of 2026-11-03. Future development is in the
+[remaining roadmap](roadmap.md); no old implementation-stage chronicle is
+necessary to understand the product.
 
-## Contract
+## Current product contracts
 
-For the live API, see [current HTTP workflows](http-workflows.md), including
-unborn branch creation, saved HEAD summaries, import, local Commit and editable
-display metadata. These are distinct from immutable revision record bytes.
-
-
-| Page | What it settles |
+| Guide | What it documents |
 |---|---|
-| [Version-control contract](version-control-semantics.md) | Projects, branches, revisions, HEADs, drafts, Commit vs Publish — the rules every layer must follow |
-| [Private working repositories](private-working-repositories.md) | Personal vs shared repositories, clone/checkout, local Commit, Fetch and Publish |
-| [GUI integration requirements](gui-integration-requirements.md) | What the GUI may rely on and how it must present history and drafts |
-| [Format policy](format-compatibility.md) | One current format, explicit rejection of anything else |
+| [Architecture](architecture.md) | Store, project service, repository identity and durability |
+| [Version-control semantics](version-control-semantics.md) | UUIDv7 projects, branches, unborn HEADs, immutable revisions and drafts |
+| [Working copies and local Commit](working-copies.md) | Leased/fenced events, draft journal, generation, idempotent local Commit |
+| [Private and shared repositories](private-working-repositories.md) | Roles, local vs shared refs, checkout building blocks, current workflow boundary |
+| [Committed revision graph](native-revision-history.md) | Revision records, branch ancestry, graph reads and immutable metadata |
+| [Hydraulic persistence](native-hydraulic-network.md) | 18 collections, root metadata, chunks, full/read/edit paths |
+| [Model record integrity](model-records.md) | Canonical records, identities, reverse references |
+| [Hydraulic feasibility and storage validity](model-validity-boundary-audit.md) | What is allowed despite solver failure versus what is structurally invalid |
+| [Generic merge](native-branch-merging.md) / [hydraulic merge](native-hydraulic-merging.md) | Native APIs and current conflict/validation rules |
+| [Repository tracking](repository-tracking.md) | Repository role, UUID, remote registry and tracking observations |
+| [Revision bundles](offline-repository-synchronization.md) | Actual native/HTTP/CLI replication primitives |
 
-## Design and formats
+## HTTP service and operations
 
-| Page | Subject |
-|---|---|
-| [Architecture](architecture.md) | Layers, identity, durability, locking, replication, errors |
-| [Storage formats](storage-formats.md) | Byte-level layout of the storage root, repositories, bundles, drafts and the Commit ledger |
-| [Model records](model-records.md) | The `AOMD` record envelope, reference index, who owns the MODEL codec |
-| [Revision history](native-revision-history.md) | Revisions, branches, unborn HEADs, history and graph reads |
-| [Branch merging](native-branch-merging.md) | Generic three-way merge |
-| [Hydraulic persistence](native-hydraulic-network.md) | How networks are stored, read, edited and validated |
-| [Hydraulic merging](native-hydraulic-merging.md) | Field and structural conflicts, explicit choices |
-| [Working copies and local Commit](working-copies.md) | Drafts, leases, autosave of MODEL events, local Commit |
-| [Current HTTP workflows](http-workflows.md) | Readiness, project/branch metadata, network summaries, import and Commit |
-| [Repository tracking](repository-tracking.md) | Repository identity, role, remote registry |
-| [Synchronization](offline-repository-synchronization.md) | Revision bundles: CLI, C++ and HTTP |
+- [Current HTTP workflows](http-workflows.md) and [REST conventions](rest-api-design.md)
+  summarize the implemented endpoints. [OpenAPI](dvmdb-http-api.yaml) documents
+  concrete fields and response shapes; verify its source-generated contract
+  in tests when making protocol changes.
+- [Database service](native-database-service.md) — configuration, limits,
+  startup and health.
+- [Storage formats](storage-formats.md), [operations](operations.md),
+  [verification](repository-verification.md),
+  [durability](durability-qualification.md) and
+  [engineering measurements](engineering-findings.md) document the native
+  persistence implementation and how to evaluate it. Measurements are dated
+  evidence, not claims about every later change.
+- [GUI integration contract](gui-integration-requirements.md) describes the
+  currently exercised API boundary with AOWIS-SERVER-GUI.
 
-## HTTP service
+## Still future work
 
-| Page | Subject |
-|---|---|
-| [Running the service](native-database-service.md) | Storage root, configuration, limits, deployment, health, error codes |
-| [REST guide](rest-api-design.md) | Conventions and the resource map |
-| [OpenAPI contract](dvmdb-http-api.yaml) | Exact routes and schemas (kept in step with the code by a CTest) |
+- [Remaining database and GUI integration roadmap](roadmap.md): exact
+  external/embedded persistence acceptance, import/replacement, whole-project
+  Fetch, recoverable Publish, UI Merge, scaling and qualification.
+- [Persistent History and cross-Commit Undo/Redo roadmap](history-roadmap.md):
+  a server-owned action history spanning immutable Commit markers, separate
+  from the currently bounded draft journal. **Undo/Redo is not implemented.**
+- [Security design](security-permissions-design.md) is explicitly deferred.
+  Repository role, UUIDs and fencing are not authentication or authorization.
 
-## Operations and evidence
-
-| Page | Subject |
-|---|---|
-| [Operations](operations.md) | Finding the root, backup and restore, upgrades, disk full, recovery |
-| [Repository verification](repository-verification.md) | `aowis-dvmdb-verify` and compaction |
-| [Durability qualification](durability-qualification.md) | Crash, ENOSPC and HTTP stress tests; opt-in QEMU power-cut and soak drills |
-| [Benchmarks](benchmark-plan.md) | How to run the benchmarks |
-| [Engineering findings](engineering-findings.md) | Measured results and the decisions they support |
-| [Security backlog](security-permissions-design.md) | What is not protected today, and open questions for a later security design |
-
-The MODEL codec, edit transactions and value rules are documented in the
-submodule: [model serialization](../external/AOWIS-SERVER-MODEL/docs/model-serialization.md),
-[edit transactions](../external/AOWIS-SERVER-MODEL/docs/edit-transactions.md),
-[value rules](../external/AOWIS-SERVER-MODEL/docs/model-value-rules.md).
-
-## Writing these pages
-
-* Describe current behaviour in the topic page and planned work only in the
-  [roadmap](roadmap.md). Say plainly when a layer exists but the end-to-end
-  workflow does not.
-* Byte layouts go in [storage formats](storage-formats.md); topic pages link to
-  them instead of repeating them.
-* No patch chronology, no "V1/V2" naming, no claims of test results that were
-  not recorded. Measured numbers belong in
-  [engineering findings](engineering-findings.md) with their date and setup.
+The canonical MODEL codec, edit transactions and value rules are part of
+AOWIS-SERVER-MODEL, not a second DVMDB-specific serializer. Before first
+release, do not add migration/backward-compatibility machinery solely for
+obsolete development storage formats.

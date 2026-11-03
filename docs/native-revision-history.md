@@ -3,6 +3,19 @@
 Revisions, branches, HEADs and the history and graph reads, natively and over
 HTTP. The rules are in the [version-control contract](version-control-semantics.md).
 
+## Committed revision history is not an Undo/Redo action log
+
+The native revision DAG and first-parent history expose **immutable
+checkpoints**, including messages, authors, times and parent relationships.
+They do **not** store a permanent ordered edit-action trail between revisions.
+Working copies have a bounded event journal that is **cleared on successful
+local Commit**. Neither source supports a durable user-facing history cursor,
+Undo/Redo across Commit markers, or arbitrary jump-to-edit today. The proposed
+separate archive and cross-Commit history API are specified in the
+[History roadmap](history-roadmap.md). No existing revision may be rewritten
+or HEAD ref silently rewound as a substitute.
+
+
 ## Revisions and identity
 
 A revision is a finalized, immutable whole-model snapshot. Each committed
@@ -60,14 +73,13 @@ revision for inspection does not make it writable or move any branch HEAD.
 ## Commit and conflict behavior
 
 A local Commit pins its local branch and exact expected local HEAD/null,
-validates the complete proposed model, durably creates a new immutable
-revision, and atomically advances only that local branch ref. Publish/Push
-then transfers verified history and conditionally advances the separate
-shared branch from an exact expected remote HEAD/null.
-Stale HEADs fail without publishing changes. A stale HEAD requires an explicit
-reconcile/rebase/merge workflow; a stale base is not automatically a content
-conflict. Successful writes remain discoverable after ambiguous timeouts
-through idempotency and authoritative reads.
+checks canonical storage/model references, durably creates a new immutable
+revision, and atomically advances only that local branch ref. A future Publish workflow will transfer verified history and conditionally
+advance the separate shared branch from an exact expected remote HEAD/null.
+**That end-to-end Publish workflow is not implemented yet.** Stale local
+HEADs fail without a local Commit, and an explicit reconcile/merge flow will
+be required when shared history diverges. Native Commit operations have an
+idempotent status ledger; a comparable remote Publish ledger is future work.
 
 ## Graph and read APIs
 
@@ -88,7 +100,7 @@ session state. See [merge semantics](native-branch-merging.md) and
 |---|---|---|
 | Create project with initial unborn `main` | `ProjectService::createUnbornProject` | `POST /projects` with `unborn: true` |
 | Create another independent unborn branch (same project, no origin revision) | `createUnbornBranch(project, name, optional UUIDv7)` | `POST …/branches` with `name`, `unborn: true`, optional `id` |
-| Create the first branch with an empty first revision | `createRootBranch(…, metadata)` | `POST /projects` without `unborn` (needs `author`; roadmap VC-01) |
+| Create the first branch with an empty first revision | `createRootBranch(…, metadata)` | `POST /projects` without `unborn` (alternative existing endpoint behavior, not the GUI's default) |
 | Create a branch from a branch UUID, at HEAD or a reachable revision | `createBranchFromId` (retry-safe with a caller-chosen UUID) | `POST …/branches` (`fromBranchId`, optional `revision`, optional `id`) |
 | Rename (keeps UUID, HEAD, provenance) | `renameBranch(…, expectedHead)` | `PATCH …/branches/{branch}` |
 | Branch by UUID | `branchById` | `GET …/branch-ids/{branchId}` |

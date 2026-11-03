@@ -74,8 +74,19 @@ submits the resulting network through this route.
 `POST /working-copies/{draftId}/initialize-network` is a separate operation
 for creating a new empty network. Ordinary editor changes are saved through
 `/save-events`, with a lease, fencing token, expected generation and
-membership intents. Save advances the **draft generation**, never the
+membership intents. One canonical MODEL event may contain both typed entity
+changes and network-root metadata; DVMDB derives all root/chunk records and
+applies them atomically. Save advances the **draft generation**, never the
 branch's committed HEAD. Network summaries are read-only and do not save.
+
+## Revision history versus edit-action history
+
+`GET /projects/{id}/revision-graph` exposes the immutable committed DAG;
+`GET /working-copies/{id}` exposes a bounded draft event journal. These
+are **not** a permanent action-history API: Commit clears the active draft
+journal and no persisted cross-Commit Undo/Redo cursor exists. The requested
+History dock and continuous action timeline are future work in the
+[History roadmap](history-roadmap.md).
 
 ## Local Commit and message annotations
 

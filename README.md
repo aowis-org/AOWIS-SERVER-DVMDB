@@ -18,7 +18,9 @@ AOWIS GUI, other AOWIS services, remote clients
                                      tries, revisions, branches, bundles
 ```
 
-Standalone AOWIS builds link the library directly and need no HTTP server.
+Standalone AOWIS embeds the native DVMDB service in the GUI process, then
+accesses its normal HTTP routes through a dynamic localhost endpoint. No
+separate server executable is required for Standalone.
 
 ## What it does
 
@@ -46,8 +48,11 @@ Standalone AOWIS builds link the library directly and need no HTTP server.
 
 DVMDB is **pre-release**. There is no TLS, authentication or authorization;
 keep the server on localhost or a trusted network. HTTP local Commit and saved-draft network summaries/import are implemented.
-Full hydraulic validation before Commit, Fetch/Publish and broader GUI
-acceptance are tracked in the [roadmap](docs/roadmap.md).
+Hydraulic solver feasibility is not a Commit precondition. External
+GUI/Standalone process-restart acceptance, whole-project Fetch/Publish,
+permanent cross-Commit action history and full Undo/Redo remain open; see
+the [integration roadmap](docs/roadmap.md) and
+[History roadmap](docs/history-roadmap.md).
 
 ## Quick start
 

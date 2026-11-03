@@ -1,70 +1,49 @@
-# INT-00 / INT-04 — Storage integrity versus hydraulic feasibility
+# Model integrity and hydraulic feasibility — current behavior
 
-Status (2026-11-03): **hydraulic-feasibility policy settled; model-reference
-policy undecided**. This audit describes the native and GUI sources examined
-for INT-00 and the narrowed INT-04. It does not assert that all incomplete
-networks or all transport combinations have passed runtime acceptance.
+DVMDB distinguishes a network that is **hydraulically unsolvable** from a
+network whose **canonical records and references are inconsistent**.
+A network with no water source, disconnected components or solver
+convergence errors may be saved and locally committed if its MODEL records
+are otherwise well formed. An EPANET success result is **not** a Commit
+precondition.
 
-## Agreed boundary
+## Mandatory structure and concurrency
 
-A hydraulic network may be committed even when it has no water source, has
-disconnected components, or cannot be successfully simulated. These are
-engineering states that version control must preserve. No EPANET convergence
-or hydraulic-feasibility result is a Save, Commit, Branch, Fetch, Publish, or
-Merge precondition.
+- Valid canonical MODEL encoding, physical-value rules and unambiguous
+  object identities; no duplicate model keys or malformed record envelopes.
+- Accurate network membership and reverse-reference indexes; existing
+  referenced model targets must exist and have valid types. Removing an
+  object with surviving incoming references is rejected by current native
+  storage rules.
+- Valid repository identity, project/branch ownership, immutable revision
+  parent closure, record hashes, Merkle roots and branch-HEAD CAS.
+- Live leases, fencing tokens and expected draft generations for mutable
+  private working-copy operations, with atomic durable Save/Commit.
 
-**Storage integrity and concurrency remain mandatory.** The canonical MODEL
-codec, non-null/collision-free object identities, exact before/after images,
-model membership, native index consistency, revision DAG ancestry and hashes,
-atomic writes, repository identity, lease/fencing, generation and HEAD CAS are
-not optional. Invalid or noncanonical bytes are never treated as an
-"intentionally invalid hydraulic model".
+An absent immutable **revision parent** is repository corruption, never a
+hydraulic diagnostic. A missing or wrong-type **hydraulic model reference**
+is currently an integrity-rule failure. Relaxing that rule has **not** been
+agreed and is not required to Commit a network that lacks hydraulic supply.
 
-**Hydraulic model-reference consistency is a different policy decision.**
-Current GUI, MODEL and DVMDB paths reject nonexistent or wrong-type UUID
-references, and deletions that leave surviving incoming references. The user
-has *not* decided to remove these guards. INT-04 therefore **must not** weaken
-them or bypass the native reverse-reference index. Allowing dangling model
-UUID references would require a separate design covering index canonicality,
-repository verification, bundle import, draft loads and merge behavior.
-Missing immutable revision parents always represent repository corruption.
+## Current source boundaries
 
-## Actual source boundaries
+| Implementation | Behavior |
+|---|---|
+| MODEL `validateHydraulicNetworkWithDependencies` | Validates entity values, types and existing references; this is not an EPANET solver invocation |
+| GUI `HydraulicDraftEventAdapter` | Stages canonical events only if before/after and dependencies remain structurally consistent |
+| DVMDB `native_store.cpp` | Validates reference targets and rejects deletion of referenced objects |
+| DVMDB `hydraulic_network_persistence.cpp` | Serializes/loads root, membership chunks and indexed records with MODEL validation |
+| DVMDB `ProjectService::commitWorkingCopy` | Commits a saved, dirty candidate with lease/generation/local HEAD checks and a durable ledger; no solver-success gate |
+| Hydraulic-specific merge path | Has additional domain checks; separate hydraulic feasibility from structural/reference failures when completing Merge qualification |
 
-| Path | Observed behavior | INT-04 disposition |
-|---|---|---|
-| `src/project_service.cpp` (`localCommit`) | Durable candidate and revision publication; no EPANET solver-success gate | Retain operation ID, candidate and HEAD/generation checks |
-| `src/native_store.cpp` (`prepareModelCommitLocked`) | Rejects unresolved model targets and deleting referenced objects | Keep until the distinct reference-policy decision |
-| `src/native_store.cpp` (verification and bundles) | Recomputes and checks reverse references plus target existence | Preserve physical integrity and existing reference semantics |
-| `src/hydraulic_network_persistence.cpp` | Canonical membership and dependency validation on strict reads/saves | Do not remove record/ownership checks; verify no solver-feasibility gate |
-| `hydraulic::mergeHydraulicBranches` | Enforces hydraulic domain validation through its merge/fast-forward path | In INT-10 separate feasibility diagnostics from structural/ref consistency |
-| GUI `src/projects/hydraulic_draft_event_adapter.cpp` | Validates canonical event/after images, membership, and dependencies | Keep referential validation; verify unsupplied/disconnected staging succeeds |
-| GUI `src/network/hydraulic_data.cpp` | Validates root metadata and captures canonical edits | Verify a network without a supply can still edit root metadata |
+The native `aowis-dvmdb-hydraulic-network-tests` includes an unsupplied
+junction-only regression. The GUI transaction test includes an unsupplied
+network with an isolated junction, edited and replayed through local queue
+restart. Source coverage does not automatically prove external HTTP or
+Standalone cross-process acceptance; see the [roadmap](roadmap.md).
 
-MODEL's dependency validation combines several checks. Rejecting an
-**unresolved reference** is not proof that hydraulic solvability is being
-checked. Conversely, accepting an unsupplied network does not demonstrate
-that dangling references are accepted.
-
-## Regression evidence and limits
-
-* **INT-00 / DVMDB:** `tests/hydraulic_network_persistence_tests.cpp`
-  includes a junction-only network without a source. The test covers draft
-  records, reconstruction, immutable Commit, branch, revision load, compaction,
-  repository reopen and verification.
-* **INT-04 / GUI:** `tests/hydraulic_edit_transaction_test.cpp` exercises an
-  unsupplied network containing an isolated junction and a pipe. It verifies
-  captured entity and root metadata edits, local durable queue restart,
-  canonical event acknowledgement, and a second restart without auto-repair.
-* These source tests **do not** certify a real network transport, Standalone
-  reopen, or Fetch/Publish/Merge. Those remain acceptance work for INT-05,
-  INT-08..11. A successful build and CTest execution must be recorded by the
-  developer before marking them passed.
-
-## Separate future decision: dangling hydraulic model references
-
-If requested later, the required design must define the behavior of incoming
-edges whose target UUID is not present, existing wrong-type references,
-removal of referenced entities, verification after import/compaction, and
-merge conflict resolution. Until that decision, no permissive storage patch
-is authorized and no roadmap milestone should imply it is a prerequisite.
+**Unresolved, separate design choice:** whether AOWIS should ever allow
+intentionally dangling hydraulic UUID references in a historical snapshot.
+That decision would require changes to reverse-reference indexing, import,
+verification, merge and GUI editing policy. Do not silently relax current
+reference guards as part of undo, redo or general Save work.

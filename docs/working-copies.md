@@ -95,13 +95,18 @@ atomically:
   item (`networkId`, `entityId`, `kind`, `collectionIndex`, `inserted`). DVMDB,
   not the client, rewrites the affected 256-member chunks and the network
   root in the same Save. The owning network must already exist in the base or
-  the candidate.
+  the candidate. A MODEL root-metadata edit **may accompany** typed entity
+  and membership changes in the same logical event: after materializing
+  membership, the server applies metadata to the resulting root manifest,
+  emitting one final atomic candidate change set. Unjournaled extra typed
+  changes, duplicate root edits and stale before-images are rejected.
 * A retry of the **immediately preceding** identical request (same
   fingerprint, generation one ahead) returns the earlier result instead of
   saving twice. The response lists only this Save's accepted event UUIDs and
   the new total `eventCount`.
 * The journal holds at most 4,096 events and 8 MiB. A full journal is `413`
-  until a local Commit empties it.
+  until a local Commit empties it. This is an **active draft Save journal**,
+  not an indefinitely retained Undo/Redo action-history archive.
 
 A Save appends only its own events and rewrites the candidate file only when
 the overlay changes; leases, releases and listings touch only the draft's
@@ -169,13 +174,17 @@ reachable from HEAD → `succeeded`; HEAD moved without it → `rejected`
 Commit replay applies it. A crash between outcome and draft update heals on
 the next replay or status lookup.
 
-**Current implementation limitation:** the coordinator checks MODEL record
-and reference constraints (`Repository::commitModel`); some otherwise
-representable incomplete hydraulic states may therefore still be rejected.
-The GUI Commit button **exists**, but source presence is not full recovery or
-invalid-model acceptance. The [roadmap](roadmap.md) requires separating hard
-storage integrity from non-blocking hydraulic diagnostics, plus end-to-end
-failure-mode tests. A complete hydraulic validator is **not** a Commit gate.
+**Commit validity boundary:** `Repository::commitModel` enforces canonical
+records, native index and MODEL reference consistency. Missing/wrong-type
+hydraulic references currently fail these checks; relaxing that rule is
+undecided. A network without a water source, with disconnected components
+or an unsuccessful hydraulic simulation is not prohibited **solely** for
+hydraulic feasibility. No full EPANET solver-success validation is required
+by local Commit. The active draft candidate and event journal are **cleared
+on successful Commit**; earlier individual edit steps are not retained as a
+permanent History subsystem. See [History roadmap](history-roadmap.md).
+Actual cross-process recovery acceptance remains work in the
+[remaining integration roadmap](roadmap.md).
 
 ## Limits
 

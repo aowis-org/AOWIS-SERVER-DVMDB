@@ -60,7 +60,8 @@ a conflicting merge leaves both heads and the pack unchanged. It does **no**
 hydraulic validation of its own; the current stricter hydraulic-specific API
 is `hydraulic::mergeHydraulicBranches` ([hydraulic merging](native-hydraulic-merging.md)).
 Neither path should be described as satisfying the future lossless merge
-contract until the INT-04/INT-10 acceptance cases pass.
+contract until the remaining merge qualification cases in the
+[roadmap](roadmap.md) pass.
 
 HTTP: `POST /dvmdb/v1/projects/{id}/merges` (generic) and
 `POST /dvmdb/v1/projects/{id}/hydraulic-merges`, both with `target`, `source`,
