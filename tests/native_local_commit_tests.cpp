@@ -86,6 +86,101 @@ ModelChange changeWithValue(std::uint8_t value) {
 // HIST-02: a successful Commit must not erase its underlying MODEL actions,
 // even though the active draft is rebased and its short journal disappears.
 // All frames are part of the durable intent BEFORE publishing a revision.
+// HIST-03a: a historical checkpoint must reconstruct a COMPLETE candidate
+// overlay relative to the *current* HEAD. This is a read-only plan: it must
+// not publish a revision, erase draft events, or move the logical cursor.
+void testHistoryCheckpointPlan() {
+    TempRoot root;
+    const std::string session = UuidV7::generate().toString();
+    std::string projectId;
+    std::string draftId;
+    std::string firstRevision;
+    std::string secondRevision;
+    const ModelChange initial = changeWithValue(10);
+    ModelChange companion = changeWithValue(77);
+    companion.key[15] = 8;
+    const ModelChange modified = changeWithValue(20);
+    ModelChange introduced = changeWithValue(99);
+    introduced.key[15] = 9;
+    ModelChange removed;
+    removed.key = companion.key;
+    {
+        ProjectService service(root.path);
+        service.configureRepositoryRole(RepositoryRole::Private);
+        projectId = service.createUnbornProject("history checkpoint plans").id;
+        const aowis::dvmdb::RevisionId first = service.commitModelAtExpectedHead(
+            projectId, "main", {initial, companion}, commitMetadata(), std::nullopt);
+        firstRevision = first.toString();
+        const aowis::dvmdb::RevisionId second = service.commitModelAtExpectedHead(
+            projectId, "main", {modified, removed, introduced}, commitMetadata(), first);
+        secondRevision = second.toString();
+        draftId = service.createWorkingCopy(projectId, "main", second, session).id;
+        const std::string token = service.acquireWorkingCopyLease(draftId, session, 120).token;
+        const aowis::dvmdb::HistoryCheckpointPlan older = service.planHistoryCheckpoint(
+            draftId, first, 0);
+        require(older.draftId == draftId && older.projectId == projectId &&
+                older.branchId == service.branchId(projectId, "main")->toString() &&
+                older.expectedHead == second && older.targetRevisionId == firstRevision &&
+                older.expectedGeneration == 0 && older.candidateChanges.size() == 3 &&
+                older.candidateChanges[0].record && older.candidateChanges[1].record &&
+                !older.candidateChanges[2].record &&
+                older.candidateChanges[0].record->payload == initial.record->payload &&
+                older.candidateChanges[1].record->payload == companion.record->payload &&
+                older.candidateChanges[2].key == introduced.key,
+                "HIST-03a older checkpoint lost replacement, resurrection or tombstone");
+        const aowis::dvmdb::HistoryCheckpointPlan current = service.planHistoryCheckpoint(
+            draftId, second, 0);
+        require(current.candidateChanges.empty(),
+                "HIST-03a current HEAD should require an empty replacement overlay");
+        ModelChange independent = changeWithValue(88);
+        independent.key[15] = 10;
+        require(service.saveWorkingCopyChanges(draftId, session, token, 0,
+                    {independent}).generation == 1, "test edit was not saved");
+        expectConflict([&] { (void)service.planHistoryCheckpoint(draftId, first, 0); });
+        const aowis::dvmdb::HistoryCheckpointPlan afterLocalEdit =
+            service.planHistoryCheckpoint(draftId, first, 1);
+        require(afterLocalEdit.candidateChanges.size() == 3 &&
+                afterLocalEdit.candidateChanges[0].key == initial.key &&
+                afterLocalEdit.candidateChanges[1].key == companion.key &&
+                !afterLocalEdit.candidateChanges[2].record,
+                "HIST-03a replacement plan incorrectly retained unrelated local edits");
+        require(service.workingCopy(draftId).generation == 1 &&
+                service.workingCopy(draftId).candidateChanges.size() == 1 &&
+                service.optionalHead(projectId, "main") == second,
+                "HIST-03a planning mutated the draft or immutable HEAD");
+        const std::string otherProject = service.createUnbornProject("unrelated history").id;
+        const aowis::dvmdb::RevisionId unrelated = service.commitModelAtExpectedHead(
+            otherProject, "main", {changeWithValue(33)}, commitMetadata(), std::nullopt);
+        bool unrelatedRejected = false;
+        try { (void)service.planHistoryCheckpoint(draftId, unrelated, 1); }
+        catch (const ProjectError& error) {
+            unrelatedRejected = error.kind() == ProjectErrorKind::InvalidInput;
+        }
+        require(unrelatedRejected, "HIST-03a accepted a revision from another branch/project");
+    }
+    {
+        ProjectService reopened(root.path);
+        const aowis::dvmdb::HistoryCheckpointPlan recovered =
+            reopened.planHistoryCheckpoint(draftId, *RevisionId::parse(firstRevision), 1);
+        require(recovered.targetRevisionId == firstRevision &&
+                recovered.expectedHead == RevisionId::parse(secondRevision) &&
+                recovered.candidateChanges.size() == 3 &&
+                reopened.workingCopy(draftId).candidateChanges.size() == 1,
+                "HIST-03a checkpoint preview changed or mutated after repository restart");
+        // Publishing another immutable HEAD invalidates a plan against this
+        // stale draft, even if its generation has not changed.
+        const aowis::dvmdb::RevisionId moved = reopened.commitModelAtExpectedHead(
+            projectId, "main", {changeWithValue(44)}, commitMetadata(),
+            *RevisionId::parse(secondRevision));
+        require(reopened.optionalHead(projectId, "main") == moved,
+                "HIST-03a stale HEAD fixture did not publish");
+        expectConflict([&] {
+            (void)reopened.planHistoryCheckpoint(draftId,
+                *RevisionId::parse(firstRevision), 1);
+        });
+    }
+}
+
 void testCommittedActionHistory() {
     TempRoot root;
     const std::string session = UuidV7::generate().toString();
@@ -1168,6 +1263,7 @@ void testCommitRecordsAuthorMessageAndReservedTime() {
 
 int main() {
     try {
+        testHistoryCheckpointPlan();
         testCommittedActionHistory();
         testBranchDraftHistoryPaging();
         testLocalCommitRecovery();

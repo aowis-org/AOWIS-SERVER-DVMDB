@@ -2714,6 +2714,76 @@ BranchActionHistoryPage ProjectService::branchActionHistory(
     return page;
 }
 
+HistoryCheckpointPlan ProjectService::planHistoryCheckpoint(
+        std::string_view draftId, const RevisionId& target,
+        std::uint64_t expectedGeneration) {
+    if (!UuidV7::parse(draftId))
+        throw ProjectError(ProjectErrorKind::InvalidInput,
+                           "invalid history checkpoint draft UUIDv7");
+    requirePrivateRepository("history checkpoint requires a private repository");
+    checkHealthy();
+    const WorkingCopyInfo header = loadDraft(this->root_, draftId, DraftLoad::Meta).info;
+    HistoryCheckpointPlan plan;
+    withRepository(header.projectId, [&](Repository& repository) {
+        const std::shared_ptr<std::mutex> lock = draftLock(draftId);
+        std::lock_guard<std::mutex> guard(*lock);
+        const WorkingCopyInfo draft = loadDraft(this->root_, draftId, DraftLoad::Candidate).info;
+        if (draft.projectId != header.projectId || draft.branchId != header.branchId ||
+            draft.generation != expectedGeneration)
+            throw ProjectError(ProjectErrorKind::Conflict,
+                               "history draft changed; request a fresh checkpoint plan");
+        const std::optional<ProjectId> project = ProjectId::parse(draft.projectId);
+        const std::optional<BranchId> branch = BranchId::parse(draft.branchId);
+        if (!project || !branch)
+            throw ProjectError(ProjectErrorKind::InvalidInput,
+                               "history checkpoint requires UUIDv7 project and branch");
+        const std::optional<RevisionGraphHead> selected = translated<
+            std::optional<RevisionGraphHead>>([&]() {
+                return repository.branchById(*project, *branch);
+            });
+        if (!selected || !selected->revision ||
+            draft.baseRevision != selected->revision)
+            throw ProjectError(ProjectErrorKind::Conflict,
+                               "history draft is not based on the current branch HEAD");
+        // `after` validation traverses actual first-parent ancestry and
+        // refuses any UUID outside the selected branch. It also permits the
+        // current HEAD and checkpoint-only revisions without fabricating an
+        // edit history between them.
+        translated<std::vector<RevisionGraphRevision>>([&]() {
+            return repository.history(*project, selected->name, 1, target);
+        });
+        std::set<Key> wanted;
+        if (draft.baseRevision != target) {
+            const std::vector<Difference> changed = translated<std::vector<Difference>>([&]() {
+                return repository.diffRevisions(*project, *draft.baseRevision,
+                                                target, workingCopyMaxChanges);
+            });
+            for (const Difference& item : changed) wanted.insert(item.key);
+        }
+        // Existing local edits may reference keys not changed between the
+        // two immutable checkpoints. They disappear from a replacement
+        // overlay; a future navigator must NOT merge this plan into the old
+        // overlay, which would preserve unrelated local changes by mistake.
+        if (wanted.size() > workingCopyMaxChanges)
+            throw StorageError(StorageErrorKind::LimitExceeded,
+                               "history checkpoint exceeds draft overlay budget");
+        plan.draftId = draft.id;
+        plan.projectId = draft.projectId;
+        plan.branchId = draft.branchId;
+        plan.targetRevisionId = target.toString();
+        plan.expectedHead = selected->revision;
+        plan.expectedGeneration = draft.generation;
+        plan.candidateChanges.reserve(wanted.size());
+        for (const Key& key : wanted) {
+            const std::optional<ModelRecord> desired = translated<std::optional<ModelRecord>>([&]() {
+                return repository.getModelAtRevision(*project, target, key);
+            });
+            plan.candidateChanges.push_back(ModelChange{key, desired});
+        }
+    });
+    return plan;
+}
+
 void ProjectService::releaseWorkingCopyLease(
         std::string_view draftId, std::string_view sessionId,
         std::string_view fencingToken) {

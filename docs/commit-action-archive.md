@@ -71,6 +71,18 @@ or an old local Commit without retained actions is represented as a genuine
 editing actions. Forked branches inherit first-parent Commit checkpoints
 without duplicating archived actions.
 
+## History checkpoint reconstruction
+
+The native `planHistoryCheckpoint` method can now preview the exact
+replacement overlay for choosing an older immutable first-parent revision
+as working-copy content. It checks project/branch ownership, current branch
+HEAD, draft generation and native candidate limits. It never changes the
+draft, commit journal, cursor or immutable revision. It does **not** yet
+support navigating to an individual archived action or the unborn state.
+The returned overlay must not be passed to the normal incremental Save method
+as though it were a delta: future navigation needs an atomic *replacement*
+with a durable cursor and action record.
+
 ## Current operational limits
 
 - The active draft event journal remains bounded at **4,096 events / 8 MiB**.

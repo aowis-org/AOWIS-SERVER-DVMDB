@@ -37,6 +37,20 @@ navigation encounters stale images, a conflicting writer or a missing
 referenced entity, it fails without partial application. Hydraulic solver
 feasibility itself is never an Undo/Redo precondition.
 
+## Checkpoint state reconstruction (native read-only foundation)
+
+`ProjectService::planHistoryCheckpoint(draftId, revision, expectedGeneration)`
+returns the exact candidate overlay needed to represent an immutable
+first-parent checkpoint *relative to the draft's currently committed HEAD*.
+It rejects stale HEADs and draft generations, and cannot be used as an
+unfenced edit. Its output is a **full replacement overlay**, not an
+incremental patch suitable for `saveWorkingCopyChanges()`. This API does not
+perform Undo/Redo, write cursor state, or synthesize missing intermediate
+actions. Pre-first-Commit unborn states and individual action targets are
+separate future reconstruction paths. The eventual navigation mutation must
+recompute or validate the plan and atomically persist both candidate and
+logical cursor under the same writer/HEAD checks.
+
 ## Retention, restart and UI
 
 The durable action archive survives a Commit; the bounded working-copy event

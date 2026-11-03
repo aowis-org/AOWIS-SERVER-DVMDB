@@ -68,6 +68,23 @@ missing objects. Do not allow jumps to invent actions between two old
 revisions for which only final snapshots remain. For merge commits, expose
 the first-parent narrative by default and metadata for the other parent(s).
 
+**HIST-03a checkpoint reconstruction (implemented native foundation):**
+`ProjectService::planHistoryCheckpoint(draftId, targetRevision,
+expectedGeneration)` now computes the **complete replacement candidate
+overlay** against the selected branch's current immutable HEAD. It verifies
+first-parent ancestry, project/branch identity, the draft's HEAD pin and
+generation, and applies the native overlay-size bound. An older snapshot can
+require replacements, resurrected records and tombstones. Existing unrelated
+draft edits are deliberately absent from the plan, because navigation must
+**replace**, not merge into, the candidate overlay. This method is read-only:
+it neither executes a transition nor persists a cursor/event, and is not yet
+exposed over HTTP. Native tests cover all three change types, stale
+generation/HEAD, foreign revisions, restart and non-mutation. The future
+atomic navigation executor must regenerate/revalidate the plan under the
+same locks and publish the replacement overlay together with history cursor
+and MODEL event journal data; an ordinary incremental Save is **not** a
+substitute for that atomic operation.
+
 ### HDB-03 — Durable Undo/Redo operation and concurrency
 
 Generate new canonical inverse or forward events with fresh operation IDs,

@@ -168,6 +168,21 @@ struct BranchActionHistoryPage {
     std::optional<std::size_t> nextDraftOffset;
 };
 
+// HIST-03 foundation: immutable, read-only *plan* for selecting a committed
+// checkpoint as the private draft's desired model content. candidateChanges
+// is a COMPLETE replacement overlay against expectedHead, not a Save delta.
+// No writer can apply this result without rechecking both the generation and
+// local HEAD and atomically replacing the overlay together with cursor state.
+struct HistoryCheckpointPlan {
+    std::string draftId;
+    std::string projectId;
+    std::string branchId;
+    std::string targetRevisionId;
+    std::optional<RevisionId> expectedHead;
+    std::uint64_t expectedGeneration = 0;
+    std::vector<ModelChange> candidateChanges;
+};
+
 struct WorkingCopyLease {
     std::string token;                // UUIDv7, changes on every acquisition
     std::uint64_t expiresAtMs = 0;   // UTC epoch milliseconds
@@ -400,6 +415,14 @@ public:
         std::string_view projectId, std::string_view branch,
         const RevisionId& revision, std::size_t offset = 0,
         std::size_t limit = 100);
+    // Read-only checkpoint reconstruction for upcoming cross-Commit Undo/Redo.
+    // The result is a replacement overlay relative to the draft's actual
+    // immutable HEAD, never a sequence of guessed edits. Only an ancestor on
+    // the selected branch's first-parent chain is a valid target. The method
+    // neither changes the draft nor creates a history cursor or journal entry.
+    HistoryCheckpointPlan planHistoryCheckpoint(
+        std::string_view draftId, const RevisionId& target,
+        std::uint64_t expectedGeneration);
     void releaseWorkingCopyLease(
         std::string_view draftId, std::string_view sessionId,
         std::string_view fencingToken);
