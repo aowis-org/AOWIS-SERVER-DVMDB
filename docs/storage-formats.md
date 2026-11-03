@@ -236,7 +236,7 @@ Hard ceilings: 64 GiB and 1,000,000 objects per bundle, 64 MiB per object;
 callers set lower `BundleLimits`. Import rules:
 [synchronization](offline-repository-synchronization.md).
 
-## Private drafts (`AOWIS-WORKING-COPY-4`)
+## Private drafts (`AOWIS-WORKING-COPY-5`)
 
 Each draft is a directory `working-copies/<draft-uuidv7>/` (mode 0700):
 
@@ -246,7 +246,7 @@ Each draft is a directory `working-copies/<draft-uuidv7>/` (mode 0700):
 * `journal-<uuidv7>` — the MODEL event journal, append-only binary.
 
 ```text
-AOWIS-WORKING-COPY-4
+AOWIS-WORKING-COPY-5
 project\t<project-uuidv7>
 branch\t<branch-uuidv7>
 base\t<revision-uuidv7|->
@@ -260,7 +260,22 @@ lease-expires\t<unix epoch ms, 0 without lease>
 candidate\t<file|->\t<changes>\t<bytes>\t<SHA-256 of the file|->
 journal\t<file|->\t<events>\t<acknowledged bytes>\t<chain digest|->
 last-save\t<SHA-256 fingerprint of the last event Save|->
+history-revision\t<exact checkpoint revision UUIDv7|->
+history-operation\t<last checkpoint-navigation operation UUIDv7|->
+history-source-generation\t<generation before last checkpoint selection|->
 ```
+
+HIST-03b uses the existing atomic meta publication to persist the full
+checkpoint replacement candidate and its checkpoint identity **together**.
+The three `history-*` fields are either all absent (`-`) or all present;
+the source generation must be exactly one less than the draft generation.
+Selecting a checkpoint requires a live lease, a pinned HEAD, an empty MODEL
+journal, and a first-parent ancestor of that HEAD. Retrying the same operation
+at its original generation returns the already published result; intervening
+edits, another selection, or a changed HEAD reject the retry. Normal Save or
+Commit clears these fields. This is an exact-snapshot cursor, **not** a durable
+per-action Undo/Redo cursor or a permanent navigation event archive. No
+migration from earlier pre-release draft meta records is provided.
 
 Candidate file: `AOWC` `0x01`, then per change, sorted by entity key: key (16),
 length (u32, `0xffffffff` = deletion), `AOMD` model record. Journal file: per

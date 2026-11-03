@@ -468,7 +468,7 @@ ProjectService::Project::Project(ProjectInfo value) : info(std::move(value)) {}
 namespace {
 // Private draft format (see docs/storage-formats.md). Earlier
 // pre-release formats are rejected, never migrated.
-constexpr std::string_view workingCopyMarker = "AOWIS-WORKING-COPY-4\n";
+constexpr std::string_view workingCopyMarker = "AOWIS-WORKING-COPY-5\n";
 constexpr std::size_t workingCopyMaxBytes = 8 * 1024 * 1024;
 constexpr std::size_t workingCopyMaxChanges = 20000;
 constexpr std::size_t workingCopyMaxEvents = 4096;
@@ -605,7 +605,7 @@ std::string saveBatchFingerprint(const std::vector<ModelChange>& changes,
 }
 
 // ---------------------------------------------------------------------------
-// Draft storage (AOWIS-WORKING-COPY-4). One directory per draft:
+// Draft storage (AOWIS-WORKING-COPY-5). One directory per draft:
 //   meta                  small text record, atomically replaced; authoritative
 //   candidate-<uuidv7>    immutable binary candidate overlay (sorted changes)
 //   journal-<uuidv7>      append-only binary MODEL event journal
@@ -676,7 +676,11 @@ std::string metaBody(const WorkingCopyInfo& draft, const DraftFiles& files) {
             + std::to_string(files.candidateBytes) + "\t" + files.candidateDigest + "\n"
         + "journal\t" + files.journal + "\t" + std::to_string(draft.journalCount) + "\t"
             + std::to_string(files.journalBytes) + "\t" + files.journalDigest + "\n"
-        + "last-save\t" + draft.lastSaveFingerprint.value_or("-") + "\n";
+        + "last-save\t" + draft.lastSaveFingerprint.value_or("-") + "\n"
+        + "history-revision\t" + draft.historyCheckpointRevisionId.value_or("-") + "\n"
+        + "history-operation\t" + draft.lastHistoryNavigationOperationId.value_or("-") + "\n"
+        + "history-source-generation\t" + (draft.lastHistoryNavigationSourceGeneration
+            ? std::to_string(*draft.lastHistoryNavigationSourceGeneration) : "-") + "\n";
 }
 
 Bytes encodeCandidate(const std::vector<ModelChange>& changes) {
@@ -889,6 +893,22 @@ std::optional<StoredDraft> readDraftMeta(const std::filesystem::path& directory)
         check(hexDigest(fingerprint), "invalid last-save fingerprint");
         draft.lastSaveFingerprint = fingerprint;
     }
+    const std::string historyRevision = nextField("history-revision");
+    const std::string historyOperation = nextField("history-operation");
+    const std::string historyGeneration = nextField("history-source-generation");
+    check((historyRevision == "-" && historyOperation == "-" && historyGeneration == "-") ||
+          (RevisionId::parse(historyRevision).has_value() &&
+           UuidV7::parse(historyOperation).has_value() && historyGeneration != "-"),
+          "incomplete history navigation cursor in draft meta");
+    if (historyRevision != "-") {
+        draft.historyCheckpointRevisionId = historyRevision;
+        draft.lastHistoryNavigationOperationId = historyOperation;
+        draft.lastHistoryNavigationSourceGeneration = decimalField(historyGeneration);
+        check(*draft.lastHistoryNavigationSourceGeneration < draft.generation &&
+              *draft.lastHistoryNavigationSourceGeneration + 1 == draft.generation &&
+              draft.journalCount == 0 && !draft.lastSaveFingerprint,
+              "invalid history navigation generation or journal state");
+    }
     std::string extra;
     check(!std::getline(lines, extra) && lines.eof(), "trailing working-copy record content");
     check((draft.journalCount == 0 && !draft.lastSaveFingerprint) ||
@@ -902,6 +922,8 @@ std::optional<StoredDraft> readDraftMeta(const std::filesystem::path& directory)
         draft.baseRevision = RevisionId::parse(base);
         check(draft.baseRevision.has_value(), "invalid working-copy base revision");
     }
+    check(!draft.historyCheckpointRevisionId || draft.baseRevision.has_value(),
+          "history cursor requires a committed draft base");
     check(draft.dirty == (stored.files.candidateCount != 0), "invalid draft dirty/change mismatch");
     return stored;
 }
@@ -2257,6 +2279,9 @@ WorkingCopyInfo ProjectService::saveWorkingCopyChanges(
             throw ProjectError(ProjectErrorKind::InvalidInput, "duplicate key in draft save batch");
     draft.candidateChanges = mergedCandidate(draft.candidateChanges, changes);
     draft.dirty = !draft.candidateChanges.empty();
+    draft.historyCheckpointRevisionId.reset();
+    draft.lastHistoryNavigationOperationId.reset();
+    draft.lastHistoryNavigationSourceGeneration.reset();
     ++draft.generation;
     DraftUpdate update;
     update.candidate = draft.candidateChanges;
@@ -2333,6 +2358,9 @@ WorkingCopyInfo ProjectService::saveWorkingCopyTransactions(
     draft.journalCount += events.size();
     draft.dirty = !draft.candidateChanges.empty();
     draft.lastSaveFingerprint = fingerprint;
+    draft.historyCheckpointRevisionId.reset();
+    draft.lastHistoryNavigationOperationId.reset();
+    draft.lastHistoryNavigationSourceGeneration.reset();
     ++draft.generation;
     DraftUpdate update;
     if (!changes.empty()) update.candidate = draft.candidateChanges;
@@ -2369,6 +2397,9 @@ void rebaseCommittedDraft(const std::filesystem::path& root, const PersistedLoca
     draft.journal.clear();
     draft.journalCount = 0;
     draft.lastSaveFingerprint.reset();
+    draft.historyCheckpointRevisionId.reset();
+    draft.lastHistoryNavigationOperationId.reset();
+    draft.lastHistoryNavigationSourceGeneration.reset();
     draft.dirty = false;
     ++draft.generation;
     DraftUpdate update;
@@ -2714,6 +2745,56 @@ BranchActionHistoryPage ProjectService::branchActionHistory(
     return page;
 }
 
+namespace {
+// Caller owns the draft mutex and the repository's per-project operation
+// mutex. Both preview and execution call this implementation, so navigation
+// cannot apply a stale plan that was valid before a concurrent Commit.
+HistoryCheckpointPlan buildHistoryCheckpointPlan(Repository& repository,
+        const WorkingCopyInfo& draft, const RevisionId& target) {
+    const std::optional<ProjectId> project = ProjectId::parse(draft.projectId);
+    const std::optional<BranchId> branch = BranchId::parse(draft.branchId);
+    if (!project || !branch)
+        throw ProjectError(ProjectErrorKind::InvalidInput,
+                           "history checkpoint requires UUIDv7 project and branch");
+    const std::optional<RevisionGraphHead> selected = translated<
+        std::optional<RevisionGraphHead>>([&]() {
+            return repository.branchById(*project, *branch);
+        });
+    if (!selected || !selected->revision || draft.baseRevision != selected->revision)
+        throw ProjectError(ProjectErrorKind::Conflict,
+                           "history draft is not based on the current branch HEAD");
+    translated<std::vector<RevisionGraphRevision>>([&]() {
+        return repository.history(*project, selected->name, 1, target);
+    });
+    std::set<Key> wanted;
+    if (draft.baseRevision != target) {
+        const std::vector<Difference> changed = translated<std::vector<Difference>>([&]() {
+            return repository.diffRevisions(*project, *draft.baseRevision,
+                                            target, workingCopyMaxChanges);
+        });
+        for (const Difference& item : changed) wanted.insert(item.key);
+    }
+    if (wanted.size() > workingCopyMaxChanges)
+        throw StorageError(StorageErrorKind::LimitExceeded,
+                           "history checkpoint exceeds draft overlay budget");
+    HistoryCheckpointPlan plan;
+    plan.draftId = draft.id;
+    plan.projectId = draft.projectId;
+    plan.branchId = draft.branchId;
+    plan.targetRevisionId = target.toString();
+    plan.expectedHead = selected->revision;
+    plan.expectedGeneration = draft.generation;
+    plan.candidateChanges.reserve(wanted.size());
+    for (const Key& key : wanted) {
+        const std::optional<ModelRecord> desired = translated<std::optional<ModelRecord>>([&]() {
+            return repository.getModelAtRevision(*project, target, key);
+        });
+        plan.candidateChanges.push_back(ModelChange{key, desired});
+    }
+    return plan;
+}
+} // namespace
+
 HistoryCheckpointPlan ProjectService::planHistoryCheckpoint(
         std::string_view draftId, const RevisionId& target,
         std::uint64_t expectedGeneration) {
@@ -2721,67 +2802,86 @@ HistoryCheckpointPlan ProjectService::planHistoryCheckpoint(
         throw ProjectError(ProjectErrorKind::InvalidInput,
                            "invalid history checkpoint draft UUIDv7");
     requirePrivateRepository("history checkpoint requires a private repository");
-    checkHealthy();
-    const WorkingCopyInfo header = loadDraft(this->root_, draftId, DraftLoad::Meta).info;
-    HistoryCheckpointPlan plan;
-    withRepository(header.projectId, [&](Repository& repository) {
-        const std::shared_ptr<std::mutex> lock = draftLock(draftId);
-        std::lock_guard<std::mutex> guard(*lock);
-        const WorkingCopyInfo draft = loadDraft(this->root_, draftId, DraftLoad::Candidate).info;
-        if (draft.projectId != header.projectId || draft.branchId != header.branchId ||
-            draft.generation != expectedGeneration)
-            throw ProjectError(ProjectErrorKind::Conflict,
-                               "history draft changed; request a fresh checkpoint plan");
+    const std::shared_ptr<std::mutex> lock = draftLock(draftId);
+    std::lock_guard<std::mutex> guard(*lock);
+    const WorkingCopyInfo draft = loadDraft(this->root_, draftId, DraftLoad::Candidate).info;
+    if (draft.generation != expectedGeneration)
+        throw ProjectError(ProjectErrorKind::Conflict,
+                           "history draft changed; request a fresh checkpoint plan");
+    HistoryCheckpointPlan result;
+    withRepository(draft.projectId, [&](Repository& repository) {
+        result = buildHistoryCheckpointPlan(repository, draft, target);
+    });
+    return result;
+}
+
+WorkingCopyInfo ProjectService::navigateHistoryCheckpoint(
+        std::string_view operationId, std::string_view draftId,
+        std::string_view sessionId, std::string_view fencingToken,
+        std::uint64_t expectedGeneration, const RevisionId& expectedHead,
+        const RevisionId& target) {
+    if (!UuidV7::parse(operationId) || !UuidV7::parse(draftId) ||
+        !UuidV7::parse(sessionId) || !UuidV7::parse(fencingToken))
+        throw ProjectError(ProjectErrorKind::InvalidInput,
+                           "invalid history navigation identity");
+    requirePrivateRepository("history navigation requires a private repository");
+    const std::shared_ptr<std::mutex> lock = draftLock(draftId);
+    std::lock_guard<std::mutex> guard(*lock);
+    StoredDraft stored = loadDraft(this->root_, draftId, DraftLoad::Candidate);
+    WorkingCopyInfo draft = stored.info;
+    if (!draft.leaseSessionId || *draft.leaseSessionId != sessionId ||
+        !draft.leaseToken || *draft.leaseToken != fencingToken ||
+        !workingCopyLeaseLive(draft))
+        throw ProjectError(ProjectErrorKind::Conflict,
+                           "history navigation requires the current draft lease");
+    WorkingCopyInfo result;
+    withRepository(draft.projectId, [&](Repository& repository) {
+        // Recheck current immutable HEAD even on exact retry: an unrelated
+        // writer's Commit must not make an old cursor appear current.
         const std::optional<ProjectId> project = ProjectId::parse(draft.projectId);
         const std::optional<BranchId> branch = BranchId::parse(draft.branchId);
-        if (!project || !branch)
-            throw ProjectError(ProjectErrorKind::InvalidInput,
-                               "history checkpoint requires UUIDv7 project and branch");
         const std::optional<RevisionGraphHead> selected = translated<
             std::optional<RevisionGraphHead>>([&]() {
                 return repository.branchById(*project, *branch);
             });
-        if (!selected || !selected->revision ||
-            draft.baseRevision != selected->revision)
+        if (!selected || selected->revision != expectedHead ||
+            draft.baseRevision != expectedHead)
             throw ProjectError(ProjectErrorKind::Conflict,
-                               "history draft is not based on the current branch HEAD");
-        // `after` validation traverses actual first-parent ancestry and
-        // refuses any UUID outside the selected branch. It also permits the
-        // current HEAD and checkpoint-only revisions without fabricating an
-        // edit history between them.
-        translated<std::vector<RevisionGraphRevision>>([&]() {
-            return repository.history(*project, selected->name, 1, target);
-        });
-        std::set<Key> wanted;
-        if (draft.baseRevision != target) {
-            const std::vector<Difference> changed = translated<std::vector<Difference>>([&]() {
-                return repository.diffRevisions(*project, *draft.baseRevision,
-                                                target, workingCopyMaxChanges);
-            });
-            for (const Difference& item : changed) wanted.insert(item.key);
+                               "branch HEAD changed before history navigation");
+        if (draft.lastHistoryNavigationOperationId == operationId) {
+            if (draft.historyCheckpointRevisionId != target.toString() ||
+                draft.lastHistoryNavigationSourceGeneration != expectedGeneration ||
+                expectedGeneration == std::numeric_limits<std::uint64_t>::max() ||
+                draft.generation != expectedGeneration + 1)
+                throw ProjectError(ProjectErrorKind::Conflict,
+                                   "history navigation operation reused with different arguments");
+            result = draft; // Exact lost acknowledgement: no second update.
+            return;
         }
-        // Existing local edits may reference keys not changed between the
-        // two immutable checkpoints. They disappear from a replacement
-        // overlay; a future navigator must NOT merge this plan into the old
-        // overlay, which would preserve unrelated local changes by mistake.
-        if (wanted.size() > workingCopyMaxChanges)
-            throw StorageError(StorageErrorKind::LimitExceeded,
-                               "history checkpoint exceeds draft overlay budget");
-        plan.draftId = draft.id;
-        plan.projectId = draft.projectId;
-        plan.branchId = draft.branchId;
-        plan.targetRevisionId = target.toString();
-        plan.expectedHead = selected->revision;
-        plan.expectedGeneration = draft.generation;
-        plan.candidateChanges.reserve(wanted.size());
-        for (const Key& key : wanted) {
-            const std::optional<ModelRecord> desired = translated<std::optional<ModelRecord>>([&]() {
-                return repository.getModelAtRevision(*project, target, key);
-            });
-            plan.candidateChanges.push_back(ModelChange{key, desired});
-        }
+        if (draft.generation != expectedGeneration ||
+            draft.generation == std::numeric_limits<std::uint64_t>::max())
+            throw ProjectError(ProjectErrorKind::Conflict,
+                               "history navigation draft generation changed");
+        if (draft.journalCount != 0)
+            throw ProjectError(ProjectErrorKind::Conflict,
+                               "checkpoint navigation requires an empty draft MODEL journal");
+        const HistoryCheckpointPlan plan = buildHistoryCheckpointPlan(repository, draft, target);
+        draft.candidateChanges = plan.candidateChanges;
+        draft.dirty = !draft.candidateChanges.empty();
+        draft.lastSaveFingerprint.reset();
+        draft.historyCheckpointRevisionId = target.toString();
+        draft.lastHistoryNavigationOperationId = std::string(operationId);
+        draft.lastHistoryNavigationSourceGeneration = expectedGeneration;
+        ++draft.generation;
+        DraftUpdate update;
+        update.candidate = draft.candidateChanges; // COMPLETE replacement, not merge
+        prepareDraftUpdate(stored, update);
+        try { updateDraft(workingCopyDirectory(this->root_) / draft.id,
+                          stored, draft, update); }
+        catch (...) { markUncertain(); throw; }
+        result = draft;
     });
-    return plan;
+    return result;
 }
 
 void ProjectService::releaseWorkingCopyLease(

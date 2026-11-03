@@ -84,6 +84,13 @@ struct WorkingCopyInfo {
     std::vector<WorkingCopyEvent> journal;
     std::uint64_t journalCount = 0;
     std::optional<std::string> lastSaveFingerprint; // Last journalled batch for idempotency.
+    // HIST-03b: exact snapshot selected in this private draft. These fields
+    // are part of the same atomic meta publication as candidateChanges.
+    // An ordinary subsequent edit/Commit clears them: this is not yet the
+    // permanent cross-Commit action cursor or an Undo/Redo implementation.
+    std::optional<std::string> historyCheckpointRevisionId;
+    std::optional<std::string> lastHistoryNavigationOperationId;
+    std::optional<std::uint64_t> lastHistoryNavigationSourceGeneration;
     std::optional<std::string> leaseSessionId;
     std::optional<std::string> leaseToken;
     std::uint64_t leaseExpiresAtMs = 0;
@@ -423,6 +430,18 @@ public:
     HistoryCheckpointPlan planHistoryCheckpoint(
         std::string_view draftId, const RevisionId& target,
         std::uint64_t expectedGeneration);
+    // HIST-03b: execute a checkpoint selection as ONE atomic replacement of
+    // candidate and durable cursor fields, without touching immutable HEAD.
+    // The writer pins its lease, generation and expected committed HEAD.
+    // Retry an uncertain result with exactly the SAME navigation operation ID
+    // and parameters. For safety this first slice refuses an active MODEL
+    // event journal rather than silently dropping or misattributing actions.
+    // It does not yet implement stepwise Undo/Redo or action-record archival.
+    WorkingCopyInfo navigateHistoryCheckpoint(
+        std::string_view operationId, std::string_view draftId,
+        std::string_view sessionId, std::string_view fencingToken,
+        std::uint64_t expectedGeneration, const RevisionId& expectedHead,
+        const RevisionId& target);
     void releaseWorkingCopyLease(
         std::string_view draftId, std::string_view sessionId,
         std::string_view fencingToken);

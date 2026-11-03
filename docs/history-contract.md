@@ -44,12 +44,25 @@ returns the exact candidate overlay needed to represent an immutable
 first-parent checkpoint *relative to the draft's currently committed HEAD*.
 It rejects stale HEADs and draft generations, and cannot be used as an
 unfenced edit. Its output is a **full replacement overlay**, not an
-incremental patch suitable for `saveWorkingCopyChanges()`. This API does not
+incremental patch suitable for `saveWorkingCopyChanges()`. This **planning** API does not
 perform Undo/Redo, write cursor state, or synthesize missing intermediate
 actions. Pre-first-Commit unborn states and individual action targets are
 separate future reconstruction paths. The eventual navigation mutation must
 recompute or validate the plan and atomically persist both candidate and
 logical cursor under the same writer/HEAD checks.
+
+## Native exact-checkpoint selection (HIST-03b)
+
+`ProjectService::navigateHistoryCheckpoint()` applies the HIST-03a
+replacement overlay in one atomic private-draft metadata publication, with
+an exact checkpoint marker, operation UUIDv7, and original generation. It
+pins the current lease and branch HEAD and is idempotent for identical
+retries across a restart. It never edits any immutable revision. This initial
+native facility accepts only a draft with no MODEL action journal, because
+no permanent record for the navigation event has yet been defined. A later
+normal Save or Commit clears the checkpoint marker. This is **not** a full
+history cursor with redo eligibility or cross-Commit step navigation; it is
+not yet exposed as an HTTP command or connected to the GUI History dock.
 
 ## Retention, restart and UI
 

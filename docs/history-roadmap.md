@@ -85,6 +85,25 @@ same locks and publish the replacement overlay together with history cursor
 and MODEL event journal data; an ordinary incremental Save is **not** a
 substitute for that atomic operation.
 
+**HIST-03b native checkpoint selection (implemented, acceptance limited):**
+`ProjectService::navigateHistoryCheckpoint(operationId, draftId, sessionId,
+fencingToken, expectedGeneration, expectedHead, target)` locks the private
+draft and project, validates the lease and immutable first-parent HEAD, then
+recomputes the HIST-03a plan. It publishes the replacement candidate and
+three cursor/operation fields in **one** atomic `AOWIS-WORKING-COPY-5` meta
+update. It is idempotent by UUIDv7 operation ID (including after restart),
+rejects stale lease, generation and HEAD, and leaves immutable revisions
+untouched. Normal Save or Commit clears the exact-checkpoint cursor.
+
+This is deliberately **not general Undo/Redo**. Active MODEL journals are
+rejected instead of silently dropping/rewriting event provenance, and no
+synthetic navigation MODEL frames are inserted. Individual action positions,
+long-lived redo eligibility, checkpoint navigation audit archival, HTTP
+execution, merge-origin navigation and GUI controls still require HDB-03.
+The operation must not be wired to Undo/Redo until those contracts are
+implemented and tested. The working-copy draft format changed from v4 to v5
+without migration because AOWIS is pre-release.
+
 ### HDB-03 — Durable Undo/Redo operation and concurrency
 
 Generate new canonical inverse or forward events with fresh operation IDs,

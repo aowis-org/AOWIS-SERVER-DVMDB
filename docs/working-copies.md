@@ -71,6 +71,21 @@ Only one session writes a draft at a time:
 Leases and tokens prevent accidental concurrent overwrites. They are **not**
 authentication: anyone who can reach the service can read the session IDs.
 
+## Selecting a committed history checkpoint (native API)
+
+A private draft with an empty MODEL event journal can select an earlier
+checkpoint on its current branch's first-parent ancestry using
+`ProjectService::navigateHistoryCheckpoint`. The caller supplies a new
+UUIDv7 operation ID, the live session/fencing token, exact draft generation,
+current immutable HEAD and target revision. The server atomically replaces
+the **entire** draft overlay and saves a checkpoint cursor in draft metadata.
+Retrying the same request after a lost response does not apply it twice;
+a different operation or stale generation fails. The branch HEAD and
+immutable revision content never change. A subsequent normal Save or Commit
+clears the exact-checkpoint cursor. This is not yet available over HTTP, and
+the History dock remains read-only until permanent action-level Undo/Redo
+is implemented; checkpoint navigation does not manufacture MODEL events.
+
 ## Saving
 
 `save` merges up to 128 typed model changes (`uuid` + `delete: true`, or

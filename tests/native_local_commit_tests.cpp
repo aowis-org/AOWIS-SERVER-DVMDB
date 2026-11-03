@@ -181,6 +181,134 @@ void testHistoryCheckpointPlan() {
     }
 }
 
+// HIST-03b: selecting an immutable checkpoint atomically replaces the private
+// overlay and the persistent cursor. It never changes committed HEAD, and
+// replay of an uncertain request cannot advance the generation a second time.
+void testAtomicHistoryCheckpointNavigation() {
+    TempRoot root;
+    const std::string session = UuidV7::generate().toString();
+    const std::string operation = UuidV7::generate().toString();
+    const std::string backOperation = UuidV7::generate().toString();
+    std::string projectId;
+    std::string draftId;
+    std::string firstId;
+    std::string latestId;
+    std::string originalLease;
+    ModelChange initial = changeWithValue(10);
+    ModelChange replaced = changeWithValue(20);
+    ModelChange added = changeWithValue(50);
+    added.key[15] = 22;
+    ModelChange unrelated = changeWithValue(99);
+    unrelated.key[15] = 23;
+    {
+        ProjectService service(root.path);
+        service.configureRepositoryRole(RepositoryRole::Private);
+        projectId = service.createUnbornProject("HIST-03b atomic checkpoints").id;
+        const RevisionId first = service.commitModelAtExpectedHead(
+            projectId, "main", {initial}, commitMetadata(), std::nullopt);
+        const RevisionId latest = service.commitModelAtExpectedHead(
+            projectId, "main", {replaced, added}, commitMetadata(), first);
+        firstId = first.toString();
+        latestId = latest.toString();
+        draftId = service.createWorkingCopy(projectId, "main", latest, session).id;
+        originalLease = service.acquireWorkingCopyLease(draftId, session, 120).token;
+        require(service.saveWorkingCopyChanges(draftId, session, originalLease, 0,
+                    {unrelated}).generation == 1, "HIST-03b fixture Save failed");
+        const WorkingCopyInfo selected = service.navigateHistoryCheckpoint(
+            operation, draftId, session, originalLease, 1, latest, first);
+        require(selected.generation == 2 && selected.dirty &&
+                selected.candidateChanges.size() == 2 &&
+                selected.historyCheckpointRevisionId == firstId &&
+                selected.lastHistoryNavigationOperationId == operation &&
+                selected.lastHistoryNavigationSourceGeneration == 1 &&
+                selected.journalCount == 0 &&
+                service.optionalHead(projectId, "main") == latest,
+                "HIST-03b checkpoint selection was not a complete atomic overlay replacement");
+        bool retainedUnrelated = false;
+        for (const ModelChange& item : selected.candidateChanges)
+            if (item.key == unrelated.key) retainedUnrelated = true;
+        require(!retainedUnrelated,
+                "HIST-03b navigation merged an unrelated draft edit into the target checkpoint");
+        const WorkingCopyInfo replayed = service.navigateHistoryCheckpoint(
+            operation, draftId, session, originalLease, 1, latest, first);
+        require(replayed.generation == 2 && replayed.candidateChanges.size() == 2,
+                "HIST-03b same-identity retry executed navigation twice");
+        expectConflict([&] { (void)service.navigateHistoryCheckpoint(
+            operation, draftId, session, originalLease, 1, latest, latest); });
+        expectConflict([&] { (void)service.navigateHistoryCheckpoint(
+            backOperation, draftId, session, originalLease, 1, latest, latest); });
+        expectConflict([&] { (void)service.navigateHistoryCheckpoint(
+            UuidV7::generate().toString(), draftId, session, originalLease, 2,
+            first, latest); });
+        const WorkingCopyInfo restored = service.navigateHistoryCheckpoint(
+            backOperation, draftId, session, originalLease, 2, latest, latest);
+        require(restored.generation == 3 && !restored.dirty &&
+                restored.candidateChanges.empty() &&
+                restored.historyCheckpointRevisionId == latestId &&
+                service.optionalHead(projectId, "main") == latest,
+                "HIST-03b forward checkpoint did not restore current HEAD content");
+    }
+    {
+        ProjectService reopened(root.path);
+        const WorkingCopyInfo persisted = reopened.workingCopy(draftId);
+        require(persisted.generation == 3 &&
+                persisted.historyCheckpointRevisionId == latestId &&
+                persisted.lastHistoryNavigationOperationId == backOperation &&
+                persisted.lastHistoryNavigationSourceGeneration == 2,
+                "HIST-03b navigation cursor was not durable across restart");
+        const RevisionId latest = *RevisionId::parse(latestId);
+        const RevisionId first = *RevisionId::parse(firstId);
+        const WorkingCopyInfo retried = reopened.navigateHistoryCheckpoint(
+            backOperation, draftId, session, originalLease, 2, latest, latest);
+        require(retried.generation == 3,
+                "HIST-03b lost-acknowledgement replay after restart advanced generation");
+        const std::string rotatedToken = reopened.acquireWorkingCopyLease(
+            draftId, session, 120).token;
+        expectConflict([&] { (void)reopened.navigateHistoryCheckpoint(
+            UuidV7::generate().toString(), draftId, session, originalLease,
+            3, latest, first); });
+        const WorkingCopyInfo older = reopened.navigateHistoryCheckpoint(
+            UuidV7::generate().toString(), draftId, session, rotatedToken,
+            3, latest, first);
+        require(older.generation == 4 && older.historyCheckpointRevisionId == firstId,
+                "HIST-03b navigation failed after lease rotation");
+        require(reopened.saveWorkingCopyChanges(draftId, session, rotatedToken,
+                    4, {unrelated}).generation == 5,
+                "HIST-03b post-navigation normal Save failed");
+        const WorkingCopyInfo edited = reopened.workingCopy(draftId);
+        require(!edited.historyCheckpointRevisionId &&
+                !edited.lastHistoryNavigationOperationId &&
+                !edited.lastHistoryNavigationSourceGeneration,
+                "HIST-03b normal edit left a stale exact-checkpoint cursor");
+        expectConflict([&] { (void)reopened.navigateHistoryCheckpoint(
+            backOperation, draftId, session, rotatedToken, 2, latest, latest); });
+        const std::string journalDraft = reopened.createWorkingCopy(
+            projectId, "main", latest, UuidV7::generate().toString()).id;
+        const WorkingCopyInfo journalInfo = reopened.workingCopy(journalDraft);
+        const std::string writer = journalInfo.sessionId;
+        const std::string token = reopened.acquireWorkingCopyLease(journalDraft, writer, 120).token;
+        const ModelChange changed = changeWithValue(74);
+        const aowis::dvmdb::Bytes event = aowis::dvmdb::test::editEvent(
+            UuidV7::generate(), changed.key, {20}, {74});
+        require(reopened.saveWorkingCopyTransactions(journalDraft, writer, token, 0,
+                    {changed}, {event}).journalCount == 1,
+                "HIST-03b active-journal fixture Save failed");
+        expectConflict([&] { (void)reopened.navigateHistoryCheckpoint(
+            UuidV7::generate().toString(), journalDraft, writer, token, 1,
+            latest, first); });
+        require(reopened.workingCopy(journalDraft).journal.size() == 1 &&
+                reopened.workingCopy(journalDraft).generation == 1,
+                "HIST-03b checkpoint navigation lost or reinterpreted active MODEL events");
+        const RevisionId moved = reopened.commitModelAtExpectedHead(
+            projectId, "main", {changeWithValue(33)}, commitMetadata(), latest);
+        expectConflict([&] { (void)reopened.navigateHistoryCheckpoint(
+            UuidV7::generate().toString(), draftId, session, rotatedToken,
+            5, latest, first); });
+        require(reopened.optionalHead(projectId, "main") == moved,
+                "HIST-03b rejected stale HEAD navigation mutated an immutable revision");
+    }
+}
+
 void testCommittedActionHistory() {
     TempRoot root;
     const std::string session = UuidV7::generate().toString();
@@ -1264,6 +1392,7 @@ void testCommitRecordsAuthorMessageAndReservedTime() {
 int main() {
     try {
         testHistoryCheckpointPlan();
+        testAtomicHistoryCheckpointNavigation();
         testCommittedActionHistory();
         testBranchDraftHistoryPaging();
         testLocalCommitRecovery();

@@ -55,7 +55,11 @@ branch, committed revisions and source events; support paged reads, selective
 checkpoint reconstruction, durable cursor/redo eligibility, crash-safe
 inverse/reapply events and explicit merge histories. A history navigation
 must never edit old revision records or move a published branch HEAD.
-See [history-roadmap.md](history-roadmap.md) for the entire backend contract
+Native checkpoint preview and atomic exact-checkpoint selection are available
+in `ProjectService`, with one meta publication and idempotent navigation
+identity. The current MODEL journal must be empty; there is no HTTP action
+cursor, per-step inversion, or cross-Commit Undo/Redo yet. These remain
+future work. See [history-roadmap.md](history-roadmap.md) for the backend contract
 and [the GUI History roadmap](../../AOWIS-SERVER-GUI/docs/history-roadmap.md)
 for the left dock and interaction semantics.
 
