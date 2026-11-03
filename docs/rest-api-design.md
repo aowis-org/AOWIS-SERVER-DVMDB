@@ -50,6 +50,23 @@ All routes are under `/dvmdb/v1`. There is no authentication.
   revision. Hydraulic reads accept `?revision=` (which must be the branch HEAD
   or one of its ancestors) so several calls see the same snapshot.
 
+### INT-01: repository-pinned metadata writes
+
+The GUI verifies `GET /repository/tracking` (repository UUIDv7, role and MODEL
+fingerprint) before project creation, project renaming, branch creation,
+identity/name-based branch metadata updates and revision display-message
+updates. Its mutation then includes the HTTP header
+`X-AOWIS-Expected-Repository-Id: <selected UUIDv7>`.
+
+For those six metadata routes, the server checks the supplied expected UUID
+immediately before native mutation; a different repository returns **409
+Conflict** (`repository_mismatch`, `repository identity changed`) without writing. A missing header
+currently means the client has not requested this repository pin. This is a
+**correctness/CAS guard, not authentication**. The preflight catches codec and
+role mismatches, while the server-side guard closes the endpoint-swap window.
+A lost metadata-write acknowledgement still requires authoritative refresh
+before a new write; INT-02 handles durable *Commit* intent separately.
+
 ## Resources
 
 | Area | Routes | Notes |

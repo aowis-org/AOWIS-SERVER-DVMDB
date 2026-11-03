@@ -2803,6 +2803,58 @@ void exerciseCommitMetadataHttp() {
           "merge revision lost its author or default message");
 }
 
+void exercisePinnedRepositoryMetadataHttp() {
+    namespace native = aowis::dvmdb;
+    TemporaryRoot temp;
+    native::ProjectService service(temp.root());
+    TestServer server(service, native::BundleLimits{4ULL * 1024ULL * 1024ULL, 10000, 1024ULL * 1024ULL});
+    Client reader(server.port());
+    httplib::Client client("127.0.0.1", server.port());
+    client.set_read_timeout(std::chrono::seconds(5));
+    const std::string correct = service.repositoryId();
+    const std::string wrong = "018f84c0-0000-7000-8000-0000000000af";
+    check(correct != wrong, "test repository UUID unexpectedly equals wrong UUID");
+    const httplib::Headers wrongHeaders{{"X-AOWIS-Expected-Repository-Id", wrong}};
+    const httplib::Headers correctHeaders{{"X-AOWIS-Expected-Repository-Id", correct}};
+    const QJsonObject projectBody{{"name", "Pinned"}, {"unborn", true}};
+    const std::string projectJson = QJsonDocument(projectBody).toJson(QJsonDocument::Compact).toStdString();
+    const httplib::Result refused = client.Post("/dvmdb/v1/projects", wrongHeaders,
+                                                projectJson, "application/json");
+    check(refused && refused->status == 409, "foreign repository accepted pinned project creation");
+    check(QJsonDocument::fromJson(QByteArray::fromStdString(refused->body)).object()
+              .value("error").toObject().value("code").toString() == "repository_mismatch",
+          "pinned repository mismatch did not return a distinct error code");
+    check(reader.call("GET", "/dvmdb/v1/projects").json.value("projects").toArray().isEmpty(),
+          "foreign pinned project write mutated the catalogue");
+    const httplib::Result created = client.Post("/dvmdb/v1/projects", correctHeaders,
+                                                projectJson, "application/json");
+    check(created && created->status == 201, "correctly pinned project create failed");
+    const QJsonObject project = QJsonDocument::fromJson(QByteArray::fromStdString(created->body)).object();
+    const QString projectId = project.value("id").toString();
+    check(!projectId.isEmpty(), "pinned project creation lost its identity");
+    const std::string path = "/dvmdb/v1/projects/" + projectId.toStdString();
+    const std::string renameJson = QJsonDocument(QJsonObject{{"expectedName", "Pinned"},
+        {"name", "Incorrect"}}).toJson(QJsonDocument::Compact).toStdString();
+    const httplib::Result renameRefused = client.Patch(path, wrongHeaders, renameJson, "application/json");
+    check(renameRefused && renameRefused->status == 409,
+          "foreign repository accepted pinned project rename");
+    check(reader.call("GET", QString::fromStdString(path)).json.value("name").toString() == "Pinned",
+          "foreign pinned rename changed project metadata");
+    const httplib::Result renameOk = client.Patch(path, correctHeaders, renameJson, "application/json");
+    check(renameOk && renameOk->status == 200, "correctly pinned rename failed");
+    const std::string branchBody = QJsonDocument(QJsonObject{{"name", "experiment"},
+        {"unborn", true}}).toJson(QJsonDocument::Compact).toStdString();
+    const httplib::Result branchRefused = client.Post(path + "/branches", wrongHeaders,
+        branchBody, "application/json");
+    check(branchRefused && branchRefused->status == 409,
+          "foreign repository accepted pinned branch creation");
+    check(reader.call("GET", QString::fromStdString(path + "/branches")).json
+        .value("branches").toArray().size() == 1, "foreign pinned branch write changed branch set");
+    const httplib::Result branchOk = client.Post(path + "/branches", correctHeaders,
+        branchBody, "application/json");
+    check(branchOk && branchOk->status == 201, "correctly pinned branch create failed");
+}
+
 int main(int argc, char** argv) {
     QCoreApplication app(argc, argv);
     try {
@@ -2810,6 +2862,7 @@ int main(int argc, char** argv) {
         // Exercise the canonical UUIDv7 HTTP routes; every revision identity
         // on these routes is a UUIDv7.
         exerciseTransferStagingBudget();
+        exercisePinnedRepositoryMetadataHttp();
         exercise();
         exerciseConcurrency();
         exerciseRevisionGraphHttp();

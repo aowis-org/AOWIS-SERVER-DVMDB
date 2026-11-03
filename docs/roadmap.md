@@ -159,6 +159,13 @@ remains open** and is assigned to INT-04 and the later transport milestones.
 * **Evidence:** changed endpoint with colliding project/branch UUIDs,
   disappearing source, wrong role/fingerprint, dropped PATCH acknowledgement.
 
+**INT-01 implementation checkpoint:** DVMDB HTTP now honors the
+`X-AOWIS-Expected-Repository-Id` guard on six metadata mutation routes;
+the GUI writer now preflights repository UUID/role/MODEL fingerprint and
+always sends the pinned header. Regression coverage checks wrong targets and
+client refusal before mutation. Final compiled and cross-deployment acceptance
+remains open.
+
 ### INT-02 — Recover Commit intent across client death
 
 * DVMDB's native/HTTP local Commit ledger and status lookup already exist;

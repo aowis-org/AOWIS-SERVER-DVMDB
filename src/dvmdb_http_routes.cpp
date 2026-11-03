@@ -190,6 +190,26 @@ void requireInput(bool valid, const char* message) {
     if (!valid) throw ProjectError(ProjectErrorKind::InvalidInput, message);
 }
 
+
+// INT-01: a client that pins its selected repository must never mutate an
+// endpoint which has changed ownership since discovery. The comparison is
+// performed by the HTTP server immediately before entering the native write,
+// not just in a client-side identity preflight. Existing native/HTTP callers
+// which do not supply the header are not implicitly treated as pinned.
+std::optional<Reply> repositoryPinFailure(const httplib::Request& request,
+                                          const ProjectService& service) {
+    constexpr const char* header = "X-AOWIS-Expected-Repository-Id";
+    if (!request.has_header(header)) return std::nullopt;
+    requireInput(request.get_header_value_count(header) == 1,
+                 "expected repository header must appear exactly once");
+    const std::string expected = request.get_header_value(header);
+    requireInput(!expected.empty(), "expected repository header must not be empty");
+    if (expected != service.repositoryId())
+        return errorReply(409, QStringLiteral("repository_mismatch"),
+                          QStringLiteral("repository identity changed"));
+    return std::nullopt;
+}
+
 std::string pathParam(const httplib::Request& request, const char* name) {
     const std::unordered_map<std::string, std::string>::const_iterator found =
         request.path_params.find(name);
@@ -1993,6 +2013,8 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
     server.Post(routeProjects, [&service](const httplib::Request& request,
                                           httplib::Response& response) {
         guarded(response, [&]() {
+            if (const std::optional<Reply> pin = repositoryPinFailure(request, service))
+                return *pin;
             const QJsonObject object = parseBody(request, maxJsonSmallBytes);
             requireKeys(object, {"name", "unborn", "id", "author", "message"});
             const QJsonValue unborn = object.value("unborn");
@@ -2050,6 +2072,8 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
     server.Patch("/dvmdb/v1/projects/:id", [&service](const httplib::Request& request,
                                                     httplib::Response& response) {
         guarded(response, [&]() {
+            if (const std::optional<Reply> pin = repositoryPinFailure(request, service))
+                return *pin;
             const QJsonObject object = parseBody(request, maxJsonSmallBytes);
             requireKeys(object, {"name", "expectedName"});
             return Reply{200, projectJson(service.renameProject(pathParam(request, "id"),
@@ -2070,6 +2094,8 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
     server.Post(routeBranches,
                 [&service](const httplib::Request& request, httplib::Response& response) {
         guarded(response, [&]() {
+            if (const std::optional<Reply> pin = repositoryPinFailure(request, service))
+                return *pin;
             const QJsonObject object = parseBody(request, maxJsonSmallBytes);
             requireKeys(object, {"name", "fromBranchId", "revision", "id", "unborn", "description", "tags"});
             const std::string project = pathParam(request, "id");
@@ -2125,6 +2151,8 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
     server.Patch("/dvmdb/v1/projects/:id/branches/:branch",
                  [&service](const httplib::Request& request, httplib::Response& response) {
         guarded(response, [&]() {
+            if (const std::optional<Reply> pin = repositoryPinFailure(request, service))
+                return *pin;
             const QJsonObject object = parseBody(request, maxJsonSmallBytes);
             requireKeys(object, {"name", "expectedHead"});
             const std::string projectId = pathParam(request, "id");
@@ -2144,6 +2172,8 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
     server.Patch("/dvmdb/v1/projects/:id/branch-ids/:branchId",
                  [&service](const httplib::Request& request, httplib::Response& response) {
         guarded(response, [&]() {
+            if (const std::optional<Reply> pin = repositoryPinFailure(request, service))
+                return *pin;
             const QJsonObject object = parseBody(request, maxJsonSmallBytes);
             requireKeys(object, {"expectedName", "name", "description", "tags"});
             const std::string project = pathParam(request, "id");
@@ -2230,6 +2260,8 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
     server.Patch("/dvmdb/v1/projects/:id/revisions/:revision/message",
                  [&service](const httplib::Request& request, httplib::Response& response) {
         guarded(response, [&]() {
+            if (const std::optional<Reply> pin = repositoryPinFailure(request, service))
+                return *pin;
             const QJsonObject object = parseBody(request, maxJsonMergeBytes);
             requireKeys(object, {"expectedMessage", "message"});
             const std::string project = pathParam(request, "id");
