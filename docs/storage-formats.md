@@ -276,13 +276,13 @@ framing: `AOWE` `0x01` (5), payload length (u32), payload, SHA-256 of the
 payload (32). The payload starts with the transaction UUIDv7, which is the
 event's identity.
 
-## Local Commit ledger (`AOWIS-LOCAL-COMMIT-2`)
+## Local Commit ledger (`AOWIS-LOCAL-COMMIT-3`)
 
 `local-commits/<operation-uuidv7>`, one file per Commit operation, kept
 permanently:
 
 ```text
-AOWIS-LOCAL-COMMIT-2
+AOWIS-LOCAL-COMMIT-3
 repository\t<repository-uuidv7>
 project\t<project-uuidv7>
 branch\t<branch-uuidv7>
@@ -300,8 +300,19 @@ state\t<pending|succeeded|rejected>
 rejection\t<conflict|invalid-input|not-found|->
 changes\t<count>
 change\t<entity key, 32 hex>\t<AOMD record hex|->
+actions\t<count of archived MODEL event frames>
+action-chain\t<SHA-256 chain digest over the archived frames>
+action\t<event-uuidv7>\t<full AO WE MODEL frame as lowercase hex>
 ```
 
-The `pending` record (with the frozen candidate, the reserved revision UUID and
-commit time, and the author and message) is fsynced before any revision object
-is written; the outcome replaces it atomically. Behaviour: [working copies](working-copies.md#local-commit).
+The `pending` record (with the frozen candidate, the reserved revision UUID,
+commit time, author, message **and all acknowledged MODEL event frames**) is
+fsynced before any revision object is written; the outcome replaces it
+atomically. Each frame has intrinsic SHA-256 integrity, the chain authenticates
+frame order, and Commit retry/recovery retains the same exact bytes.
+A changes-only draft may produce an empty archive; that means *no individual
+actions recorded*, not permission to fabricate Undo steps. The draft's bounded
+journal is cleared on successful rebase, whereas the Commit ledger remains.
+Read currently via `ProjectService::localCommitActionHistory(operationId)`;
+paginated branch timelines and GUI Undo/Redo are future work.
+Behaviour: [working copies](working-copies.md#local-commit).

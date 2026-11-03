@@ -1,10 +1,16 @@
 # Durable action history across Commit boundaries — DVMDB roadmap
 
-**Not implemented.** DVMDB currently has immutable revisions with graph
-history and a bounded journal of MODEL events per active draft. That is
-**not** a complete, navigable Undo/Redo history. In particular,
-`rebaseCommittedDraft()` clears the working-copy event journal after a
-successful local Commit. For the intended user-facing left dock, see the
+**HDB-00 contract specified; HDB-01 action archive first slice implemented.**
+See [history-contract.md](history-contract.md) for authoritative identities,
+cross-Commit cursor semantics, durability, future wire endpoints and
+acceptance gates. DVMDB currently has immutable revisions with graph
+history and a bounded journal of MODEL events per active draft. The HIST-02
+local Commit ledger now **archives acknowledged MODEL frames before immutable
+Commit publication** and retains them after draft rebase. That is still
+**not** a navigable Undo/Redo history: there is no branch-timeline index,
+server-owned cursor, navigation command, or paged HTTP history API.
+See [commit action archive](commit-action-archive.md) for the implemented
+contract and its current limits. For the intended user-facing left dock, see the
 [GUI History roadmap](../../AOWIS-SERVER-GUI/docs/history-roadmap.md).
 
 ## Desired externally visible semantics
@@ -41,17 +47,24 @@ lost. A future Commit of that model is a new successor of the branch's
 
 ## Required implementation
 
-### HDB-00 — Versioned action-history contract
+### HDB-00 — Versioned action-history contract (specified)
 
-Define a stable action ID, origin transaction ID, grouping ID, branch/draft
-context, accepted generation and revision checkpoint association. Distinguish
-committed immutable snapshots, accepted draft events and inverse/redo events.
-An action group must include all affected MODEL entities and root metadata.
-Choose how to represent actions that cross an immutable revision, the retained
-redo branch after divergence and partial history with missing old events.
-This is **not** the same as making the revision DAG linear.
+The [History contract](history-contract.md) defines history scope, stable
+UUIDv7 action/group and mutation IDs, retained MODEL v1 frames, audit versus
+logical cursor, persisted checkpoint records, first-parent branch narrative,
+snapshot-only gaps, cross-Commit safety, and a versioned proposed transport.
+This is **not** a published or implemented history API. Subsequent stages
+must implement these contracts and verify them with real storage tests.
 
-### HDB-01 — Persistent, indexed event archive and Commit marker
+### HDB-01 — Permanent archive implemented; indexing and pagination open
+
+The **first slice** is complete: `AOWIS-LOCAL-COMMIT-3` freezes accepted MODEL
+frames in the fsynced Commit intent before any immutable revision is
+published, verifies frame and chained digests, and exposes an operation-ID
+read API after success. Native restart, retry, pending-outcome recovery and
+corruption tests exercise this archive. The stable revision UUID is stored in
+that same record. Branch/revision indexing, paged retrieval, non-local
+publication checkpoints and history-specific retention are not yet built.
 
 Persist accepted action frames and related metadata **beyond** draft rebase
 without mutating the immutable revision format unnecessarily. Bind Commit
@@ -97,9 +110,9 @@ revision hashes/parents must match expected results after every restart.
 
 ## Delivery and acceptance
 
-The GUI may add an initial left dock showing *real* revision markers and
-status before HDB-00..03 are complete, but must keep Undo/Redo/jump disabled
-until authoritative history APIs exist. Complete user-facing acceptance
-requires real external HTTP and embedded Standalone sessions. No claims of
-working cross-Commit Undo should be made on the basis of the present draft
-journal or the generic reversible MODEL codec alone.
+The GUI already has a read-only left History dock showing real first-parent
+revision markers and available draft events. It **must keep** Undo/Redo/jump
+disabled until HDB-01..03 and the GUI history controller exist. Complete
+user-facing acceptance requires real external HTTP and embedded Standalone
+sessions. No claims of working cross-Commit Undo should be made on the basis
+of the present draft journal or generic reversible MODEL codec alone.

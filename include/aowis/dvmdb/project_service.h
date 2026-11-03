@@ -124,6 +124,16 @@ struct LocalCommitInfo {
     std::string rejection;
 };
 
+// HIST-02: immutable action frames archived by the local Commit operation.
+// The source draft journal is still cleared when the Commit succeeds. A
+// successful Commit may have no actions if it used the older changes-only
+// Save path; callers must show a checkpoint, not fabricate edit steps.
+struct LocalCommitActionHistory {
+    LocalCommitInfo commit;
+    std::uint64_t committedAtMs = 0;
+    std::vector<WorkingCopyEvent> actions;
+};
+
 struct WorkingCopyLease {
     std::string token;                // UUIDv7, changes on every acquisition
     std::uint64_t expiresAtMs = 0;   // UTC epoch milliseconds
@@ -334,6 +344,11 @@ public:
     // Durable status query. A pending record is reconciled against committed
     // ancestry before returning, including after a process restart.
     LocalCommitInfo localCommitStatus(std::string_view operationId);
+    // Read exactly the accepted MODEL frames captured in the durable Commit
+    // intent. Requires a succeeded operation and never changes HEAD or draft.
+    // Future timeline APIs will paginate by branch/revision/action; this read
+    // is indexed by the stable Commit operation UUIDv7 only.
+    LocalCommitActionHistory localCommitActionHistory(std::string_view operationId);
     void releaseWorkingCopyLease(
         std::string_view draftId, std::string_view sessionId,
         std::string_view fencingToken);

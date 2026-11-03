@@ -1205,8 +1205,11 @@ std::vector<ModelChange> mergedCandidate(const std::vector<ModelChange>& current
 // One durable private-local operation record owns its UUIDv7, request
 // fingerprint, snapshot of candidate changes and reserved revision UUID.
 // The pending record is fsynced before any immutable object or HEAD is written.
-constexpr std::string_view localCommitMarker = "AOWIS-LOCAL-COMMIT-2\n";
-constexpr std::size_t localCommitMaxBytes = 8 * 1024 * 1024 + 2 * maxCommitMessageBytes + 4096;
+constexpr std::string_view localCommitMarker = "AOWIS-LOCAL-COMMIT-3\n";
+// Candidate and journal frames are hex-encoded in a single, durable intent.
+// Candidate up to 8 MiB + journal up to 8 MiB => 32 MiB of hex, plus rows.
+constexpr std::size_t localCommitMaxBytes =
+    5 * workingCopyMaxBytes + workingCopyMaxEvents * 90 + 2 * maxCommitMessageBytes + 4096;
 
 // The reserved commit time and the metadata make the revision record of a
 // retried publication byte-identical to the first attempt.
@@ -1214,6 +1217,7 @@ struct PersistedLocalCommit {
     LocalCommitInfo info;
     std::string requestDigest;
     std::vector<ModelChange> changes;
+    std::vector<WorkingCopyEvent> actions; // Frozen before immutable HEAD publication.
     CommitMetadata metadata;
     std::uint64_t committedAtMs = 0;
 };
@@ -1286,6 +1290,25 @@ std::string localCommitBody(const PersistedLocalCommit& operation) {
         const Bytes record = change.record ? encodeModelRecord(*change.record) : Bytes{};
         body += "change\t" + hexBytes(change.key.data(), change.key.size()) + "\t" +
             (change.record ? hexBytes(record.data(), record.size()) : "-") + "\n";
+        check(body.size() <= localCommitMaxBytes, "local commit record exceeds size limit",
+              StorageErrorKind::InvalidInput);
+    }
+    check(operation.actions.size() <= workingCopyMaxEvents,
+          "local Commit action archive has too many events", StorageErrorKind::InvalidInput);
+    std::size_t totalEventBytes = 0;
+    std::set<std::string> used;
+    body += "actions\t" + std::to_string(operation.actions.size()) + "\n";
+    const Hash chained = chainJournal(Hash{}, operation.actions);
+    body += "action-chain\t" + hexBytes(chained.data(), chained.size()) + "\n";
+    for (const WorkingCopyEvent& action : operation.actions) {
+        const WorkingCopyEvent verified = verifiedEditEvent(action.encoded);
+        check(action.id == verified.id && used.insert(action.id).second,
+              "invalid or duplicate archived Commit action ID", StorageErrorKind::InvalidInput);
+        totalEventBytes += action.encoded.size() + 20;
+        check(totalEventBytes <= workingCopyMaxBytes,
+              "local Commit action archive exceeds journal budget", StorageErrorKind::InvalidInput);
+        body += "action\t" + action.id + "\t" +
+            hexBytes(action.encoded.data(), action.encoded.size()) + "\n";
         check(body.size() <= localCommitMaxBytes, "local commit record exceeds size limit",
               StorageErrorKind::InvalidInput);
     }
@@ -1364,6 +1387,34 @@ PersistedLocalCommit readLocalCommit(const std::filesystem::path& path) {
         if (value != "-") change.record = decodeModelRecord(unhexBytes(value));
         result.changes.push_back(std::move(change));
     }
+    const std::uint64_t actionCount = decimalField(nextField("actions"));
+    check(actionCount <= workingCopyMaxEvents, "invalid local Commit action count");
+    const std::string actionChain = nextField("action-chain");
+    check(hexDigest(actionChain), "invalid local Commit action chain digest");
+    std::set<std::string> actionIds;
+    std::size_t totalActionBytes = 0;
+    for (std::uint64_t index = 0; index < actionCount; ++index) {
+        const std::string row = nextField("action");
+        const std::size_t split = row.find('\t');
+        check(split == 36 && row.find('\t', split + 1) == std::string::npos,
+              "invalid local Commit action row");
+        const std::string id = row.substr(0, split);
+        check(UuidV7::parse(id).has_value() && actionIds.insert(id).second,
+              "invalid or duplicate archived Commit action identity");
+        const Bytes encoded = unhexBytes(std::string_view(row).substr(split + 1));
+        totalActionBytes += encoded.size() + 20;
+        check(totalActionBytes <= workingCopyMaxBytes, "oversized local Commit action archive");
+        try {
+            const WorkingCopyEvent event = verifiedEditEvent(encoded);
+            check(event.id == id, "archived Commit event identity mismatches frame");
+            result.actions.push_back(event);
+        } catch (const ProjectError&) {
+            check(false, "invalid archived Commit MODEL event frame");
+        }
+    }
+    const Hash archiveHash = chainJournal(Hash{}, result.actions);
+    check(actionChain == hexBytes(archiveHash.data(), archiveHash.size()),
+          "archived Commit action chain integrity failure");
     std::string extra;
     check(!std::getline(lines, extra) && lines.eof(), "trailing local commit fields");
     check(UuidV7::parse(info.repositoryId).has_value() &&
@@ -2273,9 +2324,11 @@ LocalCommitInfo ProjectService::commitWorkingCopy(
                 throw ProjectError(ProjectErrorKind::Conflict,
                                    "local Commit UUIDv7 reused with a different request");
         } else {
-            // The journal is history for undo and is not part of a Commit.
+            // Freeze the complete acknowledged event stream inside the
+            // fsynced Commit intent BEFORE publishing an immutable revision.
+            // Draft rebase may then clear its short-lived journal safely.
             const WorkingCopyInfo draft =
-                loadDraft(this->root_, draftId, DraftLoad::Candidate).info;
+                loadDraft(this->root_, draftId, DraftLoad::Full).info;
             // Authorized by the live lease and its fencing token, exactly as
             // a Save is: a session that took over an expired lease may also
             // Commit, and the creating session's stale token may not.
@@ -2309,6 +2362,7 @@ LocalCommitInfo ProjectService::commitWorkingCopy(
             operation.metadata = metadata;
             operation.committedAtMs = wallClockMs();
             operation.changes = draft.candidateChanges;
+            operation.actions = draft.journal;
             operation.info.payloadDigest = localDigest(requestDigest + "\n" +
                 saveBatchFingerprint(operation.changes, {}) + "\n");
             // Persist the complete candidate snapshot and reserved UUID first.
@@ -2381,6 +2435,29 @@ LocalCommitInfo ProjectService::localCommitStatus(std::string_view operationId) 
         outcome = operation.info;
     });
     return outcome;
+}
+
+LocalCommitActionHistory ProjectService::localCommitActionHistory(
+        std::string_view operationId) {
+    // First reconcile an ambiguous pending Commit. Rebase cannot erase the
+    // frozen frames: they were published in the original durable intent.
+    const LocalCommitInfo outcome = localCommitStatus(operationId);
+    if (outcome.state != LocalCommitState::Succeeded)
+        throw ProjectError(ProjectErrorKind::Conflict,
+                           "actions are available only for a succeeded local Commit");
+    const PersistedLocalCommit operation = readLocalCommit(
+        localCommitDirectory(this->root_) / std::string(operationId));
+    if (operation.info.state != LocalCommitState::Succeeded ||
+        operation.info.repositoryId != this->repository_id_ ||
+        operation.info.id != outcome.id ||
+        operation.info.reservedRevisionId != outcome.reservedRevisionId)
+        throw ProjectError(ProjectErrorKind::Conflict,
+                           "local Commit history changed during reconciliation");
+    LocalCommitActionHistory history;
+    history.commit = operation.info;
+    history.committedAtMs = operation.committedAtMs;
+    history.actions = operation.actions;
+    return history;
 }
 
 void ProjectService::releaseWorkingCopyLease(

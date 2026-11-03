@@ -83,6 +83,122 @@ ModelChange changeWithValue(std::uint8_t value) {
     return ModelChange{key, record};
 }
 
+// HIST-02: a successful Commit must not erase its underlying MODEL actions,
+// even though the active draft is rebased and its short journal disappears.
+// All frames are part of the durable intent BEFORE publishing a revision.
+void testCommittedActionHistory() {
+    TempRoot root;
+    const std::string session = UuidV7::generate().toString();
+    const std::string operationId = UuidV7::generate().toString();
+    std::string projectId;
+    std::string draftId;
+    std::string revisionId;
+    const ModelChange initial = changeWithValue(41);
+    const ModelChange updated = changeWithValue(42);
+    const aowis::dvmdb::Bytes firstFrame = aowis::dvmdb::test::editEvent(
+        UuidV7::generate(), initial.key, {40}, {41});
+    const aowis::dvmdb::Bytes secondFrame = aowis::dvmdb::test::editEvent(
+        UuidV7::generate(), initial.key, {41}, {42});
+    {
+        ProjectService service(root.path);
+        projectId = service.createUnbornProject("HIST-02 immutable actions").id;
+        service.configureRepositoryRole(RepositoryRole::Private);
+        draftId = service.createWorkingCopy(projectId, "main", std::nullopt, session).id;
+        const std::string token = service.acquireWorkingCopyLease(draftId, session, 120).token;
+        require(service.saveWorkingCopyTransactions(draftId, session, token, 0,
+                    {initial}, {firstFrame}).generation == 1,
+                "first HIST-02 action was not saved");
+        require(service.saveWorkingCopyTransactions(draftId, session, token, 1,
+                    {updated}, {secondFrame}).generation == 2,
+                "second HIST-02 action was not saved");
+        const LocalCommitInfo commit = service.commitWorkingCopy(operationId, draftId,
+            session, token, 2, std::nullopt, commitMetadata());
+        require(commit.state == LocalCommitState::Succeeded,
+                "HIST-02 Commit did not succeed");
+        revisionId = commit.reservedRevisionId;
+        const aowis::dvmdb::LocalCommitActionHistory archive =
+            service.localCommitActionHistory(operationId);
+        require(archive.commit.id == operationId &&
+                archive.commit.reservedRevisionId == revisionId &&
+                archive.actions.size() == 2 &&
+                archive.actions[0].encoded == firstFrame &&
+                archive.actions[1].encoded == secondFrame &&
+                archive.committedAtMs != 0 &&
+                service.workingCopy(draftId).journal.empty() &&
+                service.workingCopy(draftId).journalCount == 0,
+                "Commit lost, reordered, or mutated durable actions during draft rebase");
+        const LocalCommitInfo replay = service.commitWorkingCopy(operationId, draftId,
+            session, token, 2, std::nullopt, commitMetadata());
+        require(replay.state == LocalCommitState::Succeeded &&
+                service.localCommitActionHistory(operationId).actions.size() == 2,
+                "Commit replay duplicated or erased the action archive");
+    }
+    // Model an interrupted outcome publication: the revision is already in
+    // HEAD, but the durable intent says pending. Status recovery may rewrite
+    // the outcome; it must never rewrite or discard the archived actions.
+    {
+        const std::filesystem::path ledger = root.path / "local-commits" / operationId;
+        std::ifstream input(ledger, std::ios::binary);
+        std::string body((std::istreambuf_iterator<char>(input)), {});
+        const std::string oldState = "state\tsucceeded\n";
+        const std::size_t state = body.find(oldState);
+        require(state != std::string::npos, "missing HIST-02 succeeded fixture state");
+        body.replace(state, oldState.size(), "state\tpending\n");
+        std::ofstream output(ledger, std::ios::binary | std::ios::trunc);
+        output.write(body.data(), static_cast<std::streamsize>(body.size()));
+        require(output.good(), "could not stage interrupted HIST-02 outcome");
+    }
+    {
+        ProjectService reopened(root.path);
+        const aowis::dvmdb::LocalCommitActionHistory history =
+            reopened.localCommitActionHistory(operationId);
+        require(history.actions.size() == 2 &&
+                history.actions[0].encoded == firstFrame &&
+                history.actions[1].encoded == secondFrame &&
+                history.commit.reservedRevisionId == revisionId,
+                "process restart did not preserve exact archived MODEL frames");
+        const RevisionId committed = *RevisionId::parse(revisionId);
+        const std::string nextDraft = reopened.createWorkingCopy(
+            projectId, "main", committed, session).id;
+        const std::string nextToken =
+            reopened.acquireWorkingCopyLease(nextDraft, session, 120).token;
+        require(reopened.saveWorkingCopyChanges(nextDraft, session, nextToken, 0,
+                    {changeWithValue(43)}).generation == 1,
+                "history checkpoint-only candidate save failed");
+        const std::string nextOperation = UuidV7::generate().toString();
+        const LocalCommitInfo next = reopened.commitWorkingCopy(nextOperation,
+            nextDraft, session, nextToken, 1, committed, commitMetadata());
+        require(next.state == LocalCommitState::Succeeded &&
+                reopened.localCommitActionHistory(nextOperation).actions.empty() &&
+                reopened.localCommitActionHistory(operationId).actions.size() == 2,
+                "checkpoint-only Commit fabricated actions or modified older archive");
+    }
+    // Alter the archival bytes without updating their chain digest: unlike
+    // an unavailable old action, corrupted durable history is never silently
+    // presented as an empty list.
+    const std::filesystem::path ledger = root.path / "local-commits" / operationId;
+    {
+        std::ifstream input(ledger, std::ios::binary);
+        std::string body((std::istreambuf_iterator<char>(input)), {});
+        const std::size_t line = body.find("action\t");
+        require(line != std::string::npos, "HIST-02 missing durable action row");
+        const std::size_t payload = body.find('\t', line + 7);
+        require(payload != std::string::npos && payload + 1 < body.size(),
+                "HIST-02 malformed fixture action row");
+        body[payload + 1] = body[payload + 1] == 'a' ? 'b' : 'a';
+        std::ofstream output(ledger, std::ios::binary | std::ios::trunc);
+        output.write(body.data(), static_cast<std::streamsize>(body.size()));
+        require(output.good(), "could not corrupt action archive fixture");
+    }
+    ProjectService corrupted(root.path);
+    bool rejected = false;
+    try { (void)corrupted.localCommitActionHistory(operationId); }
+    catch (const aowis::dvmdb::StorageError& error) {
+        rejected = error.kind() == aowis::dvmdb::StorageErrorKind::Corruption;
+    }
+    require(rejected, "tampered Commit action was not rejected as corruption");
+}
+
 void testLocalCommitRecovery() {
     TempRoot root;
     const std::string session = UuidV7::generate().toString();
@@ -741,7 +857,7 @@ void testCommitRecordsAuthorMessageAndReservedTime() {
     {
         std::ifstream input(root.path / "local-commits" / operationId, std::ios::binary);
         const std::string body((std::istreambuf_iterator<char>(input)), {});
-        require(body.starts_with("AOWIS-LOCAL-COMMIT-2\n") &&
+        require(body.starts_with("AOWIS-LOCAL-COMMIT-3\n") &&
                 body.find("committed-at\t" + std::to_string(reservedAt) + "\n") != std::string::npos &&
                 body.find("author-id\t" + metadata.authorId.toString() + "\n") != std::string::npos,
                 "the pending ledger record lacks the reserved time or the author");
@@ -784,6 +900,7 @@ void testCommitRecordsAuthorMessageAndReservedTime() {
 
 int main() {
     try {
+        testCommittedActionHistory();
         testLocalCommitRecovery();
         testConcurrentFirstCommitIsSerialized();
         testRejectedOperationIsDurable();
