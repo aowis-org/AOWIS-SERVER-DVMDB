@@ -8,6 +8,15 @@ and frames, action count and SHA-256 chain digest. The format is
 `AOWIS-LOCAL-COMMIT-3`. Recovery and replay do not discard these frames,
 even though the committed draft's *short-lived* event journal is cleared.
 
+DVMDB maintains `local-commit-revisions/<revision UUIDv7>` as an immutable,
+checksum-verified revision-to-Commit-operation index. Its directory entry is
+fsynced **before** writing the pending local Commit intent and therefore before
+publishing its reserved immutable revision. A crash may leave an orphan index
+entry for an unpublished revision; history never traverses it. No scan of
+unrelated operation records is necessary. Missing entries denote a genuine
+checkpoint without an indexed local Commit archive, including pre-index
+revisions; older unindexed archives are not silently reconstructed or migrated.
+
 A successful `ProjectService::localCommitActionHistory(operationId)` returns
 the verified archive. A pending operation is reconciled against actual
 revision ancestry before exposing its committed actions; rejected operations
@@ -36,6 +45,17 @@ response contains `commits`, `nextCursor`, and `draft`. Each Commit has a
 `checkpointOnly`; draft generation and journal count are **decimal strings**.
 The route never performs Undo/Redo or changes HEAD.
 
+For exact original MODEL frames, use
+`ProjectService::revisionActionPage(projectId, branch, revision, offset, limit)`
+or `GET /dvmdb/v1/projects/{projectId}/branches/{branch}/action-history/{revisionId}/events`.
+`limit` is 1–100 events; `offset` is zero-based with exclusive `nextOffset`.
+Each result reports the immutable revision, nullable local Commit operation,
+total archived actions, `actions: [{id, frameBase64}]`, and nullable next offset.
+The selected revision must occur on the branch's first-parent ancestry.
+Checkpoint-only revisions return zero events, not hypothetical inverse deltas.
+Full frames are **original canonical MODEL bytes**; the API does not execute
+Undo/Redo, and user-facing operation names can be decoded later by MODEL clients.
+
 A revision created by a generic native Commit, a merge, an imported revision,
 or an old local Commit without retained actions is represented as a genuine
 **checkpoint only**. An empty archive is not expanded into hypothetical
@@ -46,15 +66,13 @@ without duplicating archived actions.
 
 - The active draft event journal remains bounded at **4,096 events / 8 MiB**.
   Each local Commit archives up to this journal budget independently.
-- The read-only revision history pages are small, but the current lookup
-  derives revision-to-operation mapping by scanning and verifying published
-  local Commit ledger records. It refuses scans beyond **10,000 operations**
-  instead of returning an incomplete page. A persistent revision index is
-  required for large repositories.
-- HTTP history currently returns original event **UUIDs**, not entire
-  archived MODEL frames or parsed user-facing edit descriptions. The native
-  `localCommitActionHistory` method retrieves the full frames by operation
-  UUID. Paginated frame retrieval and richer summaries are still future work.
+- Revision checkpoint pages use the durable revision index for each requested
+  revision, regardless of how many unrelated local Commit operations exist.
+  Each lookup verifies the index checksum and the complete archived operation;
+  corruption is reported as an error, not hidden as an empty action list.
+- Full frame reads are limited to 100 archived events per request and remain
+  separate from the bounded active-draft event journal. Original event bytes
+  can be decoded into display summaries by a MODEL client.
 - Draft pages are labelled with a generation; clients must check that value
   when paging through edits while a second writer may save new events.
 - Action archives are not a durable Undo/Redo cursor. Navigating across

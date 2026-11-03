@@ -140,6 +140,12 @@ page of up to 100 saved draft action UUIDs. Use `draftOffset` / `nextOffset`
 to advance that journal page independently of `after`. Draft IDs from another
 project or branch are rejected.
 
+`GET /dvmdb/v1/projects/{projectId}/branches/{branch}/action-history/{revisionId}/events?offset&limit`
+returns the exact archived MODEL bytes (Base64), in original event order, at
+up to 100 actions per page. Revisions not on the selected branch's first-parent
+ancestry are rejected. Both endpoints are **read-only** and do not move HEAD or
+provide Undo/Redo.
+
 The response is read-only: there is **no** state navigation, Undo or Redo
 endpoint yet. See [committed action archive](commit-action-archive.md) for
 current limits and the [History roadmap](history-roadmap.md) for future work.

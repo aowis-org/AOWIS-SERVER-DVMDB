@@ -8,7 +8,8 @@ the tests behind these procedures are in
 
 A storage root holds `catalogue.lock`, `repository.id`, the optional
 `repository.tracking`, `projects/<uuid>/` (manifest and repository),
-`working-copies/` (drafts) and `local-commits/` (Commit ledger)
+`working-copies/` (drafts), `local-commits/` (Commit ledger), and
+`local-commit-revisions/` (checksummed revision-to-action index)
 ([layout](storage-formats.md#catalogue-root)). **It is one unit.** Never copy
 or restore only a pack, only one project, or only the drafts: a repository
 needs its branch records, revision bindings and generation markers, and drafts

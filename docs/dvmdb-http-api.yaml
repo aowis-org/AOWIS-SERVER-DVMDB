@@ -816,8 +816,8 @@ paths:
         MODEL action UUIDs. A checkpoint with no retained events has actions=[];
         no intermediate actions are invented. The optional draft section is
         separately paged, pinned by generation, and never mutates HEAD.
-        The current native archive lookup scans at most 10000 local Commit
-        records; a permanent revision-to-archive index is still needed.
+        Archives are resolved by immutable, checksummed revision UUID index
+        entries; no full local Commit ledger scan is performed.
       responses:
         '200':
           description: Commit checkpoint page and optional working-copy event page
@@ -851,6 +851,43 @@ paths:
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/Conflict'}
         '503': {description: Temporary history lookup capacity unavailable}
+  /projects/{projectId}/branches/{branch}/action-history/{revisionId}/events:
+    parameters:
+      - {$ref: '#/components/parameters/ProjectId'}
+      - {$ref: '#/components/parameters/Branch'}
+      - {name: revisionId, in: path, required: true, schema: {type: string, format: uuid}}
+      - {name: offset, in: query, schema: {type: integer, minimum: 0, maximum: 4096, default: 0}}
+      - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 100}}
+    get:
+      operationId: getArchivedRevisionActions
+      description: |
+        Fetch original archived MODEL event frames for a first-parent Commit.
+        A revision without an indexed local Commit archive is a checkpoint
+        with zero events. No navigation or HEAD change occurs.
+      responses:
+        '200':
+          description: Original MODEL transaction frames in archived order
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [revisionId, operationId, total, actions, nextOffset]
+                properties:
+                  revisionId: {type: string, format: uuid}
+                  operationId: {type: [string, 'null'], format: uuid}
+                  total: {type: integer, minimum: 0}
+                  actions:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, frameBase64]
+                      properties:
+                        id: {type: string, format: uuid}
+                        frameBase64: {type: string, contentEncoding: base64}
+                  nextOffset: {type: [integer, 'null'], minimum: 0}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
   /projects/{projectId}/branches/{branch}/history:
     parameters:
       - {$ref: '#/components/parameters/ProjectId'}

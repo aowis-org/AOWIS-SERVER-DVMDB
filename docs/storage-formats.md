@@ -28,13 +28,16 @@ library instance):
 │       └── repository/     # one native repository (layout below)
 ├── working-copies/
 │   └── <draft-uuidv7>/     # one private draft (layout below)
-└── local-commits/
-    └── <operation-uuidv7>  # one local Commit ledger record
+├── local-commits/
+│   └── <operation-uuidv7>  # one durable local Commit ledger record
+└── local-commit-revisions/
+    └── <revision-uuidv7>   # checksummed revision -> Commit operation index
 ```
 
 Unpublished staging entries (`.repository-id-creating-*`, `projects/.creating-*`,
 `working-copies/.creating-*` and `.deleting-*`, `local-commits/.creating-*` and
-`.updating-*`, `repository.tracking.tmp`) are never visible as data and are
+`.updating-*`, `local-commit-revisions/.creating-*`,
+`repository.tracking.tmp`) are never visible as data and are
 removed when the service opens the root.
 
 ### `repository.id`
@@ -315,4 +318,12 @@ actions recorded*, not permission to fabricate Undo steps. The draft's bounded
 journal is cleared on successful rebase, whereas the Commit ledger remains.
 Read currently via `ProjectService::localCommitActionHistory(operationId)`;
 paginated branch timelines and GUI Undo/Redo are future work.
+The immutable `local-commit-revisions/<revision-uuidv7>` sidecar stores the
+repository UUIDv7, project UUIDv7, reserved revision UUIDv7, operation UUIDv7
+and a SHA-256 checksum under the marker `AOWIS-LOCAL-REVISION-INDEX-1`.
+It is published and fsynced **before** the pending local Commit intent, so a
+published revision has its corresponding index. An orphan sidecar caused by
+failure before intent publication is harmless; first-parent history never
+visits unpublished revisions. Index entries are not repaired by guessing.
+
 Behaviour: [working copies](working-copies.md#local-commit).

@@ -46,7 +46,9 @@ catalogue lock lets only one of them open it.
 
 One storage root holds `catalogue.lock`, `repository.id`, the optional
 `repository.tracking`, `projects/<uuid>/` (manifest + native repository),
-`working-copies/` and `local-commits/` ([layout](storage-formats.md#catalogue-root)).
+`working-copies/`, `local-commits/` and checksummed
+`local-commit-revisions/` entries that locate immutable Commit action archives
+([layout](storage-formats.md#catalogue-root)).
 Each project's repository is an append-only object pack with a rebuildable
 index, UUID-named branch records and the revision bindings
 ([layout](storage-formats.md#native-repository)).

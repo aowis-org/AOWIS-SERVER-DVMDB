@@ -2,9 +2,11 @@
 
 **Current foundation:** DVMDB stores verified MODEL events in the active
 private draft and retains those events after local Commit in a durable action
-archive. The read-only `branchActionHistory` API and its HTTP route now return
+archive. The read-only `branchActionHistory` API and its HTTP route return
 first-parent Commit markers, real archived action UUIDs and optionally paged
-active-draft action UUIDs. All requests are read-only: there is **no durable
+active-draft action UUIDs. A durable revision-keyed index resolves those
+archives, and `revisionActionPage` / the frame endpoint expose paged original
+MODEL bytes for UI decoding. All requests are read-only: there is **no durable
 logical cursor, inverse application, Undo/Redo command or jump-to-state API**.
 See [committed action archives](commit-action-archive.md) for current product
 behavior and [history-contract.md](history-contract.md) for the agreed future
@@ -45,22 +47,21 @@ lost. A future Commit of that model is a new successor of the branch's
 
 ## Required implementation
 
-### HDB-01 — Persistent indexing and full action retrieval (remaining)
+### HDB-01 — Remaining read-only history acceptance
 
-The immutable archive and basic read-only timeline exist. Remaining work:
-replace the bounded 10,000-record ledger scan with a durable, recoverable
-revision-to-archive index; add paginated retrieval of full archived frames
-and display-ready MODEL action summaries; provide server-side snapshot
-consistency across draft pages and concurrent Commit; and qualify import,
-merge and cross-repository checkpoints. Ensure compaction/recovery preserves
-exact archive identities and never fabricates intermediate edit steps for
-checkpoint-only revisions.
+The immutable archive, revision index, timeline, and paginated full-frame
+retrieval are implemented. Remaining work is display-ready action summaries,
+server-side snapshot consistency across active-draft pages during concurrent
+Saves/Commits, and acceptance of import, merge, cross-repository, backup,
+compaction and recovery checkpoint handling. Checkpoint-only revisions must
+never acquire fabricated intermediate steps. Earlier unindexed local Commit
+archives are not migrated: those revisions remain checkpoint-only.
 
 ### HDB-02 — Reconstruction and navigation API
 
-Build on the existing ordered/paged read-only checkpoint and action-UUID
-listing to add a durable state cursor, display-ready summaries, exact action
-frame retrieval and an exact "materialize state" plan. Reconstruct from the nearest
+Build on the existing ordered/paged checkpoint, action-UUID listing and
+exact original frame retrieval to add a durable state cursor, display-ready
+summaries and an exact "materialize state" plan. Reconstruct from the nearest
 immutable model checkpoint plus forward/inverse MODEL transactions, verify
 canonical before/after images and membership, and never silently repair
 missing objects. Do not allow jumps to invent actions between two old

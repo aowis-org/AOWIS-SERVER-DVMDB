@@ -141,6 +141,8 @@ void removeCatalogueRemnants(const std::filesystem::path& root) {
     if (removePrefixed(root, {".repository-id-creating-"}, false)) syncDirectory(root);
     if (removePrefixed(root / "local-commits", {".creating-", ".updating-"}, false))
         syncDirectory(root / "local-commits");
+    if (removePrefixed(root / "local-commit-revisions", {".creating-"}, false))
+        syncDirectory(root / "local-commit-revisions");
     if (removePrefixed(root / "projects", {".creating-"}, true)) syncDirectory(root / "projects");
     for (const std::filesystem::directory_entry& entry :
          std::filesystem::directory_iterator(root / "projects")) {
@@ -1444,6 +1446,137 @@ PersistedLocalCommit readLocalCommit(const std::filesystem::path& path) {
     return result;
 }
 
+// HIST-02: one immutable revision -> local Commit operation sidecar. Publish
+// before the Commit intent, hence before the reserved revision can reach HEAD.
+// A crash may leave an unreferenced sidecar, never a published revision without
+// its mapping. A retry uses a fresh reserved revision unless the original
+// durable operation exists. Orphan sidecars are harmless.
+std::filesystem::path localRevisionIndexDirectory(const std::filesystem::path& root) {
+    return root / "local-commit-revisions";
+}
+
+struct LocalRevisionIndex {
+    std::string repository;
+    std::string project;
+    std::string revision;
+    std::string operation;
+};
+
+std::string localRevisionIndexBody(const LocalRevisionIndex& index) {
+    check(UuidV7::parse(index.repository).has_value() &&
+          UuidV7::parse(index.project).has_value() &&
+          RevisionId::parse(index.revision).has_value() &&
+          UuidV7::parse(index.operation).has_value(),
+          "invalid local revision index identity");
+    const std::string payload = "AOWIS-LOCAL-REVISION-INDEX-1\n" +
+        index.repository + "\n" + index.project + "\n" +
+        index.revision + "\n" + index.operation + "\n";
+    return payload + localDigest(payload) + "\n";
+}
+
+LocalRevisionIndex readLocalRevisionIndex(const std::filesystem::path& path) {
+    check(!std::filesystem::is_symlink(path) &&
+          std::filesystem::is_regular_file(path) &&
+          std::filesystem::file_size(path) <= 320,
+          "unsafe local revision index file");
+    std::ifstream input(path, std::ios::binary);
+    check(input.good(), "cannot read local revision index");
+    std::string magic, repository, project, revision, operation, checksum, extra;
+    check(static_cast<bool>(std::getline(input, magic)) &&
+          std::getline(input, repository) && std::getline(input, project) &&
+          std::getline(input, revision) && std::getline(input, operation) &&
+          std::getline(input, checksum) && !std::getline(input, extra) &&
+          magic == "AOWIS-LOCAL-REVISION-INDEX-1" &&
+          path.filename() == revision,
+          "invalid local revision index record");
+    const LocalRevisionIndex index{repository, project, revision, operation};
+    const std::string expected = localRevisionIndexBody(index);
+    check(expected == magic + "\n" + repository + "\n" + project + "\n" +
+          revision + "\n" + operation + "\n" + checksum + "\n",
+          "local revision index checksum mismatch");
+    return index;
+}
+
+void persistLocalRevisionIndex(const std::filesystem::path& root,
+                               const PersistedLocalCommit& operation) {
+    const std::filesystem::path directory = localRevisionIndexDirectory(root);
+    if (!std::filesystem::exists(directory)) {
+        syscallChecked(std::filesystem::create_directory(directory),
+                       "create revision index directory");
+        syncDirectory(root);
+    }
+    check(!std::filesystem::is_symlink(directory) &&
+          std::filesystem::is_directory(directory),
+          "unsafe revision index directory");
+    const std::string body = localRevisionIndexBody(LocalRevisionIndex{
+        operation.info.repositoryId, operation.info.projectId,
+        operation.info.reservedRevisionId, operation.info.id});
+    const std::filesystem::path published =
+        directory / operation.info.reservedRevisionId;
+    if (std::filesystem::exists(published) || std::filesystem::is_symlink(published)) {
+        const LocalRevisionIndex current = readLocalRevisionIndex(published);
+        check(current.operation == operation.info.id &&
+              current.repository == operation.info.repositoryId &&
+              current.project == operation.info.projectId,
+              "revision index UUID collision");
+        return;
+    }
+    const std::filesystem::path staging = directory /
+        (".creating-" + UuidV7::generate().toString());
+    const int fd = ::open(staging.c_str(),
+        O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    syscallChecked(fd >= 0, "stage local revision index");
+    try {
+        std::size_t written = 0;
+        while (written < body.size()) {
+            const ssize_t amount = ::write(fd, body.data() + written, body.size() - written);
+            if (amount < 0 && errno == EINTR) continue;
+            syscallChecked(amount > 0, "write local revision index");
+            written += static_cast<std::size_t>(amount);
+        }
+        syscallChecked(::fsync(fd) == 0, "sync local revision index");
+    } catch (...) {
+        ::close(fd);
+        (void)::unlink(staging.c_str());
+        throw;
+    }
+    syscallChecked(::close(fd) == 0, "close local revision index");
+    try {
+        syscallChecked(::link(staging.c_str(), published.c_str()) == 0,
+                       "publish local revision index");
+        syncDirectory(directory);
+        syscallChecked(::unlink(staging.c_str()) == 0,
+                       "remove local revision index staging");
+        syncDirectory(directory);
+    } catch (...) {
+        (void)::unlink(staging.c_str());
+        throw;
+    }
+}
+
+// A missing sidecar means a checkpoint with no indexed local Commit archive.
+// A present one must match the full authenticated Commit record exactly.
+std::optional<PersistedLocalCommit> indexedLocalCommit(
+        const std::filesystem::path& root, std::string_view repositoryId,
+        std::string_view projectId, const RevisionId& revision) {
+    const std::filesystem::path index =
+        localRevisionIndexDirectory(root) / revision.toString();
+    if (!std::filesystem::exists(index) && !std::filesystem::is_symlink(index))
+        return std::nullopt;
+    const LocalRevisionIndex record = readLocalRevisionIndex(index);
+    check(record.repository == repositoryId && record.project == projectId &&
+          record.revision == revision.toString(),
+          "indexed local revision belongs to another repository or project");
+    const PersistedLocalCommit operation =
+        readLocalCommit(localCommitDirectory(root) / record.operation);
+    check(operation.info.repositoryId == repositoryId &&
+          operation.info.projectId == projectId &&
+          operation.info.reservedRevisionId == record.revision &&
+          operation.info.id == record.operation,
+          "revision index disagrees with local Commit archive");
+    return operation;
+}
+
 void persistLocalCommit(const std::filesystem::path& root,
                         const PersistedLocalCommit& operation, bool initial) {
     const std::filesystem::path directory = localCommitDirectory(root);
@@ -2365,6 +2498,11 @@ LocalCommitInfo ProjectService::commitWorkingCopy(
             operation.actions = draft.journal;
             operation.info.payloadDigest = localDigest(requestDigest + "\n" +
                 saveBatchFingerprint(operation.changes, {}) + "\n");
+            // Publish and fsync the revision -> operation mapping first. A
+            // subsequent crash can leave an orphan mapping, but cannot make
+            // a committed revision with inaccessible original actions.
+            try { persistLocalRevisionIndex(this->root_, operation); }
+            catch (...) { markUncertain(); throw; }
             // Persist the complete candidate snapshot and reserved UUID first.
             try { persistLocalCommit(this->root_, operation, true); }
             catch (...) { markUncertain(); throw; }
@@ -2460,6 +2598,45 @@ LocalCommitActionHistory ProjectService::localCommitActionHistory(
     return history;
 }
 
+
+RevisionActionPage ProjectService::revisionActionPage(
+        std::string_view projectId, std::string_view branch,
+        const RevisionId& revision, std::size_t offset, std::size_t limit) {
+    if (limit < 1 || limit > 100 || offset > workingCopyMaxEvents)
+        throw ProjectError(ProjectErrorKind::InvalidInput,
+                           "invalid archived action page size or offset");
+    checkHealthy();
+    // The same exclusive cursor validation as branchActionHistory enforces
+    // first-parent reachability. An arbitrary revision from another branch
+    // must never leak an action archive through this endpoint.
+    (void)history(projectId, branch, 1, revision);
+    RevisionActionPage page;
+    page.revisionId = revision.toString();
+    const std::optional<PersistedLocalCommit> index = indexedLocalCommit(
+        this->root_, this->repository_id_, projectId, revision);
+    if (!index) return page; // Checkpoint only; no synthetic actions.
+    PersistedLocalCommit operation = *index;
+    if (operation.info.state == LocalCommitState::Pending) {
+        const LocalCommitInfo outcome = localCommitStatus(operation.info.id);
+        check(outcome.state == LocalCommitState::Succeeded,
+              "indexed published revision has no succeeded Commit");
+        operation = *indexedLocalCommit(this->root_, this->repository_id_,
+                                       projectId, revision);
+    }
+    check(operation.info.state == LocalCommitState::Succeeded,
+          "indexed published revision has no succeeded Commit");
+    if (offset > operation.actions.size())
+        throw ProjectError(ProjectErrorKind::InvalidInput,
+                           "archive offset exceeds action count");
+    page.commitOperationId = operation.info.id;
+    page.total = operation.actions.size();
+    const std::size_t end = offset + std::min(limit, page.total - offset);
+    page.actions.assign(operation.actions.begin() + static_cast<std::ptrdiff_t>(offset),
+                        operation.actions.begin() + static_cast<std::ptrdiff_t>(end));
+    if (end < page.total) page.nextOffset = end;
+    return page;
+}
+
 BranchActionHistoryPage ProjectService::branchActionHistory(
         std::string_view projectId, std::string_view branch, std::size_t limit,
         std::optional<RevisionId> after,
@@ -2482,53 +2659,25 @@ BranchActionHistoryPage ProjectService::branchActionHistory(
         wanted.insert(revisions[index].id.toString());
     }
 
-    // The existing HIST-02 archive is keyed by Commit operation UUID, not
-    // revision UUID. Until a durable revision index is introduced, resolve
-    // the small requested revision page against a bounded scan of the ledger.
-    // Never return a partial/ambiguous page when the bound is exceeded.
-    if (!wanted.empty()) {
-        const std::filesystem::path directory = localCommitDirectory(this->root_);
-        if (std::filesystem::exists(directory) || std::filesystem::is_symlink(directory)) {
-            check(!std::filesystem::is_symlink(directory) &&
-                  std::filesystem::is_directory(directory),
-                  "unsafe local Commit history directory");
-            std::size_t scanned = 0;
-            std::map<std::string, PersistedLocalCommit> matching;
-            for (const std::filesystem::directory_entry& file :
-                    std::filesystem::directory_iterator(directory)) {
-                const std::string id = file.path().filename().string();
-                // Durable Commit intent staging files are not published.
-                if (!id.empty() && id.front() == '.') continue;
-                check(UuidV7::parse(id).has_value(), "unrecognized local Commit record");
-                if (++scanned > 10000)
-                    throw ProjectError(ProjectErrorKind::Unavailable,
-                        "history ledger needs a revision index before scanning more than 10000 commits");
-                PersistedLocalCommit operation = readLocalCommit(file.path());
-                if (operation.info.repositoryId != this->repository_id_ ||
-                    operation.info.projectId != projectId ||
-                    !wanted.contains(operation.info.reservedRevisionId))
-                    continue;
-                if (operation.info.state == LocalCommitState::Pending) {
-                    // Reconcile interrupted Commit publication before deciding
-                    // that a revision has no archived actions.
-                    const LocalCommitInfo outcome = localCommitStatus(id);
-                    if (outcome.state != LocalCommitState::Succeeded) continue;
-                    operation = readLocalCommit(file.path());
-                }
-                if (operation.info.state != LocalCommitState::Succeeded) continue;
-                const std::string revision = operation.info.reservedRevisionId;
-                check(matching.emplace(revision, std::move(operation)).second,
-                      "multiple local Commit archives claim the same revision");
-            }
-            for (BranchActionHistoryEntry& entry : page.commits) {
-                const std::map<std::string, PersistedLocalCommit>::const_iterator found =
-                    matching.find(entry.revision.id.toString());
-                if (found == matching.end()) continue;
-                entry.commitOperationId = found->second.info.id;
-                for (const WorkingCopyEvent& event : found->second.actions)
-                    entry.actionIds.push_back(event.id);
-            }
+    // Each reserved revision has a fsynced immutable sidecar published BEFORE
+    // its Commit intent and before its immutable HEAD can be advanced. Look
+    // up only the revisions in this page; unrelated Commit count is unbounded.
+    for (BranchActionHistoryEntry& entry : page.commits) {
+        std::optional<PersistedLocalCommit> operation = indexedLocalCommit(
+            this->root_, this->repository_id_, projectId, entry.revision.id);
+        if (!operation) continue; // Generic/imported/merge checkpoint.
+        if (operation->info.state == LocalCommitState::Pending) {
+            const LocalCommitInfo outcome = localCommitStatus(operation->info.id);
+            check(outcome.state == LocalCommitState::Succeeded,
+                  "indexed published revision has no succeeded Commit");
+            operation = indexedLocalCommit(this->root_, this->repository_id_,
+                                           projectId, entry.revision.id);
         }
+        check(operation && operation->info.state == LocalCommitState::Succeeded,
+              "indexed published revision has no succeeded Commit");
+        entry.commitOperationId = operation->info.id;
+        for (const WorkingCopyEvent& event : operation->actions)
+            entry.actionIds.push_back(event.id);
     }
 
     if (draftId) {

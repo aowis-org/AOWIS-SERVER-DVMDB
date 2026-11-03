@@ -146,6 +146,28 @@ void testCommittedActionHistory() {
                 timeline.commits[0].actionIds[1] == archive.actions[1].id &&
                 !timeline.next && !timeline.draftId,
                 "HIST-02 branch timeline did not expose committed action archive");
+        const std::filesystem::path index =
+            root.path / "local-commit-revisions" / revisionId;
+        require(std::filesystem::is_regular_file(index),
+                "HIST-02 durable revision index was not published before Commit");
+        const aowis::dvmdb::RevisionActionPage firstPage =
+            service.revisionActionPage(projectId, "main", *RevisionId::parse(revisionId), 0, 1);
+        const aowis::dvmdb::RevisionActionPage secondPage =
+            service.revisionActionPage(projectId, "main", *RevisionId::parse(revisionId), 1, 1);
+        require(firstPage.revisionId == revisionId && firstPage.commitOperationId == operationId &&
+                firstPage.total == 2 && firstPage.actions.size() == 1 &&
+                firstPage.actions[0].encoded == firstFrame && firstPage.nextOffset == 1 &&
+                secondPage.total == 2 && secondPage.actions.size() == 1 &&
+                secondPage.actions[0].encoded == secondFrame && !secondPage.nextOffset,
+                "HIST-02 archived MODEL frame pagination lost order or exact bytes");
+        bool refusedPage = false;
+        try {
+            (void)service.revisionActionPage(projectId, "main",
+                *RevisionId::parse(revisionId), 3, 1);
+        } catch (const ProjectError& error) {
+            refusedPage = error.kind() == ProjectErrorKind::InvalidInput;
+        }
+        require(refusedPage, "archived MODEL frame retrieval accepted an invalid offset");
         const LocalCommitInfo replay = service.commitWorkingCopy(operationId, draftId,
             session, token, 2, std::nullopt, commitMetadata());
         require(replay.state == LocalCommitState::Succeeded &&
@@ -176,6 +198,12 @@ void testCommittedActionHistory() {
                 history.actions[1].encoded == secondFrame &&
                 history.commit.reservedRevisionId == revisionId,
                 "process restart did not preserve exact archived MODEL frames");
+        const aowis::dvmdb::RevisionActionPage recoveredPage =
+            reopened.revisionActionPage(projectId, "main", *RevisionId::parse(revisionId), 0, 100);
+        require(recoveredPage.actions.size() == 2 &&
+                recoveredPage.actions[0].encoded == firstFrame &&
+                recoveredPage.actions[1].encoded == secondFrame && !recoveredPage.nextOffset,
+                "HIST-02 revision index lost original frames after restart and reconciliation");
         const RevisionId committed = *RevisionId::parse(revisionId);
         const std::string nextDraft = reopened.createWorkingCopy(
             projectId, "main", committed, session).id;
@@ -191,6 +219,13 @@ void testCommittedActionHistory() {
                 reopened.localCommitActionHistory(nextOperation).actions.empty() &&
                 reopened.localCommitActionHistory(operationId).actions.size() == 2,
                 "checkpoint-only Commit fabricated actions or modified older archive");
+        const aowis::dvmdb::RevisionActionPage checkpoint =
+            reopened.revisionActionPage(projectId, "main",
+                *RevisionId::parse(next.reservedRevisionId));
+        require(checkpoint.revisionId == next.reservedRevisionId &&
+                checkpoint.actions.empty() && checkpoint.total == 0 &&
+                checkpoint.commitOperationId == nextOperation,
+                "HIST-02 checkpoint without events fabricated archived MODEL frames");
         const aowis::dvmdb::BranchActionHistoryPage latest =
             reopened.branchActionHistory(projectId, "main", 1);
         require(latest.commits.size() == 1 &&
@@ -219,6 +254,14 @@ void testCommittedActionHistory() {
             badCursor = error.kind() == ProjectErrorKind::InvalidInput;
         }
         require(badCursor, "HIST-02 cursor accepted a revision outside the branch lineage");
+        bool unrelatedFrame = false;
+        try {
+            (void)reopened.revisionActionPage(projectId, feature,
+                *RevisionId::parse(next.reservedRevisionId));
+        } catch (const ProjectError& error) {
+            unrelatedFrame = error.kind() == ProjectErrorKind::InvalidInput;
+        }
+        require(unrelatedFrame, "HIST-02 exposed frames from a revision outside the branch");
         bool badDraftOffset = false;
         try {
             (void)reopened.branchActionHistory(projectId, "main", 2, std::nullopt, nextDraft, 1);
@@ -226,6 +269,54 @@ void testCommittedActionHistory() {
             badDraftOffset = error.kind() == ProjectErrorKind::InvalidInput;
         }
         require(badDraftOffset, "HIST-02 accepted invalid draft event offset");
+    }
+    // The sidecar is authenticated and may not redirect a revision to a
+    // different operation after restart.
+    const std::filesystem::path sidecar = root.path / "local-commit-revisions" / revisionId;
+    std::string originalSidecar;
+    {
+        std::ifstream input(sidecar, std::ios::binary);
+        originalSidecar.assign(std::istreambuf_iterator<char>(input), {});
+        require(originalSidecar.starts_with("AOWIS-LOCAL-REVISION-INDEX-1\n"),
+                "HIST-02 revision sidecar fixture is missing");
+        std::string tampered = originalSidecar;
+        const std::size_t checksum = tampered.rfind('\n', tampered.size() - 2);
+        require(checksum != std::string::npos && checksum + 1 < tampered.size() - 1,
+                "HIST-02 revision sidecar checksum missing");
+        tampered[checksum + 1] = tampered[checksum + 1] == 'a' ? 'b' : 'a';
+        std::ofstream output(sidecar, std::ios::binary | std::ios::trunc);
+        output.write(tampered.data(), static_cast<std::streamsize>(tampered.size()));
+        require(output.good(), "could not corrupt revision sidecar fixture");
+    }
+    {
+        ProjectService corruptedIndex(root.path);
+        bool rejectedIndex = false;
+        try { (void)corruptedIndex.branchActionHistory(projectId, "main", 2); }
+        catch (const aowis::dvmdb::StorageError& error) {
+            rejectedIndex = error.kind() == aowis::dvmdb::StorageErrorKind::Corruption;
+        }
+        require(rejectedIndex, "corrupted revision index silently lost action history");
+    }
+    {
+        std::ofstream output(sidecar, std::ios::binary | std::ios::trunc);
+        output.write(originalSidecar.data(), static_cast<std::streamsize>(originalSidecar.size()));
+        require(output.good(), "could not restore revision sidecar fixture");
+    }
+    // Unrelated ledger entries must not change indexed lookup capacity.
+    // This exceeds the previous 10,000-operation bounded scan limit.
+    for (int count = 0; count < 10010; ++count) {
+        const std::filesystem::path unrelated =
+            root.path / "local-commits" / UuidV7::generate().toString();
+        std::ofstream output(unrelated, std::ios::binary);
+        output << "unrelated unindexed operation";
+        require(output.good(), "cannot create unrelated Commit fixture");
+    }
+    {
+        ProjectService largeLedger(root.path);
+        const aowis::dvmdb::BranchActionHistoryPage page =
+            largeLedger.branchActionHistory(projectId, "main", 2);
+        require(page.commits.size() == 2 && page.commits.back().actionIds.size() == 2,
+                "HIST-02 revision index still scans unrelated Commit ledger records");
     }
     // Alter the archival bytes without updating their chain digest: unlike
     // an unavailable old action, corrupted durable history is never silently
@@ -316,6 +407,28 @@ void testBranchDraftHistoryPaging() {
                 std::equal(expected.begin() + 100, expected.end(),
                            second.draftActionIds.begin()),
                 "HIST-02 paginated draft action history changed after restart");
+        const std::string token =
+            reopened.acquireWorkingCopyLease(draftId, session, 120).token;
+        const std::string operation = UuidV7::generate().toString();
+        const LocalCommitInfo committed = reopened.commitWorkingCopy(operation,
+            draftId, session, token, 125, std::nullopt, commitMetadata());
+        require(committed.state == LocalCommitState::Succeeded,
+                "HIST-02 125-event draft could not be committed");
+        const RevisionId revision = *RevisionId::parse(committed.reservedRevisionId);
+        const aowis::dvmdb::RevisionActionPage first =
+            reopened.revisionActionPage(projectId, "main", revision, 0, 100);
+        const aowis::dvmdb::RevisionActionPage last =
+            reopened.revisionActionPage(projectId, "main", revision, 100, 100);
+        require(first.total == 125 && first.actions.size() == 100 &&
+                first.nextOffset == 100 && last.total == 125 &&
+                last.actions.size() == 25 && !last.nextOffset,
+                "HIST-02 committed frame pages did not preserve 100+25 boundary");
+        for (std::size_t index = 0; index < expected.size(); ++index) {
+            const aowis::dvmdb::WorkingCopyEvent& action =
+                index < 100 ? first.actions[index] : last.actions[index - 100];
+            require(action.id == expected[index] && !action.encoded.empty(),
+                    "HIST-02 committed frame pagination changed event identity or bytes");
+        }
     }
 }
 

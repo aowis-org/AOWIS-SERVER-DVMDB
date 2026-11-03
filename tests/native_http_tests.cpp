@@ -1904,6 +1904,7 @@ void exerciseWorkingCopyHttp() {
     TemporaryRoot root;
     std::string projectId;
     std::string draftId;
+    QString encodedEvent;
     const QString firstSession = QString::fromStdString(native::UuidV7::generate().toString());
     const QString otherSession = QString::fromStdString(native::UuidV7::generate().toString());
     // MODEL edit events require UUIDv7 entity IDs, so the edited model record uses one.
@@ -2027,7 +2028,7 @@ void exerciseWorkingCopyHttp() {
             native::UuidV7::generate(), edited, native::Bytes{1, 2, 3}, native::Bytes{4, 5, 6});
         const QByteArray eventBytes(reinterpret_cast<const char*>(event.data()),
                                     static_cast<qsizetype>(event.size()));
-        const QString encodedEvent = QString::fromLatin1(eventBytes.toBase64());
+        encodedEvent = QString::fromLatin1(eventBytes.toBase64());
         const QString eventSavePath = detailPath + "/save-events";
         const QJsonObject eventSave{{"sessionId", otherSession},
                                     {"fencingToken", taken.json.value("token")},
@@ -2143,6 +2144,23 @@ void exerciseWorkingCopyHttp() {
               !commits.first().toObject().value("checkpointOnly").toBool() &&
               committedTimeline.json.value("draft").toObject().value("journalCount") == "0",
               "HIST-02 HTTP timeline lost archived actions after Commit");
+        const QString framesUrl = timelineUrl + QStringLiteral("/") +
+            QString::fromStdString(committed.reservedRevisionId) + QStringLiteral("/events");
+        const Response frames = client.call("GET", framesUrl + "?limit=1&offset=0");
+        const QJsonArray firstFrame = frames.json.value("actions").toArray();
+        const Response nextFrames = client.call("GET", framesUrl + "?limit=1&offset=1");
+        check(frames.status == 200 && frames.json.value("total") == 1 &&
+              frames.json.value("operationId") == QString::fromStdString(operation) &&
+              frames.json.value("nextOffset").isNull() &&
+              firstFrame.size() == 1 &&
+              firstFrame.first().toObject().value("frameBase64") == encodedEvent &&
+              nextFrames.status == 200 && nextFrames.json.value("actions").toArray().isEmpty() &&
+              client.call("GET", framesUrl + "?limit=0").status == 400 &&
+              client.call("GET", framesUrl + "?offset=2").status == 400 &&
+              client.call("GET", timelineUrl + "/" +
+                  QString::fromStdString(native::UuidV7::generate().toString()) +
+                  "/events").status != 200,
+              "HIST-02 HTTP archived MODEL frame retrieval was not exact and bounded");
         server.stop();
     }
 }

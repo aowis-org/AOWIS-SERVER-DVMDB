@@ -2298,6 +2298,55 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 {"nextCursor", optionalRevisionJson(page.next)}, {"draft", draftValue}}};
         });
     });
+    // HIST-02: original archived MODEL frames for a specific first-parent
+    // Commit. Checkpoint-only revisions return an empty page; no events are
+    // fabricated and no navigation or HEAD mutation occurs.
+    server.Get("/dvmdb/v1/projects/:id/branches/:branch/action-history/:revisionId/events",
+               [&service](const httplib::Request& request, httplib::Response& response) {
+        guarded(response, [&]() {
+            std::size_t offset = 0;
+            std::size_t limit = 100;
+            const std::function<std::size_t(const std::string&, std::size_t)> parseCount =
+                [](const std::string& value, std::size_t max) -> std::size_t {
+                    requireInput(!value.empty() && value.size() <= 5,
+                                 "invalid action frame pagination parameter");
+                    std::size_t parsed = 0;
+                    const std::from_chars_result result =
+                        std::from_chars(value.data(), value.data() + value.size(), parsed);
+                    requireInput(result.ec == std::errc() &&
+                                 result.ptr == value.data() + value.size() && parsed <= max,
+                                 "invalid action frame pagination parameter");
+                    return parsed;
+                };
+            if (const std::optional<std::string> value = queryValue(request, "offset"))
+                offset = parseCount(*value, 4096);
+            if (const std::optional<std::string> value = queryValue(request, "limit")) {
+                limit = parseCount(*value, 100);
+                requireInput(limit > 0, "invalid action frame page limit");
+            }
+            const RevisionActionPage page = service.revisionActionPage(
+                pathParam(request, "id"), pathParam(request, "branch"),
+                parseRevisionId(pathParam(request, "revisionId")), offset, limit);
+            QJsonArray actions;
+            for (const WorkingCopyEvent& event : page.actions) {
+                const QByteArray bytes(reinterpret_cast<const char*>(event.encoded.data()),
+                                       static_cast<qsizetype>(event.encoded.size()));
+                actions.append(QJsonObject{
+                    {"id", QString::fromStdString(event.id)},
+                    {"frameBase64", QString::fromLatin1(bytes.toBase64())}});
+            }
+            return Reply{200, QJsonObject{
+                {"revisionId", QString::fromStdString(page.revisionId)},
+                {"operationId", page.commitOperationId
+                    ? QJsonValue(QString::fromStdString(*page.commitOperationId))
+                    : QJsonValue(QJsonValue::Null)},
+                {"total", static_cast<int>(page.total)},
+                {"actions", actions},
+                {"nextOffset", page.nextOffset
+                    ? QJsonValue(static_cast<int>(*page.nextOffset))
+                    : QJsonValue(QJsonValue::Null)}}};
+        });
+    });
     server.Get("/dvmdb/v1/projects/:id/branches/:branch/history",
                [&service](const httplib::Request& request, httplib::Response& response) {
         guarded(response, [&]() {
