@@ -884,6 +884,12 @@ void verifyEditImages(ProjectService& service, const WorkingCopyInfo& draft,
             requireInput(!change->record, "candidate keeps an entity that MODEL events removed");
         }
     }
+    // A root-only event must never smuggle additional typed writes now that
+    // mixed root/entity batches are supported. More generally, every client
+    // record must be represented by a reversible MODEL entity edit.
+    for (const ModelChange& change : changes)
+        requireInput(state.contains(change.key),
+                     "candidate contains a model change absent from MODEL events");
 }
 #endif
 
@@ -1801,41 +1807,30 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             std::vector<ModelChange> materialized = changes;
             std::optional<std::string> logicalRequestFingerprint;
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
-            // Root metadata is encoded as one reversible MODEL event; the
-            // server creates its private kind-100 manifest record. The client
-            // never sends or guesses manifest/chunk bytes. A zero-record Save
-            // is legal ONLY for this one special edit.
-            bool rootEvent = false;
-            for (const aowis::model::ModelEditTransaction& transaction : transactions)
-                for (const aowis::model::ModelEntityEdit& edit : transaction.edits)
-                    if (edit.entityType == QString::fromLatin1(aowis::model::hydraulicRootEditType))
-                        rootEvent = true;
-            if (rootEvent) {
-                requireInput(transactions.size() == 1 && transactions.front().edits.size() == 1 &&
-                             changes.empty() && !body.contains("membership"),
-                             "root metadata must be one event with no client model records or membership");
-                // Fingerprint the logical request, not generated native bytes,
-                // so replay after lost acknowledgement stays idempotent.
+            // The root image belongs to the same reversible MODEL transaction
+            // as its ordinary entity edits. Native kind-100 and kind-101
+            // records remain entirely server-owned. Materialize root metadata
+            // *after* membership so both changes produce one final manifest.
+            const aowis::model::ModelEntityEdit* rootEdit = nullptr;
+            for (const aowis::model::ModelEditTransaction& transaction : transactions) {
+                for (const aowis::model::ModelEntityEdit& edit : transaction.edits) {
+                    if (edit.entityType != QString::fromLatin1(aowis::model::hydraulicRootEditType))
+                        continue;
+                    requireInput(rootEdit == nullptr && transactions.size() == 1 &&
+                                 edit.before.has_value() && edit.after.has_value(),
+                                 "only one reversible network-root edit is allowed in one event batch");
+                    rootEdit = &edit;
+                }
+            }
+            requireInput(rootEdit != nullptr || !changes.empty(),
+                         "ordinary edit events require model records");
+            if (rootEdit) {
+                // Materialized manifest/chunk bytes depend on the current
+                // generation; fingerprint the logical request for exact
+                // lost-acknowledgement replay instead.
                 const QByteArray bytes = QJsonDocument(body).toJson(QJsonDocument::Compact);
                 logicalRequestFingerprint = QCryptographicHash::hash(
                     bytes, QCryptographicHash::Sha256).toHex().toStdString();
-                const std::uint64_t expected = strictUint64(body, "expectedGeneration");
-                if (current.generation == expected) {
-                    std::map<Key, std::optional<ModelRecord>> overlay;
-                    for (const ModelChange& change : current.candidateChanges)
-                        overlay.emplace(change.key, change.record);
-                    const std::function<std::optional<ModelRecord>(const Key&)> reader =
-                        [&service, &current, &overlay](const Key& key) -> std::optional<ModelRecord> {
-                        const std::map<Key, std::optional<ModelRecord>>::const_iterator item = overlay.find(key);
-                        if (item != overlay.end()) return item->second;
-                        if (!current.baseRevision) return std::nullopt;
-                        return service.getModelAtRevision(current.projectId, *current.baseRevision, key);
-                    };
-                    materialized.push_back(hydraulic::materializeDraftRootEdit(
-                        reader, transactions.front().edits.front()));
-                }
-            } else {
-                requireInput(!changes.empty(), "ordinary edit events require model records");
             }
 #endif
             if (body.contains("membership")) {
@@ -1963,6 +1958,33 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                                    "hydraulic membership requires the model persistence build");
 #endif
             }
+#ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
+            // Membership may have produced an updated kind-100 manifest.
+            // Build the final candidate overlay and apply the metadata edit to
+            // that manifest, never emit two changes for the same root UUID.
+            if (rootEdit && current.generation == strictUint64(body, "expectedGeneration")) {
+                std::map<Key, std::optional<ModelRecord>> overlay;
+                for (const ModelChange& change : current.candidateChanges)
+                    overlay[change.key] = change.record;
+                for (const ModelChange& change : materialized)
+                    overlay[change.key] = change.record;
+                const std::function<std::optional<ModelRecord>(const Key&)> reader =
+                    [&service, &current, &overlay](const Key& key) -> std::optional<ModelRecord> {
+                    const std::map<Key, std::optional<ModelRecord>>::const_iterator item = overlay.find(key);
+                    if (item != overlay.end()) return item->second;
+                    if (!current.baseRevision) return std::nullopt;
+                    return service.getModelAtRevision(current.projectId, *current.baseRevision, key);
+                };
+                ModelChange metadata = hydraulic::materializeDraftRootEdit(reader, *rootEdit);
+                std::vector<ModelChange>::iterator existing =
+                    std::find_if(materialized.begin(), materialized.end(),
+                        [&metadata](const ModelChange& item) { return item.key == metadata.key; });
+                if (existing != materialized.end())
+                    *existing = std::move(metadata);
+                else
+                    materialized.push_back(std::move(metadata));
+            }
+#endif
             const WorkingCopyInfo saved = service.saveWorkingCopyTransactions(
                 pathParam(request, "draft"), requiredString(body, "sessionId"),
                 requiredString(body, "fencingToken"), strictUint64(body, "expectedGeneration"),

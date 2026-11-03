@@ -234,12 +234,15 @@ includes a root-metadata materialization followed by immutable Commit,
 repository restart, verify and compaction with all 18 collections present.
 The GUI test independently captures 18 collection insertions and a rich root
 metadata edit in one durable queue, and checks exact equality after queue
-restarts and acknowledgements. **These are separate event transactions:**
-current `POST /working-copies/{draft}/save-events` deliberately prohibits
-combining root edits with typed entity/membership changes in the same event.
-Actual HTTP/Standalone round-trips, every UI setter, undo/redo and mixed
-single-operation atomicity remain implementation/acceptance work. Tests are
-not recorded as passing until executed in the target Qt environment.
+restarts and acknowledgements. The subsequent **mixed-save implementation**
+allows one MODEL transaction to combine root metadata, typed records and
+membership intents. DVMDB derives chunks first, then overwrites the final
+server-owned root manifest with the metadata update, so only one native root
+change is applied atomically. New HTTP and GUI regressions test the mixed
+request, idempotent replay, stale before-image rejection and queue restart.
+These tests still require execution in the target Qt environment; complete
+external HTTP/Standalone process round-trips, every UI setter and undo/redo
+remain outstanding acceptance work.
 
 ### INT-06 — Define and deliver explicit import operations
 

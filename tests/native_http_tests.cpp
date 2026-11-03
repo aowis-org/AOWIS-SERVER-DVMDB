@@ -2210,6 +2210,15 @@ void exerciseUnbornNetworkInitializationHttp() {
         event.operation = QStringLiteral("hydraulic.junction.create");
         event.edits.append(aowis::model::ModelEntityEdit{
             junctionUuid, QStringLiteral("HydraulicNodeJunction"), std::nullopt, bytes});
+        // Creating the first member also creates its membership chunk and
+        // rewrites the native root. The metadata edit must be composed onto
+        // that same server-owned root without generating a duplicate key.
+        NetworkHydraulic initialMixedRoot = *firstNetwork;
+        initialMixedRoot.title_line_3 = QStringLiteral("First member and root metadata");
+        event.edits.append(aowis::model::ModelEntityEdit{
+            networkUuid, QString::fromLatin1(aowis::model::hydraulicRootEditType),
+            aowis::model::hydraulicRootImage(*firstNetwork),
+            aowis::model::hydraulicRootImage(initialMixedRoot)});
         QString encodingError;
         const QByteArray frame = aowis::model::ModelEditTransactionCodec::encode(event, &encodingError);
         check(!frame.isEmpty(), "failed to encode first unborn junction event");
@@ -2241,6 +2250,7 @@ void exerciseUnbornNetworkInitializationHttp() {
               populatedNetwork && populatedNetwork->nodes_junctions.size() == 1 &&
               populatedNetwork->nodes_junctions.first().uuid == junctionUuid &&
               populatedNetwork->nodes_junctions.first().elevation_m == 12 &&
+              populatedNetwork->title_line_3 == QStringLiteral("First member and root metadata") &&
               !service.optionalHead(project.id, "main").has_value(),
               "saved membership did not hydrate canonical draft network");
         // Root metadata uses the same fenced event journal, but no client
@@ -2294,13 +2304,107 @@ void exerciseUnbornNetworkInitializationHttp() {
               "stale network-root before-image changed the saved draft");
         const Response after = client.call("POST", path + "/initialize-network", request);
         check(after.status == 409, "initialization replay was accepted after later edit");
+        // INT-05: one reversible MODEL transaction changes server-owned root
+        // metadata and inserts an entity. Its native manifest must be updated
+        // only once, regardless of whether membership creates a new chunk.
+        const QUuid additionalUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+        const QString additionalId = additionalUuid.toString(QUuid::WithoutBraces);
+        HydraulicNodeJunction additional;
+        additional.uuid = additionalUuid;
+        additional.id = QStringLiteral("J2");
+        additional.elevation_m = 27;
+        const QByteArray additionalBytes = native::ModelCodec<HydraulicNodeJunction>::encode(additional);
+        NetworkHydraulic mixedExpected = *finalRoot;
+        mixedExpected.title_line_2 = QStringLiteral("Mixed atomic root and entity edit");
+        aowis::model::ModelEditTransaction mixedEvent;
+        mixedEvent.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+        mixedEvent.operation = QStringLiteral("hydraulic.network.mixed");
+        mixedEvent.edits.append(aowis::model::ModelEntityEdit{
+            networkUuid, QString::fromLatin1(aowis::model::hydraulicRootEditType),
+            aowis::model::hydraulicRootImage(*finalRoot),
+            aowis::model::hydraulicRootImage(mixedExpected)});
+        mixedEvent.edits.append(aowis::model::ModelEntityEdit{
+            additionalUuid, QStringLiteral("HydraulicNodeJunction"), std::nullopt, additionalBytes});
+        const QByteArray mixedFrame = aowis::model::ModelEditTransactionCodec::encode(mixedEvent);
+        check(!mixedFrame.isEmpty(), "failed to encode mixed hydraulic transaction");
+        const QJsonObject mixedSave{{"sessionId", session}, {"fencingToken", token},
+            {"expectedGeneration", QStringLiteral("3")},
+            {"changes", QJsonArray{QJsonObject{{"uuid", additionalId}, {"kind", 1},
+                {"references", QJsonArray{}},
+                {"payloadBase64", QString::fromLatin1(additionalBytes.toBase64())}}}},
+            {"membership", QJsonArray{QJsonObject{{"networkId", networkId},
+                {"entityId", additionalId}, {"kind", 1}, {"collectionIndex", 9},
+                {"inserted", true}}}},
+            {"events", QJsonArray{QString::fromLatin1(mixedFrame.toBase64())}}};
+        const QUuid unrelatedUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+        HydraulicNodeJunction unrelated = additional;
+        unrelated.uuid = unrelatedUuid;
+        unrelated.id = QStringLiteral("Unjournaled");
+        const QByteArray unrelatedBytes = native::ModelCodec<HydraulicNodeJunction>::encode(unrelated);
+        QJsonObject unjournaled = mixedSave;
+        QJsonArray unjournaledChanges = mixedSave.value("changes").toArray();
+        unjournaledChanges.append(QJsonObject{
+            {"uuid", unrelatedUuid.toString(QUuid::WithoutBraces)}, {"kind", 1},
+            {"references", QJsonArray{}},
+            {"payloadBase64", QString::fromLatin1(unrelatedBytes.toBase64())}});
+        unjournaled.insert("changes", unjournaledChanges);
+        check(client.call("POST", path + "/save-events", unjournaled).status == 400 &&
+              client.call("GET", path).json.value("generation") == "3",
+              "mixed Save accepted a typed record absent from its MODEL event");
+        const Response mixedSaved = client.call("POST", path + "/save-events", mixedSave);
+        if (mixedSaved.status != 200)
+            throw std::runtime_error("mixed root/entity Save failed: HTTP " +
+                std::to_string(mixedSaved.status) + " " +
+                QJsonDocument(mixedSaved.json).toJson(QJsonDocument::Compact).toStdString());
+        const Response mixedReplayed = client.call("POST", path + "/save-events", mixedSave);
+        const Response mixedView = client.call("GET", path + "/networks/" + networkId);
+        const std::optional<NetworkHydraulic> mixedNetwork =
+            native::ModelCodec<NetworkHydraulic>::decode(QByteArray::fromBase64(
+                mixedView.json.value("payloadBase64").toString().toLatin1()));
+        mixedExpected.nodes_junctions.append(additional);
+        check(mixedSaved.json.value("generation") == "4" &&
+              mixedReplayed.status == 200 && mixedReplayed.json.value("generation") == "4" &&
+              mixedView.status == 200 && mixedNetwork &&
+              native::ModelCodec<NetworkHydraulic>::encode(*mixedNetwork) ==
+                  native::ModelCodec<NetworkHydraulic>::encode(mixedExpected) &&
+              client.call("GET", path).json.value("events").toArray().size() == 3,
+              "mixed root/entity event did not persist exactly once with complete canonical equality");
+        // Bad before-image must not partially save an entity or change the
+        // root, even when the mixed request includes a valid membership delta.
+        aowis::model::ModelEditTransaction staleMixed = mixedEvent;
+        staleMixed.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+        const QUuid rejectedUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+        HydraulicNodeJunction rejected = additional;
+        rejected.uuid = rejectedUuid;
+        rejected.id = QStringLiteral("J3");
+        const QByteArray rejectedBytes = native::ModelCodec<HydraulicNodeJunction>::encode(rejected);
+        for (aowis::model::ModelEntityEdit& edit : staleMixed.edits) {
+            if (edit.entityType == QStringLiteral("HydraulicNodeJunction")) {
+                edit.entityId = rejectedUuid;
+                edit.after = rejectedBytes;
+            }
+        }
+        QJsonObject staleMixedSave = mixedSave;
+        staleMixedSave.insert("expectedGeneration", QStringLiteral("4"));
+        staleMixedSave.insert("changes", QJsonArray{QJsonObject{
+            {"uuid", rejectedUuid.toString(QUuid::WithoutBraces)}, {"kind", 1},
+            {"references", QJsonArray{}},
+            {"payloadBase64", QString::fromLatin1(rejectedBytes.toBase64())}}});
+        staleMixedSave.insert("membership", QJsonArray{QJsonObject{
+            {"networkId", networkId}, {"entityId", rejectedUuid.toString(QUuid::WithoutBraces)},
+            {"kind", 1}, {"collectionIndex", 9}, {"inserted", true}}});
+        staleMixedSave.insert("events", QJsonArray{QString::fromLatin1(
+            aowis::model::ModelEditTransactionCodec::encode(staleMixed).toBase64())});
+        check(client.call("POST", path + "/save-events", staleMixedSave).status == 409 &&
+              client.call("GET", path).json.value("generation") == "4",
+              "mixed transaction accepted stale metadata and partially persisted an entity");
         server.stop();
     }
     {
         native::ProjectService reopened(root.root());
         const native::WorkingCopyInfo draft = reopened.workingCopy(draftId);
-        check(!draft.baseRevision && draft.generation == 3 && draft.journal.size() == 2 &&
-              draft.candidateChanges.size() >= 3 &&
+        check(!draft.baseRevision && draft.generation == 4 && draft.journal.size() == 3 &&
+              draft.candidateChanges.size() >= 4 &&
               !reopened.optionalHead(projectId, "main").has_value(),
               "first hydraulic network, member and root edit did not survive service restart");
         TestServer server(reopened, native::BundleLimits{4ULL * 1024ULL * 1024ULL,
@@ -2309,20 +2413,21 @@ void exerciseUnbornNetworkInitializationHttp() {
         const QString reopenedPath = QStringLiteral("/dvmdb/v1/working-copies/")
             + QString::fromStdString(draftId);
         const Response recoveredSummary = client.call("GET", reopenedPath + "/networks/summary");
-        check(recoveredSummary.status == 200 && recoveredSummary.json.value("generation") == "3" &&
+        check(recoveredSummary.status == 200 && recoveredSummary.json.value("generation") == "4" &&
               recoveredSummary.json.value("networkCount") == 1 &&
               recoveredSummary.json.value("networks").toArray().first().toObject()
-                  .value("counts").toObject().value("junctions") == 1,
+                  .value("counts").toObject().value("junctions") == 2,
               "private network summary was lost after DVMDB restart");
         const Response recovered = client.call("GET", QStringLiteral("/dvmdb/v1/working-copies/")
             + QString::fromStdString(draftId) + "/networks/" + networkId);
         const std::optional<NetworkHydraulic> restored = native::ModelCodec<NetworkHydraulic>::decode(
             QByteArray::fromBase64(recovered.json.value("payloadBase64").toString().toLatin1()));
-        check(recovered.status == 200 && recovered.json.value("generation") == "3" &&
+        check(recovered.status == 200 && recovered.json.value("generation") == "4" &&
               restored && restored->title_line_1 == QStringLiteral("Saved root metadata") &&
               restored->options_hydraulic.headloss_formula == HydraulicHeadlossFormula::DarcyWeisbach &&
-              restored->nodes_junctions.size() == 1 &&
-              restored->nodes_junctions.first().uuid == junctionUuid,
+              restored->nodes_junctions.size() == 2 &&
+              restored->nodes_junctions.first().uuid == junctionUuid &&
+              restored->title_line_2 == QStringLiteral("Mixed atomic root and entity edit"),
               "restart failed to hydrate saved unborn hydraulic draft");
         server.stop();
     }
