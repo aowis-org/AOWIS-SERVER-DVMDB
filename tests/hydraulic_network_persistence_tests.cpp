@@ -1660,6 +1660,83 @@ void exerciseUuidV7FastForward() {
     std::filesystem::remove_all(folder, ignored);
 }
 
+// INT-00: a representable but non-simulatable engineering state is still a
+// legitimate immutable revision. A junction-only network has no hydraulic
+// supply. Neither the draft transport nor the version-control layer may
+// demand a successful hydraulic simulation before preserving that state.
+void exerciseInt00IncompleteNetworkRoundTrip() {
+    const std::filesystem::path folder = tempDir();
+    try {
+        NetworkHydraulic incomplete;
+        incomplete.uuid = uuid(4500);
+        incomplete.id = QStringLiteral("Unfinished network - no water source");
+        incomplete.nodes_junctions.append(item<HydraulicNodeJunction>(4501));
+        incomplete.nodes_junctions.append(item<HydraulicNodeJunction>(4502));
+        // There is deliberately no reservoir, tank, pipe or pump. The
+        // independent solver has no supply, but all stored IDs are canonical.
+        require(incomplete.nodes_reservoirs.isEmpty() && incomplete.nodes_tanks.isEmpty(),
+                "INT-00 test accidentally supplied a hydraulic source");
+
+        const std::vector<native::ModelChange> draftChanges =
+            hydraulic::fullDraftHydraulicNetworkChanges(incomplete);
+        std::map<native::Key, native::ModelRecord> draft;
+        for (const native::ModelChange& change : draftChanges) {
+            require(change.record.has_value(), "INT-00 draft contained deletion");
+            require(draft.emplace(change.key, *change.record).second,
+                    "INT-00 draft contains duplicate UUID");
+        }
+        const std::function<std::optional<native::ModelRecord>(const native::Key&)> reader =
+            [&draft](const native::Key& key) -> std::optional<native::ModelRecord> {
+                const std::map<native::Key, native::ModelRecord>::const_iterator found =
+                    draft.find(key);
+                return found == draft.end() ? std::nullopt :
+                    std::optional<native::ModelRecord>(found->second);
+            };
+        const std::optional<NetworkHydraulic> draftNetwork =
+            hydraulic::loadDraftHydraulicNetwork(reader, incomplete.uuid);
+        require(draftNetwork.has_value(), "INT-00 incomplete draft was not readable");
+        compareNetworks(incomplete, *draftNetwork);
+
+        const native::ProjectId project = native::ProjectId::generate();
+        native::RevisionId committed = native::RevisionId::generate();
+        {
+            native::Repository repository(folder);
+            const native::RevisionId root =
+                repository.createRootBranch(project, "main", commitMetadata());
+            committed = repository.commitModel(project, "main", draftChanges,
+                                               commitMetadata(), root);
+            require(repository.createBranchAtRevision(project, "explore-fix", "main", committed) ==
+                    committed, "INT-00 could not branch from incomplete network");
+            require(repository.head(project, "main") == committed &&
+                    repository.head(project, "explore-fix") == committed,
+                    "INT-00 branch changed the source history");
+            const std::optional<NetworkHydraulic> restored =
+                hydraulic::loadHydraulicNetworkAtRevision(repository, project, committed, incomplete.uuid);
+            require(restored.has_value(), "INT-00 committed network missing");
+            compareNetworks(incomplete, *restored);
+            (void)repository.verifyRepository();
+            (void)repository.compact();
+        }
+        {
+            native::Repository reopened(folder);
+            require(reopened.head(project, "main") == committed &&
+                    reopened.head(project, "explore-fix") == committed,
+                    "INT-00 incomplete network history changed after restart");
+            const std::optional<NetworkHydraulic> restored =
+                hydraulic::loadHydraulicNetworkAtRevision(reopened, project, committed, incomplete.uuid);
+            require(restored.has_value(), "INT-00 incomplete network lost on restart");
+            compareNetworks(incomplete, *restored);
+            (void)reopened.verifyRepository();
+        }
+    } catch (...) {
+        std::error_code ignored;
+        std::filesystem::remove_all(folder, ignored);
+        throw;
+    }
+    std::error_code ignored;
+    std::filesystem::remove_all(folder, ignored);
+}
+
 void exerciseAtomicRootMetadataEdit() {
     const NetworkHydraulic before = completeNetwork();
     const std::vector<native::ModelChange> records =
@@ -1719,6 +1796,7 @@ int main(int argc, char** argv) {
     QCoreApplication application(argc, argv);
     try {
         exerciseAtomicRootMetadataEdit();
+        exerciseInt00IncompleteNetworkRoundTrip();
         exerciseUuidV7Hydraulic();
         exerciseUuidV7IndexedReferences();
         exerciseUuidV7IndexedMembership();

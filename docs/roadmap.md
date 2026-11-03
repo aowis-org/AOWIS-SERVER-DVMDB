@@ -140,6 +140,11 @@ remote collaboration; P3 = qualification and scale.
   existing MODEL types cannot represent a desired defect, document that
   precise limitation before changing the type/codec.
 
+**INT-00 implementation audit:** [model-validity boundary audit](model-validity-boundary-audit.md)
+records the precise existing guards and an incomplete-network round-trip
+regression. The audit is done; the **full lossless-invalid-state acceptance gate
+remains open** and is assigned to INT-04 and the later transport milestones.
+
 ### INT-01 — Repository-pinned mutable metadata (GUI/HTTP)
 
 * The GUI's `ProjectSourceWriter` must verify expected repository UUID and
