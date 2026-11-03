@@ -50,9 +50,9 @@ All seven are decided and binding.
 | **DG-02** drafts and sessions | VC-04 | One private DVMDB per intended user; a separate draft per session by default. Many readers, one writer: an expiring exclusive lease with fencing token **and** expected generation, checked atomically on every write. An expired lease may be taken over, never used to delete or to overwrite with stale data. A Save is durable before it is acknowledged. |
 | **DG-03** idempotent operations | VC-05, VC-07 | Every Commit and Publish carries a caller-chosen UUIDv7 operation ID, a request digest and its target scope. `pending`/`succeeded`/`rejected` is durable; an identical retry returns the same outcome, a different request under the same ID is rejected. After a timeout, ask for the outcome under the same ID. Unresolved operations never expire. |
 | **DG-04** pre-release formats | all | No backward compatibility or migration before the first release. Replace formats cleanly and reject unsupported data explicitly. Never silently rewrite history or disguise a failing fixture. |
-| **DG-05** reconciliation | VC-08 | Explicit Fetch, safe fast-forward and three-way merge from a committed common ancestor with ordered parents, entity-UUID comparison, manual conflict resolution; hydraulic validation is diagnostic only and never a merge/Publish gate. No automatic rebase, force push, octopus merge, last-writer-wins or implicit Publish. An unresolved merge stays a draft. |
+| **DG-05** reconciliation | VC-08 | Explicit Fetch, safe fast-forward and three-way merge from a committed common ancestor with ordered parents, entity-UUID comparison, manual conflict resolution; hydraulic feasibility is diagnostic only and never a merge/Publish gate. No automatic rebase, force push, octopus merge, last-writer-wins or implicit Publish. An unresolved merge stays a draft. |
 | **DG-06** first remote publication | VC-06, VC-07 | Clone keeps branch UUIDs. A local branch is provisioned on the remote **with its UUIDv7**, idempotently, with verified project, origin and fork. First publication of an unborn branch expects `null`; an absent branch is not a null-HEAD branch. No remote branch is synthesized after a failed Publish. |
-| **DG-07** non-blocking hydraulic diagnostics | all | Commit, Publish, Fetch and Merge must preserve any structurally representable model, even with dangling hydraulic references, incomplete topology or solver errors. Reject malformed/ambiguous storage records and broken revision invariants. Existing strict hydraulic APIs must be changed or bypassed by an explicit lossless version-control path; never claim current strict paths already comply. |
+| **DG-07** non-blocking hydraulic diagnostics | all | Commit, Publish, Fetch and Merge must not require a water source, connected topology or successful simulation. Retain canonical storage, revision and existing model-reference invariants. Permitting dangling hydraulic UUID references is a separate unresolved policy decision, not an INT-04 prerequisite. |
 
 Parameters still to fix inside their milestones: draft quotas and retention,
 operation-result retention, conflict report format.
@@ -69,7 +69,7 @@ accepted on every platform. Verify with the current test suite.
 | **VC-02** branch creation and provenance | from committed revision; multiple independent unborn branches; metadata and identity-based rename even when unborn | old name-addressed rename and model-commit endpoints still require non-null HEAD |
 | **VC-03** repository identity and tracking | `repository.id`, one-time role, remote registry, CAS tracking records; `GET /repository/tracking`, `POST /repository/role` | HTTP routes to register remotes and record observations; GUI repository configuration |
 | **VC-04** drafts | create/read/list/lease, event Save, first-network initialization, saved draft summary, empty-unborn draft import, network load, discard, crash tests | complete mutation-path and standalone end-to-end verification; general replacement/merge import |
-| **VC-05** local Commit | native + HTTP Commit/status and GUI HEAD Commit action; strict nullable-HEAD CAS, reserved revision UUID, durable ledger, replay, draft rebase after success | audit/refactor strict model-reference restrictions under DG-07, plus end-to-end failure-mode/platform acceptance |
+| **VC-05** local Commit | native + HTTP Commit/status and GUI HEAD Commit action; strict nullable-HEAD CAS, reserved revision UUID, durable ledger, replay, draft rebase after success | end-to-end failure-mode/platform acceptance (strict model-reference checks are a separate policy decision) |
 | **VC-06** Fetch and clone | verified full/incremental bundles (CLI, HTTP), identity-preserving project and unborn-branch provisioning | Fetch into a personal repository that updates tracking records; pinned remote reads |
 | **VC-07** Publish | — | object transfer plus conditional shared-HEAD move, remote branch provisioning, Publish ledger and status |
 | **VC-08** reconciliation | generic and hydraulic three-way merges with pinned HEADs and explicit choices | compare/reconcile of a draft against a new HEAD; replace blocking hydraulic merge validation with optional diagnostics; recursive merge bases (criss-cross histories are refused) |
@@ -81,7 +81,7 @@ accepted on every platform. Verify with the current test suite.
 
 1. Apply DG-07 and resolve P0 repository-pinning, Commit-intent recovery and
    complete working-copy discovery (INT-00..03).
-2. Make model-validity diagnostics non-blocking, then prove complete
+2. Keep hydraulic-solvability diagnostics non-blocking, then prove complete
    `NetworkHydraulic` entity/root capture and persistent exact recovery
    across desktop HTTP and embedded Standalone (INT-04..05).
 3. Complete import/replacement semantics and a truly usable local
@@ -103,11 +103,11 @@ remote collaboration; P3 = qualification and scale.
 
 | ID | Priority | Lead / dependency | Deliverable | Completion gate |
 |---|---|---|---|---|
-| **INT-00** | P0 | DVMDB + MODEL + GUI; first | Non-blocking model validity policy, current-path audit, consistent contracts | Invalid but representable snapshot round-trips; invalid bytes and repository corruption still fail |
+| **INT-00** | P0 | DVMDB + MODEL + GUI; first | Non-blocking hydraulic-feasibility policy, current-path audit, consistent contracts | Unsupplied/disconnected network round-trips; reference restrictions stay strict |
 | **INT-01** | P0 | GUI + DVMDB; INT-00 | Repository-pinned metadata writes, explicit stale/unknown-target outcomes | Endpoint switch/replacement cannot mutate another repository |
 | **INT-02** | P0 | GUI; existing DVMDB Commit ledger | Durable operation IDs and status reconciliation for Commit | Lost POST *and* status reply, crash/restart, and retries produce one Commit |
 | **INT-03** | P0 | GUI; existing DVMDB paging | Complete paginated working-copy discovery and scalable catalogues | 101/250+ drafts and broad branch history remain discoverable |
-| **INT-04** | P1 | MODEL + DVMDB; INT-00 | Structural integrity separated from engineering diagnostics on Save/read/Commit/Merge | Incomplete and dangling-reference models remain reconstructable, without bypassing storage safeguards |
+| **INT-04** | P1 | GUI + DVMDB; INT-00 | Protect non-blocking hydraulic/solver diagnostics across capture, Save, Commit and restart | Unsupplied and disconnected but referentially consistent models round-trip; strict reference checks remain unchanged |
 | **INT-05** | P1 | GUI + MODEL + DVMDB; INT-04 | Every hydraulic mutation and network-root field captured atomically | 18/18 collections + root survive exact reopen after both process restarts |
 | **INT-06** | P1 | GUI + DVMDB; INT-05 | Explicit safe network creation/import/replacement and selected-entity import | No discarded unsaved events, ambiguous replacement, or partial server mutation |
 | **INT-07** | P1 | GUI + DVMDB; INT-02,05 | Complete local HEAD/branch/draft editing + Commit UX | Unborn, branch, Commit, invalid model and restart work without shared HEAD moves |
@@ -120,10 +120,10 @@ remote collaboration; P3 = qualification and scale.
 ### INT-00 — Fix the model-validity contract (decision, audit, regression)
 
 * **Decided:** Commit, Fetch, Publish, branch creation and Merge may preserve an
-  intentionally inconsistent, disconnected, incomplete or solver-invalid
-  hydraulic network. Diagnostic validation **never blocks version-control
-  advancement solely for hydraulic/domain reasons**. Save must also preserve
-  representable intermediate models, subject to the same storage boundary.
+  disconnected, unsupplied, incomplete or solver-invalid **but referentially
+  consistent** hydraulic network. Hydraulic feasibility alone never blocks
+  version-control advancement. Save preserves such intermediate states,
+  subject to the same storage and model-reference rules.
 * **Hard failures remain:** malformed/noncanonical record bytes, invalid or
   colliding persisted IDs, invalid revision parents, corrupt hashes, broken
   physical membership/index invariants, failed atomic transactions, stale
@@ -131,19 +131,20 @@ remote collaboration; P3 = qualification and scale.
   concurrency failures, not hydraulic assessments.
 * **Audit first:** `Repository::commitModel`, MODEL codec, record/reference
   indexing, draft event Save, candidate hydration and the hydraulic merge and
-  fast-forward callbacks. A dangling *valid UUID reference* is a domain
-  diagnostic when its exact state can be preserved; do not silently discard
-  it, invent a referenced entity or coerce it into a valid network.
-* **Evidence:** one intentionally broken but structurally representable model
-  survives Save → Commit → branch → Fetch/Publish → Merge → restore byte for
-  byte; malformed records and dangling **revision parents** still fail. If
-  existing MODEL types cannot represent a desired defect, document that
-  precise limitation before changing the type/codec.
+  fast-forward callbacks. Missing/incorrect hydraulic model references are
+  currently rejected and remain a **separate policy decision**. Do not
+  loosen reference checks without first designing consistent indexing, import
+  and repository verification semantics.
+* **Evidence:** one hydraulically unsolvable but referentially consistent
+  network survives Save → Commit → branch → restore byte for byte. Expand
+  Fetch/Publish/Merge regression coverage during INT-08..10; malformed
+  records and dangling revision parents must still fail.
 
 **INT-00 implementation audit:** [model-validity boundary audit](model-validity-boundary-audit.md)
 records the precise existing guards and an incomplete-network round-trip
-regression. The audit is done; the **full lossless-invalid-state acceptance gate
-remains open** and is assigned to INT-04 and the later transport milestones.
+regression. The source audit is done; GUI durable queue coverage is added in
+INT-04. Full HTTP/Standalone and collaboration acceptance is still open in
+INT-05 and INT-08..11.
 
 ### INT-01 — Repository-pinned mutable metadata (GUI/HTTP)
 
@@ -196,23 +197,21 @@ remains open.
 * **Evidence:** at least 101 and 250 drafts, filters, concurrent additions,
   100+ projects, broad branch sets and incomplete/changed cursors.
 
-### INT-04 — Durable representation of imperfect models
+### INT-04 — Non-blocking hydraulic feasibility (without weakening references)
 
-* Preserve malformed **engineering topology** (missing connected endpoint,
-  dangling hydraulic dependency, disconnected network, unsatisfied solver
-  rule) when the underlying identity/record encoding is well formed.
-* Separate non-mutating diagnostic validation from codec parsing and storage
-  integrity. Draft reads, candidate reconstruction, merges and exports must
-  not silently drop a representable entity because it fails hydraulic rules.
-* Existing strict whole-network Save, `hydraulic::mergeHydraulicBranches`
-  and fast-forward paths are **currently stricter**; refactor or introduce a
-  clearly designated lossless version-control path rather than misrepresent
-  their behavior. Keep invalid MODEL *bytes* and duplicate object identities
-  rejected. Introduce a read-only validation report keyed by snapshot or
-  draft identity/generation; results are warnings/errors, **not** CAS gates.
-* **Evidence:** clean and broken baselines, deliberately deleted junction with
-  surviving valid pipe UUID reference, repeated round trips, no silent repair,
-  identical native/HTTP behavior, and storage-corruption negative tests.
+* Preserve hydraulically unsolvable but referentially consistent network
+  states: absent reservoir/tank/supply, disconnected components and solver
+  infeasibility are not reasons to reject Save, Commit or Branch.
+* Verify GUI capture, canonical event staging, durable queue restart and
+  native draft/Commit/branch/revision reconstruction. Keep existing guards
+  against malformed MODEL bytes, duplicate identities, stale fences and
+  dangling or wrong-type hydraulic UUID references unchanged.
+* Record the unresolved *reference-policy* choice separately. If permitting
+  dangling references is chosen later, design reverse-index integrity,
+  bundle verification, import and merge before changing any guard.
+* **Evidence:** the INT-00 DVMDB unsupplied-network regression and an INT-04
+  GUI disconnected/unsupplied edit + queue-recovery regression. Full HTTP,
+  Standalone, Fetch/Publish/Merge qualification remains in later milestones.
 
 ### INT-05 — Full hydraulic editing capture and persistence
 
@@ -289,11 +288,11 @@ remains open.
   A fast-forward needs approval; divergence uses a three-way merge with
   field/object choices, delete/edit diagnostics and ordered two-parent
   revision in the private repository. Never silently consume a dirty draft.
-* Manual **merge conflicts** require resolution; **hydraulic diagnostic
+* Manual **merge conflicts** require resolution; **hydraulic feasibility diagnostic
   findings do not**. A user may deliberately choose the broken model in a
   merge. Existing strict hydraulic merge/fast-forward validation needs a
   non-blocking path consistent with INT-00 and INT-04.
-* **Evidence:** compatible and contradictory edits, dangling-reference
+* **Evidence:** compatible and contradictory edits, unsupplied/disconnected
   outcome chosen explicitly, cancellation, stale pins, merge-base ambiguity,
   2-parent DAG and explicit subsequent Publish.
 
@@ -454,8 +453,9 @@ acceptance scenarios below pass and the evidence is recorded.
    duplicates.
 8. Wrong project, repository or branch, corrupt hashes, invalid UUIDs, missing
    parents and corrupted/ambiguous storage records fail without moving a HEAD.
-   Valid-UUID but dangling *hydraulic* references remain committable and
-   reportable as diagnostics.
+   Valid-UUID but dangling *hydraulic* references are currently rejected;
+   their permissibility is an unresolved design decision, not a prerequisite
+   for solver-invalid network commits.
 9. Shared and non-leaf HEADs and several branches on one revision render
    correctly; each revision appears once; drafts are separate.
 10. Without a reachable personal repository editing is disabled; nothing falls

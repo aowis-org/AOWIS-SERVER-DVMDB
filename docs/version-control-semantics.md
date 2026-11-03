@@ -222,19 +222,22 @@ future optional combined command must preserve these invariants.
 **Storage integrity is mandatory.** Records must be decodable and canonically
 identifiable, revision parents and hashes must be valid, membership/index
 structure must be unambiguous, and transactions, leases and compare-and-swap
-preconditions must hold. **Hydraulic validity is optional:** the network may
-have dangling model-entity UUID references, incomplete topology, disconnected
-components, missing sources or solver failures. These are useful intermediate
-engineering states and must be reconstructable unchanged when representable
-by the MODEL format. Do not confuse a missing hydraulic junction with a
-missing immutable **revision parent**, which is repository corruption.
+preconditions must hold. **Hydraulic solvability is optional:** the network may
+lack supply sources, contain disconnected components, or fail simulation.
+These are legitimate engineering snapshots and must remain reconstructable.
 
-Validation is an explicit, read-only diagnostic on a pinned revision or saved
-draft generation, not a side effect of Save, Commit, Publish, Fetch or Merge.
-The GUI may display warnings; it must not turn them into blockers for those
-operations. Where existing strict MODEL/network load or hydraulic-merge paths
-reject otherwise representable invalid states, the implementation must be
-changed according to [the roadmap](roadmap.md#c1-coordinated-implementation-queue-int-00-through-int-12).
+**Dangling or wrong-type hydraulic model UUID references are a different
+question.** The current native index, import and editing rules reject them;
+no decision has been made to relax these checks. Do not confuse this model
+referential-integrity policy with an absent immutable **revision parent**,
+which is repository corruption.
+
+Hydraulic-feasibility validation should be an explicit, read-only diagnostic
+on a pinned revision or saved draft generation, never an implicit Save, Commit,
+Publish, Fetch or Merge gate. The GUI may display warnings without blocking
+version control. Changes to model-reference policy require separate design
+and tests for the reverse index and bundle verification; see
+[the roadmap](roadmap.md#c1-coordinated-implementation-queue-int-00-through-int-12).
 
 ## 7. Revision DAG and merging
 

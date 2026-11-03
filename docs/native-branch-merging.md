@@ -29,14 +29,16 @@ virtual merge bases may be computed without creating published revisions.
 ## Hydraulic-domain safety and planned semantics
 
 The current hydraulic-specific merge validator rejects some whole-network
-domain failures, and the generic merge engine does not. The agreed target
-is to preserve **representable invalid hydraulic networks** through merge,
-while still enforcing object kind/identity, physical membership, record
-integrity, revision ancestry and pinned-HEAD CAS. Dangling hydraulic model
-references, incomplete topology and solver problems are diagnostics, not
-merge vetoes. Overlapping *edit collisions* require explicit user choices;
-no last-writer-wins fallback or silent force-overwrite is permissible. The
-strict hydraulic path remains a known implementation gap until INT-04/10.
+domain failures, and the generic merge engine does not. The agreed target is
+to preserve **hydraulically unsolvable but referentially consistent networks**
+through merge, while enforcing object kind/identity, physical membership,
+record integrity, revision ancestry and pinned-HEAD CAS. Missing supply,
+disconnected topology and solver problems are diagnostics, not merge vetoes.
+Dangling or wrong-type hydraulic model references remain subject to the
+current strict rules pending a separate policy decision. Overlapping *edit
+collisions* require explicit user choices; no last-writer-wins fallback or
+silent force-overwrite is permissible. Non-blocking hydraulic feasibility
+in the merge path remains a qualification gap for INT-10.
 
 An editor with a private working copy may reconcile it against the newly
 committed target HEAD; this does not by itself publish a new revision. The

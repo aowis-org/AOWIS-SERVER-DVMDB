@@ -54,10 +54,12 @@ historical revision ([verification](repository-verification.md)).
 
 ## What references do not prove
 
-A complete reference graph is not a valid hydraulic model: topology, endpoint
-types, membership and physical rules are checked by the hydraulic layer before
-a commit or merge is published. Indexing and subtree reuse may speed this up
-but never replace it.
+A complete reference graph is not proof of hydraulic feasibility.
+The current hydraulic-layer checks still enforce model endpoint types and
+membership; solver feasibility, supply availability and connectedness are
+not required before Commit. Missing/wrong-type model references remain
+rejected under the current reference policy, independently of solver validity.
+The merge workflow must preserve the same separation (INT-10).
 
 ## Format changes
 
