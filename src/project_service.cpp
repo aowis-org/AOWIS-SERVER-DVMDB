@@ -2640,9 +2640,12 @@ RevisionActionPage ProjectService::revisionActionPage(
 BranchActionHistoryPage ProjectService::branchActionHistory(
         std::string_view projectId, std::string_view branch, std::size_t limit,
         std::optional<RevisionId> after,
-        std::optional<std::string_view> draftId, std::size_t draftOffset) {
+        std::optional<std::string_view> draftId, std::size_t draftOffset,
+        std::optional<std::uint64_t> expectedDraftGeneration) {
     if (limit < 1 || limit > 10 || (draftId && !UuidV7::parse(*draftId)) ||
-        (!draftId && draftOffset != 0) || draftOffset > workingCopyMaxEvents)
+        (!draftId && (draftOffset != 0 || expectedDraftGeneration)) ||
+        (draftOffset != 0 && !expectedDraftGeneration) ||
+        draftOffset > workingCopyMaxEvents)
         throw ProjectError(ProjectErrorKind::InvalidInput,
                            "invalid history page size, draft or draft offset");
     checkHealthy();
@@ -2687,6 +2690,12 @@ BranchActionHistoryPage ProjectService::branchActionHistory(
             draft.branchId != selectedBranch->toString())
             throw ProjectError(ProjectErrorKind::Conflict,
                                "history draft belongs to another project or branch");
+        // The draft can advance or rebase onto a new HEAD between page
+        // requests. An offset without a pinned generation could quietly
+        // stitch unrelated actions from two different journal versions.
+        if (expectedDraftGeneration && draft.generation != *expectedDraftGeneration)
+            throw ProjectError(ProjectErrorKind::Conflict,
+                               "draft history generation changed; restart pagination");
         if (draftOffset > draft.journal.size())
             throw ProjectError(ProjectErrorKind::InvalidInput,
                                "draft history offset exceeds current journal");
@@ -2695,8 +2704,10 @@ BranchActionHistoryPage ProjectService::branchActionHistory(
         page.draftEventCount = draft.journalCount;
         const std::size_t count = std::min<std::size_t>(100,
             draft.journal.size() - draftOffset);
-        for (std::size_t index = draftOffset; index < draftOffset + count; ++index)
+        for (std::size_t index = draftOffset; index < draftOffset + count; ++index) {
             page.draftActionIds.push_back(draft.journal[index].id);
+            page.draftActionFrames.push_back(draft.journal[index]);
+        }
         if (draftOffset + count < draft.journal.size())
             page.nextDraftOffset = draftOffset + count;
     }

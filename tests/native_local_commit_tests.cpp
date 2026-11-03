@@ -377,16 +377,47 @@ void testBranchDraftHistoryPaging() {
         const aowis::dvmdb::BranchActionHistoryPage first =
             service.branchActionHistory(projectId, "main", 1, std::nullopt, draftId);
         const aowis::dvmdb::BranchActionHistoryPage second =
-            service.branchActionHistory(projectId, "main", 1, std::nullopt, draftId, 100);
+            service.branchActionHistory(projectId, "main", 1, std::nullopt, draftId, 100, 125);
         require(first.commits.empty() && !first.next && first.draftGeneration == 125 &&
                 first.draftEventCount == 125 && first.draftActionIds.size() == 100 &&
-                first.nextDraftOffset == 100 &&
-                second.draftActionIds.size() == 25 && !second.nextDraftOffset &&
+                first.draftActionFrames.size() == 100 && first.nextDraftOffset == 100 &&
+                second.draftActionIds.size() == 25 && second.draftActionFrames.size() == 25 &&
+                !second.nextDraftOffset &&
                 std::equal(expected.begin(), expected.begin() + 100,
                            first.draftActionIds.begin()) &&
                 std::equal(expected.begin() + 100, expected.end(),
                            second.draftActionIds.begin()),
                 "HIST-02 draft pagination skipped or duplicated MODEL actions");
+        bool missingGenerationRejected = false;
+        try {
+            (void)service.branchActionHistory(projectId, "main", 1,
+                                             std::nullopt, draftId, 100);
+        } catch (const ProjectError& error) {
+            missingGenerationRejected = error.kind() == ProjectErrorKind::InvalidInput;
+        }
+        require(missingGenerationRejected,
+                "HIST-02 offset continuation without generation was accepted");
+        const ModelChange subsequent = changeWithValue(127);
+        const aowis::dvmdb::Bytes newFrame = aowis::dvmdb::test::editEvent(
+            UuidV7::generate(), subsequent.key, {126}, {127});
+        const WorkingCopyInfo updated = service.saveWorkingCopyTransactions(
+            draftId, session, token, 125, {subsequent}, {newFrame});
+        require(updated.generation == 126 && updated.journal.size() == 1,
+                "HIST-02 concurrent writer did not advance draft generation");
+        expected.push_back(updated.journal.front().id);
+        expectConflict([&]() {
+            (void)service.branchActionHistory(projectId, "main", 1,
+                                             std::nullopt, draftId, 100, 125);
+        });
+        const aowis::dvmdb::BranchActionHistoryPage updatedSecond =
+            service.branchActionHistory(projectId, "main", 1,
+                                        std::nullopt, draftId, 100, 126);
+        require(updatedSecond.draftGeneration == 126 &&
+                updatedSecond.draftActionIds.size() == 26 &&
+                updatedSecond.draftActionFrames.size() == 26 &&
+                !updatedSecond.nextDraftOffset &&
+                updatedSecond.draftActionIds.back() == expected.back(),
+                "HIST-02 generation-bound restart did not recover complete journal");
         (void)service.createUnbornBranch(projectId, "other");
         expectConflict([&]() {
             (void)service.branchActionHistory(projectId, "other", 1, std::nullopt, draftId);
@@ -402,8 +433,8 @@ void testBranchDraftHistoryPaging() {
     {
         ProjectService reopened(root.path);
         const aowis::dvmdb::BranchActionHistoryPage second =
-            reopened.branchActionHistory(projectId, "main", 1, std::nullopt, draftId, 100);
-        require(second.draftGeneration == 125 && second.draftActionIds.size() == 25 &&
+            reopened.branchActionHistory(projectId, "main", 1, std::nullopt, draftId, 100, 126);
+        require(second.draftGeneration == 126 && second.draftActionIds.size() == 26 &&
                 std::equal(expected.begin() + 100, expected.end(),
                            second.draftActionIds.begin()),
                 "HIST-02 paginated draft action history changed after restart");
@@ -411,17 +442,21 @@ void testBranchDraftHistoryPaging() {
             reopened.acquireWorkingCopyLease(draftId, session, 120).token;
         const std::string operation = UuidV7::generate().toString();
         const LocalCommitInfo committed = reopened.commitWorkingCopy(operation,
-            draftId, session, token, 125, std::nullopt, commitMetadata());
+            draftId, session, token, 126, std::nullopt, commitMetadata());
         require(committed.state == LocalCommitState::Succeeded,
-                "HIST-02 125-event draft could not be committed");
+                "HIST-02 126-event draft could not be committed");
+        expectConflict([&]() {
+            (void)reopened.branchActionHistory(projectId, "main", 1,
+                                               std::nullopt, draftId, 100, 126);
+        });
         const RevisionId revision = *RevisionId::parse(committed.reservedRevisionId);
         const aowis::dvmdb::RevisionActionPage first =
             reopened.revisionActionPage(projectId, "main", revision, 0, 100);
         const aowis::dvmdb::RevisionActionPage last =
             reopened.revisionActionPage(projectId, "main", revision, 100, 100);
-        require(first.total == 125 && first.actions.size() == 100 &&
-                first.nextOffset == 100 && last.total == 125 &&
-                last.actions.size() == 25 && !last.nextOffset,
+        require(first.total == 126 && first.actions.size() == 100 &&
+                first.nextOffset == 100 && last.total == 126 &&
+                last.actions.size() == 26 && !last.nextOffset,
                 "HIST-02 committed frame pages did not preserve 100+25 boundary");
         for (std::size_t index = 0; index < expected.size(); ++index) {
             const aowis::dvmdb::WorkingCopyEvent& action =

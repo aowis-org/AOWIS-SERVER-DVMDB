@@ -49,10 +49,10 @@ lost. A future Commit of that model is a new successor of the branch's
 
 ### HDB-01 — Remaining read-only history acceptance
 
-The immutable archive, revision index, timeline, and paginated full-frame
-retrieval are implemented. Remaining work is display-ready action summaries,
-server-side snapshot consistency across active-draft pages during concurrent
-Saves/Commits, and acceptance of import, merge, cross-repository, backup,
+The immutable archive, revision index, timeline, paginated full-frame
+retrieval, display-ready MODEL action metadata, and generation-pinned draft
+pagination are implemented. Remaining work is acceptance of import, merge,
+cross-repository, backup,
 compaction and recovery checkpoint handling. Checkpoint-only revisions must
 never acquire fabricated intermediate steps. Earlier unindexed local Commit
 archives are not migrated: those revisions remain checkpoint-only.

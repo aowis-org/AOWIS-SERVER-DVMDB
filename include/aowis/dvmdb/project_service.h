@@ -162,6 +162,9 @@ struct BranchActionHistoryPage {
     std::uint64_t draftGeneration = 0;
     std::uint64_t draftEventCount = 0;
     std::vector<std::string> draftActionIds;
+    // Original MODEL frames for the current page only, for HTTP display
+    // descriptions. Does not grow with the full draft or Commit ancestry.
+    std::vector<WorkingCopyEvent> draftActionFrames;
     std::optional<std::size_t> nextDraftOffset;
 };
 
@@ -382,13 +385,15 @@ public:
     LocalCommitActionHistory localCommitActionHistory(std::string_view operationId);
     // HIST-02 read-only timeline. Pagination is by first-parent revision UUID;
     // active-draft actions use a separate offset and remain bounded by the
-    // draft's existing journal limits. The returned rows never move HEAD or
-    // perform navigation. Indexed lookup is by immutable revision UUID.
+    // draft's existing journal limits. A continuation must pin the generation
+    // returned by page one; concurrent Save/Commit returns Conflict. Returned
+    // rows never move HEAD or perform navigation. Indexed lookup is by UUID.
     BranchActionHistoryPage branchActionHistory(
         std::string_view projectId, std::string_view branch, std::size_t limit = 5,
         std::optional<RevisionId> after = std::nullopt,
         std::optional<std::string_view> draftId = std::nullopt,
-        std::size_t draftOffset = 0);
+        std::size_t draftOffset = 0,
+        std::optional<std::uint64_t> expectedDraftGeneration = std::nullopt);
     // Page full MODEL frames for an immutable first-parent revision. No
     // mutations or cursor operations; checkpoint-only revisions return empty.
     RevisionActionPage revisionActionPage(

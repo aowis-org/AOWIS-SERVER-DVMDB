@@ -1281,6 +1281,38 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
 
 } // namespace
 
+// Display metadata is derived from retained MODEL frames, never a second
+// mutable source of truth. Native-only callers may persist opaque test frames:
+// those remain identifiable but do not receive invented operation names.
+QJsonObject historyActionJson(const WorkingCopyEvent& event, bool includeFrame) {
+    QJsonObject result{
+        {"id", QString::fromStdString(event.id)},
+        {"operation", QJsonValue(QJsonValue::Null)},
+        {"description", QJsonValue(QJsonValue::Null)},
+        {"label", QStringLiteral("Action ") + QString::fromStdString(event.id.substr(0, 8))},
+        {"editCount", QJsonValue(QJsonValue::Null)}};
+    const QByteArray frame(reinterpret_cast<const char*>(event.encoded.data()),
+                           static_cast<qsizetype>(event.encoded.size()));
+    if (includeFrame)
+        result.insert("frameBase64", QString::fromLatin1(frame.toBase64()));
+#ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
+    QString decodeError;
+    const std::optional<aowis::model::ModelEditTransaction> decoded =
+        aowis::model::ModelEditTransactionCodec::decode(frame, &decodeError);
+    if (decoded &&
+        decoded->transactionId.toString(QUuid::WithoutBraces) ==
+            QString::fromStdString(event.id)) {
+        result.insert("operation", decoded->operation);
+        if (!decoded->description.isEmpty())
+            result.insert("description", decoded->description);
+        result.insert("label", decoded->description.isEmpty()
+            ? decoded->operation : decoded->description);
+        result.insert("editCount", static_cast<int>(decoded->edits.size()));
+    }
+#endif
+    return result;
+}
+
 void registerRoutes(httplib::Server& server, ProjectService& service,
                     BundleLimits transferLimits,
                     std::shared_ptr<TransferStagingBudget> stagingBudget) {
@@ -2250,6 +2282,20 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             if (const std::optional<std::string> value = queryValue(request, "after"))
                 after = parseRevisionId(*value);
             const std::optional<std::string> draft = queryValue(request, "draftId");
+            std::optional<std::uint64_t> expectedDraftGeneration;
+            if (const std::optional<std::string> value = queryValue(request, "expectedDraftGeneration")) {
+                requireInput(!value->empty() && value->size() <= 20 &&
+                    std::all_of(value->begin(), value->end(), [](char ch) {
+                        return ch >= '0' && ch <= '9';
+                    }), "invalid expected draft generation");
+                std::uint64_t parsed = 0;
+                const std::from_chars_result converted =
+                    std::from_chars(value->data(), value->data() + value->size(), parsed);
+                requireInput(converted.ec == std::errc() &&
+                             converted.ptr == value->data() + value->size(),
+                             "invalid expected draft generation");
+                expectedDraftGeneration = parsed;
+            }
             std::size_t draftOffset = 0;
             if (const std::optional<std::string> value = queryValue(request, "draftOffset")) {
                 const std::string& text = *value;
@@ -2265,7 +2311,7 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             const BranchActionHistoryPage page = service.branchActionHistory(
                 pathParam(request, "id"), pathParam(request, "branch"), limit, after,
                 draft ? std::optional<std::string_view>(*draft) : std::nullopt,
-                draftOffset);
+                draftOffset, expectedDraftGeneration);
             QJsonArray checkpoints;
             for (const BranchActionHistoryEntry& entry : page.commits) {
                 QJsonArray actions;
@@ -2285,11 +2331,15 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 QJsonArray actions;
                 for (const std::string& id : page.draftActionIds)
                     actions.append(QString::fromStdString(id));
+                QJsonArray details;
+                for (const WorkingCopyEvent& event : page.draftActionFrames)
+                    details.append(historyActionJson(event, false));
                 draftValue = QJsonObject{
                     {"id", QString::fromStdString(*page.draftId)},
                     {"generation", QString::number(static_cast<qulonglong>(page.draftGeneration))},
                     {"journalCount", QString::number(static_cast<qulonglong>(page.draftEventCount))},
                     {"actions", actions},
+                    {"actionDetails", details},
                     {"nextOffset", page.nextDraftOffset
                         ? QJsonValue(static_cast<int>(*page.nextDraftOffset))
                         : QJsonValue(QJsonValue::Null)}};
@@ -2328,13 +2378,8 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 pathParam(request, "id"), pathParam(request, "branch"),
                 parseRevisionId(pathParam(request, "revisionId")), offset, limit);
             QJsonArray actions;
-            for (const WorkingCopyEvent& event : page.actions) {
-                const QByteArray bytes(reinterpret_cast<const char*>(event.encoded.data()),
-                                       static_cast<qsizetype>(event.encoded.size()));
-                actions.append(QJsonObject{
-                    {"id", QString::fromStdString(event.id)},
-                    {"frameBase64", QString::fromLatin1(bytes.toBase64())}});
-            }
+            for (const WorkingCopyEvent& event : page.actions)
+                actions.append(historyActionJson(event, true));
             return Reply{200, QJsonObject{
                 {"revisionId", QString::fromStdString(page.revisionId)},
                 {"operationId", page.commitOperationId

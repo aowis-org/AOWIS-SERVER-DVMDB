@@ -136,14 +136,22 @@ first-parent Commit markers (`commits`) with real archived MODEL action UUIDs.
 UUIDv7 cursor and `nextCursor` is null on the last page. Commits without
 retained event frames are explicitly `checkpointOnly`; they remain real
 immutable revisions. Optional `draftId` adds a separate, generation-labelled
-page of up to 100 saved draft action UUIDs. Use `draftOffset` / `nextOffset`
-to advance that journal page independently of `after`. Draft IDs from another
-project or branch are rejected.
+page of up to 100 saved draft action UUIDs, plus `actionDetails` for those
+same events (operation, optional description, display label and edit count).
+Use `draftOffset` / `nextOffset` to advance independently of `after`. For
+**every continuation** where `draftOffset` is nonzero, include
+`expectedDraftGeneration=<generation returned by first page>` as a decimal
+string. A concurrent Save or Commit changes the generation and returns HTTP
+409 instead of joining two different journal versions; restart at offset 0.
+Draft IDs from another project or branch are rejected.
 
 `GET /dvmdb/v1/projects/{projectId}/branches/{branch}/action-history/{revisionId}/events?offset&limit`
 returns the exact archived MODEL bytes (Base64), in original event order, at
-up to 100 actions per page. Revisions not on the selected branch's first-parent
-ancestry are rejected. Both endpoints are **read-only** and do not move HEAD or
+up to 100 actions per page. Every returned action also contains `operation`,
+optional `description`, `label`, and `editCount` decoded from the immutable
+MODEL frame when valid. Opaque native-only test frames retain their UUIDs and
+have null metadata rather than fabricated operation names. Revisions not on
+the selected branch's first-parent ancestry are rejected. Both endpoints are **read-only** and do not move HEAD or
 provide Undo/Redo.
 
 The response is read-only: there is **no** state navigation, Undo or Redo

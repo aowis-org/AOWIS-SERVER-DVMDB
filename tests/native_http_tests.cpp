@@ -2068,13 +2068,34 @@ void exerciseWorkingCopyHttp() {
             QString::fromStdString(projectId) + QStringLiteral("/branches/main/action-history");
         const Response draftTimeline = client.call("GET", actionHistoryUrl +
             QStringLiteral("?draftId=") + QString::fromStdString(draftId));
+        const QJsonArray draftActionDetails =
+            draftTimeline.json.value("draft").toObject().value("actionDetails").toArray();
         check(draftTimeline.status == 200 &&
               draftTimeline.json.value("commits").toArray().isEmpty() &&
               draftTimeline.json.value("nextCursor").isNull() &&
               draftTimeline.json.value("draft").toObject().value("generation") == "2" &&
               draftTimeline.json.value("draft").toObject().value("journalCount") == "1" &&
               draftTimeline.json.value("draft").toObject().value("actions").toArray().size() == 1 &&
+              draftActionDetails.size() == 1 &&
+              draftActionDetails.first().toObject().value("operation") ==
+                  QStringLiteral("hydraulic.junction.move") &&
+              draftActionDetails.first().toObject().value("label") ==
+                  QStringLiteral("hydraulic.junction.move") &&
+              draftActionDetails.first().toObject().value("editCount") == 1 &&
+              draftActionDetails.first().toObject().value("id") ==
+                  draftTimeline.json.value("draft").toObject().value("actions").toArray().first() &&
               draftTimeline.json.value("draft").toObject().value("nextOffset").isNull() &&
+              client.call("GET", actionHistoryUrl + "?draftId=" +
+                  QString::fromStdString(draftId) + "&draftOffset=1").status == 400 &&
+              client.call("GET", actionHistoryUrl + "?draftId=" +
+                  QString::fromStdString(draftId) +
+                  "&draftOffset=1&expectedDraftGeneration=2").status == 200 &&
+              client.call("GET", actionHistoryUrl + "?draftId=" +
+                  QString::fromStdString(draftId) +
+                  "&draftOffset=1&expectedDraftGeneration=1").status == 409 &&
+              client.call("GET", actionHistoryUrl + "?draftId=" +
+                  QString::fromStdString(draftId) +
+                  "&draftOffset=1&expectedDraftGeneration=bogus").status == 400 &&
               client.call("GET", actionHistoryUrl + "?limit=0").status == 400 &&
               client.call("GET", actionHistoryUrl + "?draftId=" +
                   QString::fromStdString(draftId) + "&draftOffset=2").status == 400,
@@ -2154,6 +2175,11 @@ void exerciseWorkingCopyHttp() {
               frames.json.value("nextOffset").isNull() &&
               firstFrame.size() == 1 &&
               firstFrame.first().toObject().value("frameBase64") == encodedEvent &&
+              firstFrame.first().toObject().value("operation") ==
+                  QStringLiteral("hydraulic.junction.move") &&
+              firstFrame.first().toObject().value("label") ==
+                  QStringLiteral("hydraulic.junction.move") &&
+              firstFrame.first().toObject().value("editCount") == 1 &&
               nextFrames.status == 200 && nextFrames.json.value("actions").toArray().isEmpty() &&
               client.call("GET", framesUrl + "?limit=0").status == 400 &&
               client.call("GET", framesUrl + "?offset=2").status == 400 &&
@@ -2379,6 +2405,7 @@ void exerciseUnbornNetworkInitializationHttp() {
         aowis::model::ModelEditTransaction mixedEvent;
         mixedEvent.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
         mixedEvent.operation = QStringLiteral("hydraulic.network.mixed");
+        mixedEvent.description = QStringLiteral("Add J2 and update network title");
         mixedEvent.edits.append(aowis::model::ModelEntityEdit{
             networkUuid, QString::fromLatin1(aowis::model::hydraulicRootEditType),
             aowis::model::hydraulicRootImage(*finalRoot),
@@ -2422,6 +2449,21 @@ void exerciseUnbornNetworkInitializationHttp() {
             native::ModelCodec<NetworkHydraulic>::decode(QByteArray::fromBase64(
                 mixedView.json.value("payloadBase64").toString().toLatin1()));
         mixedExpected.nodes_junctions.append(additional);
+        const QString actionHistoryUrl = QStringLiteral("/dvmdb/v1/projects/") +
+            QString::fromStdString(projectId) + QStringLiteral("/branches/main/action-history");
+        const Response labelledDraft = client.call("GET", actionHistoryUrl +
+            "?draftId=" + QString::fromStdString(draftId));
+        const QJsonArray labelledActions = labelledDraft.json.value("draft")
+            .toObject().value("actionDetails").toArray();
+        check(labelledDraft.status == 200 && labelledActions.size() == 3 &&
+              labelledActions.last().toObject().value("description") ==
+                  QStringLiteral("Add J2 and update network title") &&
+              labelledActions.last().toObject().value("label") ==
+                  QStringLiteral("Add J2 and update network title") &&
+              labelledActions.last().toObject().value("operation") ==
+                  QStringLiteral("hydraulic.network.mixed") &&
+              labelledActions.last().toObject().value("editCount") == 2,
+              "HIST-02 saved hydraulic draft lost user-facing action descriptions");
         check(mixedSaved.json.value("generation") == "4" &&
               mixedReplayed.status == 200 && mixedReplayed.json.value("generation") == "4" &&
               mixedView.status == 200 && mixedNetwork &&

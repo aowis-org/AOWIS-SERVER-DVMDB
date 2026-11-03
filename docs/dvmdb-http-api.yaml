@@ -808,14 +808,19 @@ paths:
       - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 10, default: 5}}
       - {name: after, in: query, description: Exclusive first-parent revision UUIDv7 cursor, schema: {type: string, format: uuid}}
       - {name: draftId, in: query, description: Optional selected private draft UUIDv7, schema: {type: string, format: uuid}}
-      - {name: draftOffset, in: query, description: Offset into the selected draft's saved event journal, schema: {type: integer, minimum: 0, maximum: 4096, default: 0}}
+      - {name: draftOffset, in: query, description: Offset into the selected draft's saved event journal; offsets greater than zero require expectedDraftGeneration, schema: {type: integer, minimum: 0, maximum: 4096, default: 0}}
+      - {name: expectedDraftGeneration, in: query, description: Decimal uint64 generation obtained from the first draft page; required for nonzero draftOffset; an intervening Save or Commit returns 409, schema: {type: string, pattern: '^[0-9]+$'}}
     get:
       operationId: getBranchActionHistory
       description: |
         Read-only newest-first first-parent Commit checkpoints with exact archived
         MODEL action UUIDs. A checkpoint with no retained events has actions=[];
         no intermediate actions are invented. The optional draft section is
-        separately paged, pinned by generation, and never mutates HEAD.
+        separately paged; continue with expectedDraftGeneration from the first
+        page to prevent mixing journal generations during concurrent edits.
+        The draft also exposes display-ready actionDetails for the current page.
+        Individual archived actions have the same metadata in the paginated
+        events endpoint, including exact original MODEL frames.
         Archives are resolved by immutable, checksummed revision UUID index
         entries; no full local Commit ledger scan is performed.
       responses:
@@ -846,6 +851,18 @@ paths:
                       generation: {type: string, pattern: '^[0-9]+$'}
                       journalCount: {type: string, pattern: '^[0-9]+$'}
                       actions: {type: array, items: {type: string, format: uuid}}
+                      actionDetails:
+                        type: array
+                        description: Display metadata for only this page of the draft journal, in the same order as actions
+                        items:
+                          type: object
+                          required: [id, operation, description, label, editCount]
+                          properties:
+                            id: {type: string, format: uuid}
+                            operation: {type: [string, 'null']}
+                            description: {type: [string, 'null']}
+                            label: {type: string}
+                            editCount: {type: [integer, 'null'], minimum: 0}
                       nextOffset: {type: [integer, 'null'], minimum: 0}
         '400': {$ref: '#/components/responses/BadRequest'}
         '404': {$ref: '#/components/responses/NotFound'}
@@ -880,10 +897,14 @@ paths:
                     type: array
                     items:
                       type: object
-                      required: [id, frameBase64]
+                      required: [id, frameBase64, operation, description, label, editCount]
                       properties:
                         id: {type: string, format: uuid}
                         frameBase64: {type: string, contentEncoding: base64}
+                        operation: {type: [string, 'null']}
+                        description: {type: [string, 'null']}
+                        label: {type: string}
+                        editCount: {type: [integer, 'null'], minimum: 0}
                   nextOffset: {type: [integer, 'null'], minimum: 0}
         '400': {$ref: '#/components/responses/BadRequest'}
         '404': {$ref: '#/components/responses/NotFound'}

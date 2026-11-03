@@ -25,7 +25,8 @@ have no published archive. The immutable revision itself is never changed.
 ## Branch-aware history reads
 
 `ProjectService::branchActionHistory(projectId, branch, limit, after,
-optionalDraftId, draftOffset)` returns a **read-only** first-parent timeline:
+optionalDraftId, draftOffset, expectedDraftGeneration)` returns a **read-only**
+first-parent timeline:
 
 - Commit checkpoints in newest-first order, each with its immutable revision
   record, optional local Commit operation UUID and the **actual archived
@@ -34,15 +35,20 @@ optionalDraftId, draftOffset)` returns a **read-only** first-parent timeline:
   `limit` is 1–10 checkpoints; the cursor must belong to that branch's
   first-parent ancestry.
 - If a private draft is selected, its generation, journal count and a page
-  of at most 100 accepted action UUIDs. A separate `nextDraftOffset` pages
-  its journal; the draft must belong to the selected project and branch.
+  of at most 100 accepted action UUIDs and original frames for display
+  metadata. A separate `nextDraftOffset` pages its journal; the draft must
+  belong to the selected project and branch. A nonzero continuation offset
+  requires `expectedDraftGeneration` from the first page; if the draft has
+  changed, the read fails as a Conflict and the client restarts at offset 0.
 
 The equivalent HTTP route is
 `GET /dvmdb/v1/projects/{projectId}/branches/{branch}/action-history` with
-`limit`, `after`, `draftId` and `draftOffset` query parameters. The JSON
-response contains `commits`, `nextCursor`, and `draft`. Each Commit has a
-`revision` object, nullable `operationId`, `actions`, `actionCount` and
-`checkpointOnly`; draft generation and journal count are **decimal strings**.
+`limit`, `after`, `draftId`, `draftOffset` and `expectedDraftGeneration`
+query parameters. The JSON response contains `commits`, `nextCursor`, and
+`draft`. Each Commit has a `revision` object, nullable `operationId`, `actions`,
+`actionCount` and `checkpointOnly`; draft generation and journal count are
+**decimal strings**. The draft's `actionDetails` objects contain the original
+IDs and display-ready metadata only for the requested page.
 The route never performs Undo/Redo or changes HEAD.
 
 For exact original MODEL frames, use
@@ -50,11 +56,14 @@ For exact original MODEL frames, use
 or `GET /dvmdb/v1/projects/{projectId}/branches/{branch}/action-history/{revisionId}/events`.
 `limit` is 1–100 events; `offset` is zero-based with exclusive `nextOffset`.
 Each result reports the immutable revision, nullable local Commit operation,
-total archived actions, `actions: [{id, frameBase64}]`, and nullable next offset.
+total archived actions, `actions: [{id, frameBase64, operation, description, label, editCount}]`,
+and nullable next offset.
 The selected revision must occur on the branch's first-parent ancestry.
 Checkpoint-only revisions return zero events, not hypothetical inverse deltas.
-Full frames are **original canonical MODEL bytes**; the API does not execute
-Undo/Redo, and user-facing operation names can be decoded later by MODEL clients.
+Full frames are **original canonical MODEL bytes**; metadata is derived
+on demand from these immutable bytes without rewriting the archive. The API
+does not execute Undo/Redo. Frames that cannot be decoded retain their IDs
+and have null operation, description and edit count instead of invented data.
 
 A revision created by a generic native Commit, a merge, an imported revision,
 or an old local Commit without retained actions is represented as a genuine
@@ -73,8 +82,10 @@ without duplicating archived actions.
 - Full frame reads are limited to 100 archived events per request and remain
   separate from the bounded active-draft event journal. Original event bytes
   can be decoded into display summaries by a MODEL client.
-- Draft pages are labelled with a generation; clients must check that value
-  when paging through edits while a second writer may save new events.
+- Draft pages are labelled with a generation; the server **requires** the
+  same `expectedDraftGeneration` on every nonzero continuation offset. If a
+  second writer Saves or Commits, continuation fails with Conflict rather
+  than silently assembling inconsistent history pages.
 - Action archives are not a durable Undo/Redo cursor. Navigating across
   Commit markers requires a separate server-owned cursor, canonical inverse
   materialization, idempotent mutation IDs and recovery logic. None of these
