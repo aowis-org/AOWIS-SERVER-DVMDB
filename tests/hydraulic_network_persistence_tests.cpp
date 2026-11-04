@@ -1855,11 +1855,116 @@ void exerciseAtomicRootMetadataEdit() {
     require(identityRejected, "root UUID replacement rejected");
 }
 
+// HIST-03c2: prove image continuity before any draft cursor could use it.
+// This coverage is intentionally about already-existing objects (no
+// collection-position guessing), including all 18 canonical MODEL kinds.
+void exerciseHistoricalScalarActionPreview() {
+    const NetworkHydraulic original = completeNetwork();
+    NetworkHydraulic edited = original;
+    aowis::model::ModelEditTransaction first;
+    first.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+    first.operation = QStringLiteral("hydraulic.history.all-collections");
+#define HISTORY_UPDATE_COLLECTION(name, type, kind) \
+    { \
+        const type before = original.name.first(); \
+        type &after = edited.name.first(); \
+        after.id = before.id + QStringLiteral("-history"); \
+        first.edits.append(aowis::model::ModelEntityEdit{ \
+            before.uuid, QStringLiteral(#type), \
+            native::ModelCodec<type>::encode(before), \
+            native::ModelCodec<type>::encode(after)}); \
+    }
+    HISTORY_UPDATE_COLLECTION(pipe_materials, HydraulicPipeMaterial, 8)
+    HISTORY_UPDATE_COLLECTION(patterns_time, HydraulicPatternTime, 9)
+    HISTORY_UPDATE_COLLECTION(curves_tank_volume, HydraulicCurveTankVolume, 10)
+    HISTORY_UPDATE_COLLECTION(curves_pump_head, HydraulicCurvePumpHead, 11)
+    HISTORY_UPDATE_COLLECTION(curves_pump_efficiency, HydraulicCurvePumpEfficiency, 12)
+    HISTORY_UPDATE_COLLECTION(curves_valve_headloss, HydraulicCurveValveHeadloss, 13)
+    HISTORY_UPDATE_COLLECTION(curves_valve_characteristic, HydraulicCurveValveCharacteristic, 14)
+    HISTORY_UPDATE_COLLECTION(curves_generic, HydraulicCurveGeneric, 15)
+    HISTORY_UPDATE_COLLECTION(nodes_reservoirs, HydraulicNodeReservoir, 2)
+    HISTORY_UPDATE_COLLECTION(nodes_junctions, HydraulicNodeJunction, 1)
+    HISTORY_UPDATE_COLLECTION(nodes_tanks, HydraulicNodeTank, 3)
+    HISTORY_UPDATE_COLLECTION(demand_points, HydraulicDemandPoint, 7)
+    HISTORY_UPDATE_COLLECTION(links_pipes, HydraulicLinkPipe, 4)
+    HISTORY_UPDATE_COLLECTION(links_pumps, HydraulicLinkPump, 5)
+    HISTORY_UPDATE_COLLECTION(links_valves, HydraulicLinkValve, 6)
+    HISTORY_UPDATE_COLLECTION(controls_simple, HydraulicControlSimple, 16)
+    HISTORY_UPDATE_COLLECTION(controls_rules, HydraulicControlRule, 17)
+    HISTORY_UPDATE_COLLECTION(map_labels, HydraulicMapLabel, 18)
+#undef HISTORY_UPDATE_COLLECTION
+    require(first.edits.size() == 18, "HIST-03c2 must cover all 18 collections");
+    const QByteArray firstBytes = aowis::model::ModelEditTransactionCodec::encode(first);
+    require(!firstBytes.isEmpty(), "HIST-03c2 18-collection MODEL action not encoded");
+
+    aowis::model::ModelEditTransaction second;
+    second.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+    second.operation = QStringLiteral("hydraulic.history.root-metadata");
+    const NetworkHydraulic afterFirst = edited;
+    edited.title_line_2 = QStringLiteral("Historical root after-image");
+    edited.nodes_junctions.first().id += QStringLiteral("-twice");
+    second.edits.append(aowis::model::ModelEntityEdit{
+        edited.uuid, QString::fromLatin1(aowis::model::hydraulicRootEditType),
+        aowis::model::hydraulicRootImage(afterFirst),
+        aowis::model::hydraulicRootImage(edited)});
+    second.edits.append(aowis::model::ModelEntityEdit{
+        edited.nodes_junctions.first().uuid, QStringLiteral("HydraulicNodeJunction"),
+        native::ModelCodec<HydraulicNodeJunction>::encode(
+            afterFirst.nodes_junctions.first()),
+        native::ModelCodec<HydraulicNodeJunction>::encode(
+            edited.nodes_junctions.first())});
+    const QByteArray secondBytes = aowis::model::ModelEditTransactionCodec::encode(second);
+    require(!secondBytes.isEmpty(), "HIST-03c2 root MODEL action not encoded");
+    const native::Bytes frameFirst = hydraulic::bytesFromQByteArray(firstBytes);
+    const native::Bytes frameSecond = hydraulic::bytesFromQByteArray(secondBytes);
+    const QByteArray baselineBytes = native::ModelCodec<NetworkHydraulic>::encode(original);
+    const QByteArray intermediateBytes = native::ModelCodec<NetworkHydraulic>::encode(afterFirst);
+    const QByteArray finalBytes = native::ModelCodec<NetworkHydraulic>::encode(edited);
+    QString error;
+    const std::optional<NetworkHydraulic> afterRootUndo =
+        hydraulic::previewReverseHydraulicActions(edited, {frameSecond}, &error);
+    require(afterRootUndo.has_value() && error.isEmpty() &&
+            native::ModelCodec<NetworkHydraulic>::encode(*afterRootUndo) == intermediateBytes,
+            "HIST-03c2 root undo did not recover exact intermediate bytes");
+    const std::optional<NetworkHydraulic> beforeBoth =
+        hydraulic::previewReverseHydraulicActions(edited, {frameSecond, frameFirst}, &error);
+    require(beforeBoth.has_value() && error.isEmpty() &&
+            native::ModelCodec<NetworkHydraulic>::encode(*beforeBoth) == baselineBytes &&
+            native::ModelCodec<NetworkHydraulic>::encode(edited) == finalBytes,
+            "HIST-03c2 complete reverse replay changed the source or lost bytes");
+    require(!hydraulic::previewReverseHydraulicActions(edited, {frameFirst}, &error) &&
+            error.contains(QStringLiteral("after-image")),
+            "HIST-03c2 accepted out-of-order original events");
+    NetworkHydraulic tampered = edited;
+    tampered.nodes_junctions.first().id = QStringLiteral("stale");
+    require(!hydraulic::previewReverseHydraulicActions(tampered,
+            {frameSecond, frameFirst}, &error) && !error.isEmpty(),
+            "HIST-03c2 accepted stale entity images");
+    aowis::model::ModelEditTransaction creation;
+    creation.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+    creation.operation = QStringLiteral("hydraulic.junction.add");
+    HydraulicNodeJunction newJunction = item<HydraulicNodeJunction>(551);
+    creation.edits.append(aowis::model::ModelEntityEdit{
+        newJunction.uuid, QStringLiteral("HydraulicNodeJunction"), std::nullopt,
+        native::ModelCodec<HydraulicNodeJunction>::encode(newJunction)});
+    const QByteArray creationBytes = aowis::model::ModelEditTransactionCodec::encode(creation);
+    require(!creationBytes.isEmpty() &&
+            !hydraulic::previewReverseHydraulicActions(edited,
+                {hydraulic::bytesFromQByteArray(creationBytes)}, &error) &&
+            error.contains(QStringLiteral("membership-order")),
+            "HIST-03c2 guessed a missing original insertion position");
+    native::Bytes invalid = frameFirst;
+    invalid.back() ^= 0xff;
+    require(!hydraulic::previewReverseHydraulicActions(edited, {invalid}, &error),
+            "HIST-03c2 accepted corrupted archived MODEL bytes");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     QCoreApplication application(argc, argv);
     try {
+        exerciseHistoricalScalarActionPreview();
         exerciseAtomicRootMetadataEdit();
         exerciseInt00IncompleteNetworkRoundTrip();
         exerciseUuidV7Hydraulic();

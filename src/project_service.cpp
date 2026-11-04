@@ -2815,6 +2815,83 @@ HistoryCheckpointPlan ProjectService::planHistoryCheckpoint(
     return result;
 }
 
+HistoryReverseActionWindow ProjectService::readHistoryReverseActionWindow(
+        std::string_view draftId, const RevisionId& revision,
+        std::size_t fromPosition, std::uint64_t expectedGeneration,
+        std::size_t limit) {
+    if (!UuidV7::parse(draftId) || limit == 0 || limit > 100 ||
+        fromPosition > workingCopyMaxEvents)
+        throw ProjectError(ProjectErrorKind::InvalidInput,
+                           "invalid history action boundary or window size");
+    requirePrivateRepository("history action windows require a private repository");
+    // Pin the current draft for the *whole* read so Save, Commit or another
+    // navigation cannot publish a different candidate while constructing a
+    // window. Project HEAD is checked both before and after archive lookup.
+    const std::shared_ptr<std::mutex> lock = draftLock(draftId);
+    std::lock_guard<std::mutex> guard(*lock);
+    const WorkingCopyInfo draft = loadDraft(this->root_, draftId, DraftLoad::Meta).info;
+    if (draft.generation != expectedGeneration)
+        throw ProjectError(ProjectErrorKind::Conflict,
+                           "history draft generation changed; restart action navigation");
+    const std::optional<ProjectId> project = ProjectId::parse(draft.projectId);
+    const std::optional<BranchId> branch = BranchId::parse(draft.branchId);
+    if (!project || !branch)
+        throw ProjectError(ProjectErrorKind::InvalidInput,
+                           "invalid project or branch in history draft");
+    std::string branchName;
+    const std::function<void(Repository&)> checkHead = [&](Repository& repository) {
+        const std::optional<RevisionGraphHead> selected = translated<
+            std::optional<RevisionGraphHead>>([&]() {
+                return repository.branchById(*project, *branch);
+            });
+        if (!selected || !selected->revision ||
+            selected->revision != draft.baseRevision)
+            throw ProjectError(ProjectErrorKind::Conflict,
+                               "history draft no longer follows current branch HEAD");
+        // Even a readable revision from this project may belong to another
+        // branch. Reject it rather than exposing its archived MODEL frames.
+        translated<std::vector<RevisionGraphRevision>>([&]() {
+            return repository.history(*project, selected->name, 1, revision);
+        });
+        branchName = selected->name;
+    };
+    withRepository(draft.projectId, checkHead);
+    // An immutable, revision-indexed archive is verified on every page.
+    // Its last original action is the first event to *consider* reversing.
+    // Do not decode entity images or infer candidate writes in native code.
+    const RevisionActionPage probe = revisionActionPage(
+        draft.projectId, branchName, revision, 0, 1);
+    if (fromPosition > probe.total)
+        throw ProjectError(ProjectErrorKind::InvalidInput,
+                           "history action boundary exceeds archived action count");
+    HistoryReverseActionWindow result;
+    result.draftId = draft.id;
+    result.revisionId = revision.toString();
+    result.commitOperationId = probe.commitOperationId;
+    result.expectedHead = draft.baseRevision;
+    result.expectedGeneration = draft.generation;
+    result.actionCount = probe.total;
+    result.fromPosition = fromPosition;
+    if (fromPosition > 0) {
+        const std::size_t begin = fromPosition > limit ? fromPosition - limit : 0;
+        const RevisionActionPage sourcePage = revisionActionPage(
+            draft.projectId, branchName, revision, begin, fromPosition - begin);
+        if (sourcePage.total != probe.total ||
+            sourcePage.commitOperationId != probe.commitOperationId ||
+            sourcePage.actions.size() != fromPosition - begin)
+            throw ProjectError(ProjectErrorKind::Conflict,
+                               "history archive changed during action planning");
+        result.originalFramesNewestFirst.assign(sourcePage.actions.rbegin(),
+                                                 sourcePage.actions.rend());
+        if (begin > 0) result.nextPosition = begin;
+    }
+    // The active HEAD is not immutable; it may advance while archives are
+    // being read. A second check prevents returning a plan already obsolete
+    // before it leaves the service. Execution must check HEAD/generation again.
+    withRepository(draft.projectId, checkHead);
+    return result;
+}
+
 WorkingCopyInfo ProjectService::navigateHistoryCheckpoint(
         std::string_view operationId, std::string_view draftId,
         std::string_view sessionId, std::string_view fencingToken,

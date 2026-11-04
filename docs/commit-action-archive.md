@@ -83,6 +83,17 @@ The returned overlay must not be passed to the normal incremental Save method
 as though it were a delta: future navigation needs an atomic *replacement*
 with a durable cursor and action record.
 
+## Read-only action-boundary windows (HIST-03c1)
+
+Native callers can request `readHistoryReverseActionWindow(draftId, revision,
+fromPosition, expectedGeneration, limit)` after selecting a first-parent
+revision. The result carries the exact archive's action count, expected
+branch HEAD/generation, and a page of original frames in **reverse** order,
+with `nextPosition` for the preceding page. No old Commit lacking archived
+actions is assigned fictitious intermediate states. The method is read-only
+and is not exposed as an execution endpoint; it does not invert frames,
+prove full snapshot continuity, or mutate cursor/model contents.
+
 ## Current operational limits
 
 - The active draft event journal remains bounded at **4,096 events / 8 MiB**.

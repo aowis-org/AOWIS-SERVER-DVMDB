@@ -64,6 +64,46 @@ normal Save or Commit clears the checkpoint marker. This is **not** a full
 history cursor with redo eligibility or cross-Commit step navigation; it is
 not yet exposed as an HTTP command or connected to the GUI History dock.
 
+## Archived action-boundary planning (HIST-03c1)
+
+`ProjectService::readHistoryReverseActionWindow()` provides a read-only,
+generation- and first-parent-HEAD-pinned window of original MODEL frames,
+ordered from most recent to oldest. Action positions are **boundaries**
+within one immutable Commit; position zero is before that Commit's first
+retained action, and position `actionCount` is its last retained action.
+Commit markers are not separate Undo steps. A revision with no retained
+actions has only its checkpoint marker. The window is limited to 100 frames
+and includes the exact original operation/transaction IDs for provenance.
+
+This window is **not** an Undo execution plan. It does not yet prove that
+retained events completely describe a Commit's model delta, nor does it
+convert event images into native model/membership records. The executor must
+verify every before/after image against reconstructed state and reject any
+gap before atomically publishing both the replacement model and cursor. No
+history cursor or extra draft bytes are written by this API.
+
+## MODEL-aware reverse image verification (HIST-03c2a)
+
+The Qt hydraulic adapter now provides
+`hydraulic::previewReverseHydraulicActions(committed, newestFirstFrames)`.
+It takes an exact, already-hydrated terminal `NetworkHydraulic` and a bounded
+page of original MODEL frames, verifies their canonical after-images against
+the successive reconstructed states, and applies canonical prior images for
+all 18 typed collections and root metadata. It returns a new model without
+mutating DVMDB or the supplied network. Wrong image/type/UUID, corrupt frames
+and invalid resulting model dependencies are rejected atomically.
+
+**Important:** this is *only a validated read-only preview*. It deliberately
+rejects creation/deletion: the current MODEL action envelope does not record
+ordered collection insertion/removal positions, so a restored member could
+otherwise have the wrong canonical collection order. Furthermore, an older
+Commit may contain changes-only Saves not represented in its archived actions.
+Before any preview can be published as a working-copy candidate, the backend
+must prove full archive coverage against the immutable parent/child snapshots,
+preserve ordered membership and publish the candidate with the history cursor
+under one fenced, idempotent atomic update. There is no new on-disk format and
+no public Undo/Redo route in this step.
+
 ## Retention, restart and UI
 
 The durable action archive survives a Commit; the bounded working-copy event

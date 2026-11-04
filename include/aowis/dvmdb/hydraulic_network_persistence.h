@@ -70,6 +70,21 @@ void materializeDraftMembership(
     std::vector<ModelChange>& changes);
 
 
+// HIST-03c2: read-only MODEL-aware reverse replay for scalar/member updates
+// and network-root metadata. The input frames must be ORIGINAL archived
+// forward events in newest-first order, and `committed` must be the exact
+// terminal state at that boundary. Every before-image is checked against the
+// reconstructed state. Unknown entity types, missing or stale images, and
+// membership creation/deletion are rejected without changing `committed`.
+//
+// Creation/deletion needs retained collection insertion order; the current
+// MODEL envelope does not record it. This preview must not be used as an
+// executable DVMDB navigation plan until archive coverage against immutable
+// revision snapshots and atomic cursor publication are implemented.
+std::optional<NetworkHydraulic> previewReverseHydraulicActions(
+    const NetworkHydraulic& committed, const std::vector<Bytes>& newestFirstFrames,
+    QString* error = nullptr);
+
 // Exactly the 18 top-level types persisted by saveHydraulicNetwork().
 // The alternative order follows the manifest's collection order.
 using HydraulicEntity = std::variant<

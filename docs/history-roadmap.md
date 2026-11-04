@@ -104,6 +104,39 @@ The operation must not be wired to Undo/Redo until those contracts are
 implemented and tested. The working-copy draft format changed from v4 to v5
 without migration because AOWIS is pre-release.
 
+**HIST-03c1 immutable action-boundary planning (implemented native read):**
+`ProjectService::readHistoryReverseActionWindow(draftId, revision,
+fromPosition, expectedGeneration, limit)` returns the original archived
+MODEL frames in **newest-to-oldest** order for a requested position within
+one first-parent Commit. Position *N* means immediately after the first *N*
+actions; a 100-frame window can advance through a large archive without
+skipping an action. The read checks the draft's pinned generation and current
+branch HEAD before and after retrieving the index-verified immutable frames.
+It rejects foreign/non-ancestor revisions and out-of-range action positions;
+checkpoints with no archive remain position-zero markers, without invented
+intermediate steps. It never changes the draft or an immutable revision.
+
+**Important limitation:** those frames are the *original forward events* in
+reverse retrieval order, **not executable inverses**. An archive can omit
+individual edits from older changes-only Save paths, and the native-only
+service does not have the MODEL-aware entity/membership codec required to
+prove that the archived images reconstruct every intermediate state.
+HIST-03c2 must qualify action coverage and image continuity against native
+snapshots, generate validated inverse/replay changes, and persist their effect
+and a durable cursor atomically. Until then, action-level navigation is
+read-only and the GUI buttons remain disabled.
+
+**HIST-03c2a MODEL-aware update replay (implemented, read-only):**
+`hydraulic::previewReverseHydraulicActions()` verifies and reverses original
+MODEL action images over one already-hydrated terminal network, covering
+existing members from all 18 collections and mixed root-metadata updates.
+It rejects stale images, unsupported types, corruption, and ordered membership
+creation/deletion without a position record. No repository or draft mutation
+occurs. The integration regression must pass in a Qt-enabled build before
+this step is accepted. Outstanding HIST-03c2 work is proving archives fully
+cover the native revision delta, recording membership order for structural
+Undo/Redo, and publishing the planned result atomically with its cursor.
+
 ### HDB-03 — Durable Undo/Redo operation and concurrency
 
 Generate new canonical inverse or forward events with fresh operation IDs,

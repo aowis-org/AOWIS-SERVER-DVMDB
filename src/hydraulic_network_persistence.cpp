@@ -1466,6 +1466,95 @@ std::optional<RevisionId> tryIndexedUuidScalarEdits(
 
 } // namespace
 
+// HIST-03c2: MODEL-aware reverse replay of immutable original action frames.
+// This is intentionally a read-only *preview*. A MODEL event records canonical
+// entity values but not the original ordered membership position of a newly
+// created/deleted member. Consequently, membership changes are rejected rather
+// than being guessed (which could produce a different canonical network).
+std::optional<NetworkHydraulic> previewReverseHydraulicActions(
+        const NetworkHydraulic& committed, const std::vector<Bytes>& newestFirstFrames,
+        QString* error) {
+    if (error) error->clear();
+    const std::function<std::optional<NetworkHydraulic>(const QString&)> fail =
+        [error](const QString& reason) -> std::optional<NetworkHydraulic> {
+            if (error) *error = reason;
+            return std::nullopt;
+        };
+    // Each input is bounded by the canonical MODEL event codec. The caller
+    // pages an authenticated, revision-pinned immutable archive separately.
+    if (newestFirstFrames.size() > 100)
+        return fail(QStringLiteral("Historical action preview exceeds 100-event page limit"));
+    NetworkHydraulic candidate = committed;
+    for (const Bytes& frame : newestFirstFrames) {
+        const QByteArray bytes = qByteArrayFromBytes(frame);
+        QString decodedError;
+        const std::optional<aowis::model::ModelEditTransaction> original =
+            aowis::model::ModelEditTransactionCodec::decode(bytes, &decodedError);
+        if (!original)
+            return fail(QStringLiteral("Invalid archived MODEL frame: ") + decodedError);
+        // The transaction is reversed as a whole, including mixed root and
+        // typed edits. Only canonical, image-verified updates are supported.
+        // Validate against a copy so no half-event can be exposed on error.
+        NetworkHydraulic next = candidate;
+        for (const aowis::model::ModelEntityEdit& edit : original->edits) {
+            if (!edit.before || !edit.after)
+                return fail(QStringLiteral("Historical create/delete needs membership-order provenance"));
+            if (edit.entityType == QString::fromLatin1(aowis::model::hydraulicRootEditType)) {
+                if (edit.entityId != next.uuid ||
+                    aowis::model::hydraulicRootImage(next) != *edit.after)
+                    return fail(QStringLiteral("Historical root after-image does not match current state"));
+                QString rootError;
+                const std::optional<NetworkHydraulic> before =
+                    aowis::model::decodeHydraulicRootImage(*edit.before, &rootError);
+                if (!before || !aowis::model::applyHydraulicRootMetadata(next, *before))
+                    return fail(QStringLiteral("Historical root before-image is invalid: ") + rootError);
+                continue;
+            }
+            bool knownType = false;
+            bool foundId = false;
+            QString failure;
+#define REVERSE_HISTORY_VALUE(name, type, kind) \
+            if (!knownType && edit.entityType == QStringLiteral(#type)) { \
+                knownType = true; \
+                for (type& entity : next.name) { \
+                    if (entity.uuid != edit.entityId) continue; \
+                    foundId = true; \
+                    if (ModelCodec<type>::encode(entity) != *edit.after) { \
+                        failure = QStringLiteral("Historical entity after-image mismatch"); \
+                        break; \
+                    } \
+                    QString imageError; \
+                    const std::optional<type> previous = \
+                        ModelCodec<type>::decode(*edit.before, &imageError); \
+                    if (!previous || previous->uuid != edit.entityId || \
+                        ModelCodec<type>::encode(*previous) != *edit.before) { \
+                        failure = QStringLiteral("Historical entity before-image is invalid: ") + imageError; \
+                        break; \
+                    } \
+                    entity = *previous; \
+                    break; \
+                } \
+            }
+            AOWIS_DVMDB_HYDRAULIC_COLLECTIONS(REVERSE_HISTORY_VALUE)
+#undef REVERSE_HISTORY_VALUE
+            if (!knownType)
+                return fail(QStringLiteral("Unknown historical hydraulic entity type: ") + edit.entityType);
+            if (!foundId)
+                return fail(QStringLiteral("Historical member UUID is not present in its collection"));
+            if (!failure.isEmpty()) return fail(failure);
+        }
+        candidate = std::move(next);
+    }
+    const aowis::dvmdb::HydraulicDependencyValidation checked =
+        aowis::dvmdb::validateHydraulicNetworkWithDependencies(candidate);
+    if (!checked.report.valid())
+        return fail(QStringLiteral("Historical state has invalid model references or values: ") +
+                    checked.report.summary());
+    if (aowis::dvmdb::ModelCodec<NetworkHydraulic>::encode(candidate).isEmpty())
+        return fail(QStringLiteral("Historical state cannot be canonically encoded"));
+    return candidate;
+}
+
 ModelChange materializeDraftRootEdit(
     const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
     const aowis::model::ModelEntityEdit& edit)

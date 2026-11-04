@@ -383,6 +383,40 @@ void testCommittedActionHistory() {
                 secondPage.total == 2 && secondPage.actions.size() == 1 &&
                 secondPage.actions[0].encoded == secondFrame && !secondPage.nextOffset,
                 "HIST-02 archived MODEL frame pagination lost order or exact bytes");
+        // HIST-03c1: a position is an action boundary, not a model
+        // snapshot. The planner returns original frames newest-first for
+        // future MODEL-aware inversion, never an unvalidated overlay.
+        const aowis::dvmdb::HistoryReverseActionWindow lastAction =
+            service.readHistoryReverseActionWindow(draftId,
+                *RevisionId::parse(revisionId), 2, 3, 1);
+        const aowis::dvmdb::HistoryReverseActionWindow firstAction =
+            service.readHistoryReverseActionWindow(draftId,
+                *RevisionId::parse(revisionId), 1, 3, 1);
+        const aowis::dvmdb::HistoryReverseActionWindow firstBoundary =
+            service.readHistoryReverseActionWindow(draftId,
+                *RevisionId::parse(revisionId), 0, 3, 1);
+        require(lastAction.commitOperationId == operationId &&
+                lastAction.expectedHead == RevisionId::parse(revisionId) &&
+                lastAction.actionCount == 2 && lastAction.fromPosition == 2 &&
+                lastAction.originalFramesNewestFirst.size() == 1 &&
+                lastAction.originalFramesNewestFirst[0].encoded == secondFrame &&
+                lastAction.nextPosition == 1 &&
+                firstAction.originalFramesNewestFirst.size() == 1 &&
+                firstAction.originalFramesNewestFirst[0].encoded == firstFrame &&
+                !firstAction.nextPosition &&
+                firstBoundary.originalFramesNewestFirst.empty() &&
+                !firstBoundary.nextPosition,
+                "HIST-03c1 reversed action boundaries skipped or mutated MODEL frames");
+        expectConflict([&]() { (void)service.readHistoryReverseActionWindow(
+            draftId, *RevisionId::parse(revisionId), 2, 2); });
+        bool invalidActionBoundary = false;
+        try { (void)service.readHistoryReverseActionWindow(
+            draftId, *RevisionId::parse(revisionId), 3, 3); }
+        catch (const ProjectError& error) {
+            invalidActionBoundary = error.kind() == ProjectErrorKind::InvalidInput;
+        }
+        require(invalidActionBoundary,
+                "HIST-03c1 accepted an action boundary outside the Commit archive");
         bool refusedPage = false;
         try {
             (void)service.revisionActionPage(projectId, "main",
@@ -428,6 +462,13 @@ void testCommittedActionHistory() {
                 recoveredPage.actions[1].encoded == secondFrame && !recoveredPage.nextOffset,
                 "HIST-02 revision index lost original frames after restart and reconciliation");
         const RevisionId committed = *RevisionId::parse(revisionId);
+        const aowis::dvmdb::HistoryReverseActionWindow restartPlan =
+            reopened.readHistoryReverseActionWindow(draftId, committed, 2, 3, 2);
+        require(restartPlan.originalFramesNewestFirst.size() == 2 &&
+                restartPlan.originalFramesNewestFirst[0].encoded == secondFrame &&
+                restartPlan.originalFramesNewestFirst[1].encoded == firstFrame &&
+                !restartPlan.nextPosition,
+                "HIST-03c1 action plan did not survive repository restart");
         const std::string nextDraft = reopened.createWorkingCopy(
             projectId, "main", committed, session).id;
         const std::string nextToken =
@@ -442,6 +483,15 @@ void testCommittedActionHistory() {
                 reopened.localCommitActionHistory(nextOperation).actions.empty() &&
                 reopened.localCommitActionHistory(operationId).actions.size() == 2,
                 "checkpoint-only Commit fabricated actions or modified older archive");
+        const aowis::dvmdb::HistoryReverseActionWindow emptyCheckpoint =
+            reopened.readHistoryReverseActionWindow(nextDraft,
+                *RevisionId::parse(next.reservedRevisionId), 0, 2);
+        require(emptyCheckpoint.actionCount == 0 &&
+                emptyCheckpoint.originalFramesNewestFirst.empty() &&
+                emptyCheckpoint.commitOperationId == nextOperation,
+                "HIST-03c1 fabricated actions inside a checkpoint-only revision");
+        expectConflict([&]() { (void)reopened.readHistoryReverseActionWindow(
+            draftId, committed, 2, 3); }); // Old draft no longer tracks HEAD.
         const aowis::dvmdb::RevisionActionPage checkpoint =
             reopened.revisionActionPage(projectId, "main",
                 *RevisionId::parse(next.reservedRevisionId));
@@ -687,6 +737,21 @@ void testBranchDraftHistoryPaging() {
             require(action.id == expected[index] && !action.encoded.empty(),
                     "HIST-02 committed frame pagination changed event identity or bytes");
         }
+        // 126 archived actions: walk backward over a 100-action boundary.
+        const aowis::dvmdb::HistoryReverseActionWindow reversed =
+            reopened.readHistoryReverseActionWindow(draftId, revision, 126, 127, 100);
+        const aowis::dvmdb::HistoryReverseActionWindow remainder =
+            reopened.readHistoryReverseActionWindow(draftId, revision, 26, 127, 100);
+        require(reversed.actionCount == 126 && reversed.fromPosition == 126 &&
+                reversed.originalFramesNewestFirst.size() == 100 &&
+                reversed.nextPosition == 26 &&
+                reversed.originalFramesNewestFirst.front().id == expected[125] &&
+                reversed.originalFramesNewestFirst.back().id == expected[26] &&
+                remainder.originalFramesNewestFirst.size() == 26 &&
+                remainder.originalFramesNewestFirst.front().id == expected[25] &&
+                remainder.originalFramesNewestFirst.back().id == expected[0] &&
+                !remainder.nextPosition,
+                "HIST-03c1 reversed action paging did not cross 100-frame boundary");
     }
 }
 

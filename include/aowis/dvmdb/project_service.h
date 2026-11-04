@@ -190,6 +190,24 @@ struct HistoryCheckpointPlan {
     std::vector<ModelChange> candidateChanges;
 };
 
+// HIST-03c planning only: a paginated window of ORIGINAL archived MODEL
+// frames in reverse chronological order, starting at an action boundary.
+// Position N means the state immediately after N actions in that Commit;
+// the immutable revision represents position actionCount. Frames are NOT
+// inverse events or an executable candidate overlay. A MODEL-aware executor
+// must validate image/membership continuity before any cursor mutation.
+struct HistoryReverseActionWindow {
+    std::string draftId;
+    std::string revisionId;
+    std::optional<std::string> commitOperationId;
+    std::optional<RevisionId> expectedHead;
+    std::uint64_t expectedGeneration = 0;
+    std::size_t actionCount = 0;
+    std::size_t fromPosition = 0;
+    std::vector<WorkingCopyEvent> originalFramesNewestFirst;
+    std::optional<std::size_t> nextPosition;
+};
+
 struct WorkingCopyLease {
     std::string token;                // UUIDv7, changes on every acquisition
     std::uint64_t expiresAtMs = 0;   // UTC epoch milliseconds
@@ -430,6 +448,15 @@ public:
     HistoryCheckpointPlan planHistoryCheckpoint(
         std::string_view draftId, const RevisionId& target,
         std::uint64_t expectedGeneration);
+    // Read-only HIST-03c foundation for crossing action boundaries within a
+    // committed revision. Boundaries are zero-based; only immutable original
+    // frames are returned, newest first. Checkpoint-only revisions allow
+    // position zero but cannot fabricate individual actions. This method
+    // never changes the draft, lease, HEAD, journal or navigation cursor.
+    HistoryReverseActionWindow readHistoryReverseActionWindow(
+        std::string_view draftId, const RevisionId& revision,
+        std::size_t fromPosition, std::uint64_t expectedGeneration,
+        std::size_t limit = 100);
     // HIST-03b: execute a checkpoint selection as ONE atomic replacement of
     // candidate and durable cursor fields, without touching immutable HEAD.
     // The writer pins its lease, generation and expected committed HEAD.
