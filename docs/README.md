@@ -57,9 +57,12 @@ The source retains the original MODEL events after local Commit and serves
 paged read-only first-parent action timelines over HTTP. Native code can
 verify a hydraulic revision's complete action coverage and atomically select
 an archived action boundary in a leased private draft, with a durable cursor
-and idempotent retry. **This is not yet user-facing Undo/Redo**: active draft
-journals, continuous cursor/redo eligibility, HTTP navigation and GUI wiring
-remain unfinished. Historic revisions without action archives remain honest
+and idempotent retry. A native MODEL-verified adapter also navigates active
+actions for one existing network, and atomic event Save after Undo invalidates
+the redo tail without touching committed revisions. **This is not yet
+user-facing Undo/Redo**: multi-network/unborn drafts, the continuous cross-Commit
+cursor, HTTP navigation and GUI wiring remain unfinished. Historic revisions
+without action archives remain honest
 checkpoint-only entries. See [History](commit-action-archive.md).
 
 Before the first release, unsupported development storage formats are rejected

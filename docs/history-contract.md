@@ -82,9 +82,12 @@ archive; the bounded active-draft journal is cleared after that Commit.
 The native MODEL-aware active-journal adapter validates the whole retained
 journal, including ordered membership and root metadata, compares the
 selected position with the actual persisted canonical network and refuses
-unjournaled/foreign native candidate changes. The existing atomic publisher
-retains original frames and the durable position. Save/Commit below the tip
-remain refused pending explicit redo invalidation. Multi-network drafts,
+unjournaled/foreign native candidate changes. Navigation retains original
+frames and a durable cursor. On a **new atomic MODEL event Save** below the
+journal tip, the server preserves only the applied prefix and appends the
+new actions, making the former redo tail ineligible without changing any
+immutable Commit. This Save/cursor transition is atomic and crash-safe;
+Commit still rejects an unapplied redo tail. Multi-network drafts,
 unborn-base drafts and HTTP/GUI navigation are not supported by this slice.
 
 The GUI History dock may show committed action metadata, draft actions and

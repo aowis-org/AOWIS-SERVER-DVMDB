@@ -96,11 +96,14 @@ they do not yet implement continuous Undo/Redo.
 **internal** publication primitive for a MODEL-verified position in the active
 journal. It atomically replaces the candidate and persists
 `draft-action-position`, retaining the original journal for Redo and supporting
-exact-operation retries after restart. It has **no public MODEL-aware wrapper
-or HTTP route yet**: callers may not supply unchecked candidate overlays.
-While the cursor is below `journalCount`, new Save and local Commit are
-rejected rather than silently archiving unapplied actions. At the tip, ordinary
-Save and Commit are permitted, with normal cursor clearing. See
+exact-operation retries after restart. The MODEL-aware hydraulic wrapper
+verifies the reconstructed candidate for one existing network; there is **no
+HTTP navigation route yet**. Callers may not supply unchecked candidate overlays.
+Below the journal tip, a new **atomic MODEL event Save** makes the old redo
+tail ineligible and appends new events to the retained prefix. This is one
+fsynced draft update, not a separate truncate and Save. Local Commit still
+rejects a cursor below the tip; an event Save or navigation must first
+resolve it. At the tip, Save and Commit clear the cursor normally. See
 [History](commit-action-archive.md).
 
 ## Saving
@@ -132,9 +135,13 @@ atomically:
   membership, the server applies metadata to the resulting root manifest,
   emitting one final atomic candidate change set. Unjournaled extra typed
   changes, duplicate root edits and stale before-images are rejected.
-* A new event Save while the active draft cursor is **behind** its journal
-  tip is a `409 Conflict`, until an explicit redo-branch invalidation operation
-  is implemented. No retained forward action is silently discarded.
+* When the active draft cursor is **behind** the journal tip, a new
+  `save-events` request atomically branches the active history: retains the
+  journal prefix through the selected position, removes the now-ineligible
+  forward Redo tail, and appends the new transaction frames. An invalid,
+  stale, or rejected Save leaves the whole prior journal and cursor intact.
+  The old tail is not archived by a later Commit. Previously committed
+  immutable actions and revisions are never removed.
 * A retry of the **immediately preceding** identical request (same
   fingerprint, generation one ahead) returns the earlier result instead of
   saving twice. The response lists only this Save's accepted event UUIDs and
@@ -143,9 +150,13 @@ atomically:
   until a local Commit empties it. This is an **active draft Save journal**,
   not an indefinitely retained Undo/Redo action-history archive.
 
-A Save appends only its own events and rewrites the candidate file only when
-the overlay changes; leases, releases and listings touch only the draft's
-small `meta` record. The response is sent after everything is fsynced.
+A Save at the journal tip appends only its own events and rewrites the
+candidate file only when the overlay changes. Branching after Undo writes a
+**new** journal file containing the retained prefix plus incoming frames,
+fsyncs it, and atomically publishes the candidate, new journal reference,
+count, digest and cleared cursor together. It never truncates the previously
+acknowledged journal file in place. Leases, releases and listings touch only
+the small `meta` record. The response follows durable publication.
 
 `initialize-network` creates the first, empty hydraulic network in an
 untouched unborn draft: it writes a server-built network root through the

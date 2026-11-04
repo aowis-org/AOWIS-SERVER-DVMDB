@@ -180,7 +180,7 @@ void writeManifest(const std::filesystem::path& path, const ProjectInfo& info) {
 // corruption and must never be silently replaced with a new identity.
 std::string loadRepositoryIdentity(const std::filesystem::path& root) {
     const std::filesystem::path path = root / "repository.id";
-    const auto readExisting = [&]() -> std::string {
+    const std::function<std::string()> readExisting = [&]() -> std::string {
         check(!std::filesystem::is_symlink(path) && std::filesystem::is_regular_file(path),
               "unsafe DVMDB repository identity file: " + path.string());
         check(std::filesystem::file_size(path) <= 80,
@@ -271,7 +271,7 @@ std::string decodeRemoteEndpoint(std::string_view encoded) {
           "invalid remote endpoint encoding");
     std::string result;
     result.reserve(encoded.size() / 2);
-    const auto digit = [](char value) -> int {
+    const std::function<int(char)> digit = [](char value) -> int {
         if (value >= '0' && value <= '9') return value - '0';
         if (value >= 'a' && value <= 'f') return 10 + value - 'a';
         return -1;
@@ -2350,14 +2350,12 @@ WorkingCopyInfo ProjectService::saveWorkingCopyTransactions(
     const std::shared_ptr<std::mutex> lock = draftLock(draftId);
     std::lock_guard<std::mutex> guard(*lock);
     requirePrivateRepository("draft requires a private repository");
-    // Reads the overlay and the journal's event UUIDs (frame headers), never
-    // the complete journal: a Save appends only its own events.
+    // Normally reads only the overlay and journal UUIDs (frame headers).
+    // Branching after Undo additionally verifies the complete retained journal
+    // so the surviving prefix can be rewritten to a fresh durable file.
     std::vector<std::string> journalIds;
     StoredDraft stored = loadDraft(this->root_, draftId, DraftLoad::Candidate, &journalIds);
     WorkingCopyInfo draft = stored.info;
-    if (draft.draftActionPosition && *draft.draftActionPosition < draft.journalCount)
-        throw ProjectError(ProjectErrorKind::Conflict,
-                           "redo actions remain: return to the journal tip before Save");
     if (!draft.leaseSessionId || *draft.leaseSessionId != sessionId ||
         !draft.leaseToken || *draft.leaseToken != fencingToken ||
         !workingCopyLeaseLive(draft))
@@ -2381,14 +2379,32 @@ WorkingCopyInfo ProjectService::saveWorkingCopyTransactions(
     for (const WorkingCopyEvent& event : events)
         if (applied.contains(event.id))
             throw ProjectError(ProjectErrorKind::Conflict, "edit event already saved");
-    // A local Commit empties the journal; until then a full journal is a
-    // limit (413), not a client error.
-    if (draft.journalCount + events.size() > workingCopyMaxEvents)
+    // An edit made after Undo branches from the *selected* journal boundary.
+    // Retain only its acknowledged prefix; the forward Redo tail is no longer
+    // eligible. Never truncate the old journal in place: the complete new
+    // journal is fsynced into a separate file, then published with the new
+    // candidate and cursor in one atomic meta replacement. A crash before
+    // that replacement leaves the original Redo tail intact.
+    const bool invalidateRedo = draft.draftActionPosition &&
+        *draft.draftActionPosition < draft.journalCount;
+    const std::uint64_t retainedCount = invalidateRedo
+        ? *draft.draftActionPosition : draft.journalCount;
+    if (retainedCount + events.size() > workingCopyMaxEvents)
         throw StorageError(StorageErrorKind::LimitExceeded,
                            "draft event journal is full; commit or discard the draft");
+    std::vector<WorkingCopyEvent> replacementJournal;
+    if (invalidateRedo) {
+        const StoredDraft complete = loadDraft(this->root_, draftId, DraftLoad::Full);
+        if (complete.info.generation != draft.generation ||
+            complete.info.journal.size() != draft.journalCount)
+            throw ProjectError(ProjectErrorKind::Conflict, "draft journal changed during Save");
+        replacementJournal.assign(complete.info.journal.begin(),
+            complete.info.journal.begin() + static_cast<std::ptrdiff_t>(retainedCount));
+        replacementJournal.insert(replacementJournal.end(), events.begin(), events.end());
+    }
     draft.candidateChanges = mergedCandidate(draft.candidateChanges, changes);
-    draft.journal = events;
-    draft.journalCount += events.size();
+    draft.journal = events; // Save acknowledgement reports only the incoming actions.
+    draft.journalCount = retainedCount + events.size();
     draft.dirty = !draft.candidateChanges.empty();
     draft.lastSaveFingerprint = fingerprint;
     draft.historyCheckpointRevisionId.reset();
@@ -2400,7 +2416,8 @@ WorkingCopyInfo ProjectService::saveWorkingCopyTransactions(
     ++draft.generation;
     DraftUpdate update;
     if (!changes.empty()) update.candidate = draft.candidateChanges;
-    update.appended = events;
+    update.resetJournal = invalidateRedo;
+    update.appended = invalidateRedo ? std::move(replacementJournal) : events;
     prepareDraftUpdate(stored, update); // Limits are checked BEFORE publishing.
     try { updateDraft(workingCopyDirectory(this->root_) / draft.id, stored, draft, update); }
     catch (...) { markUncertain(); throw; }

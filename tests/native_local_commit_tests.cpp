@@ -181,9 +181,9 @@ void testHistoryCheckpointPlan() {
     }
 }
 
-// HDB-03a: the original active journal must remain available while the
-// selected draft candidate moves backward/forward. A cursor below the tip
-// must not be silently committed or overwritten by a new Save.
+// HDB-03a: the original active journal remains available while the selected
+// candidate moves backward/forward. Commit cannot silently archive a redo tail;
+// Save from an obsolete generation must not overwrite the selected position.
 void testDurableActiveDraftNavigationPublication() {
     TempRoot root;
     const std::string session = UuidV7::generate().toString();
@@ -231,7 +231,7 @@ void testDurableActiveDraftNavigationPublication() {
         expectConflict([&] { (void)service.publishVerifiedDraftActionNavigation(
             UuidV7::generate().toString(), draftId, session, token, 2, head, 0, {}); });
         expectConflict([&] { (void)service.saveWorkingCopyTransactions(
-            draftId, session, token, 3, {second},
+            draftId, session, token, 2, {second},
             {aowis::dvmdb::test::editEvent(UuidV7::generate(), base.key, {20}, {30})}); });
         expectConflict([&] { (void)service.commitWorkingCopy(
             UuidV7::generate().toString(), draftId, session, token, 3, head,
@@ -270,6 +270,157 @@ void testDurableActiveDraftNavigationPublication() {
                 rebased.generation == 6 && !rebased.dirty &&
                 restarted.localCommitActionHistory(committed.id).actions.size() == 2,
                 "HDB-03a Commit did not archive both original actions and clear the cursor");
+    }
+}
+
+// HDB-03c: saving a new action after Undo must atomically retain only the
+// selected prefix and the new action. Replaced Redo frames must never become
+// part of a later local Commit, including after a service restart or retry.
+void testBranchDraftActionJournalAfterUndo() {
+    TempRoot root;
+    const std::string session = UuidV7::generate().toString();
+    const ModelChange base = changeWithValue(10);
+    const ModelChange first = changeWithValue(20);
+    const ModelChange second = changeWithValue(30);
+    const ModelChange third = changeWithValue(40);
+    const ModelChange alternate = changeWithValue(50);
+    const ModelChange another = changeWithValue(60);
+    const ModelChange final = changeWithValue(70);
+    const aowis::dvmdb::Bytes firstFrame = aowis::dvmdb::test::editEvent(
+        UuidV7::generate(), base.key, {10}, {20});
+    const aowis::dvmdb::Bytes secondFrame = aowis::dvmdb::test::editEvent(
+        UuidV7::generate(), base.key, {20}, {30});
+    const aowis::dvmdb::Bytes thirdFrame = aowis::dvmdb::test::editEvent(
+        UuidV7::generate(), base.key, {30}, {40});
+    const aowis::dvmdb::Bytes alternateFrame = aowis::dvmdb::test::editEvent(
+        UuidV7::generate(), base.key, {20}, {50});
+    std::string projectId;
+    std::string draftId;
+    std::string token;
+    std::string firstActionId;
+    std::string secondActionId;
+    std::string thirdActionId;
+    std::string alternativeActionId;
+    std::optional<RevisionId> head;
+    {
+        ProjectService service(root.path);
+        service.configureRepositoryRole(RepositoryRole::Private);
+        projectId = service.createUnbornProject("branched draft journal").id;
+        head = service.commitModelAtExpectedHead(projectId, "main", {base},
+                                                  commitMetadata(), std::nullopt);
+        draftId = service.createWorkingCopy(projectId, "main", head, session).id;
+        token = service.acquireWorkingCopyLease(draftId, session, 120).token;
+        const WorkingCopyInfo firstSaved = service.saveWorkingCopyTransactions(
+            draftId, session, token, 0, {first}, {firstFrame});
+        const WorkingCopyInfo secondSaved = service.saveWorkingCopyTransactions(
+            draftId, session, token, 1, {second}, {secondFrame});
+        const WorkingCopyInfo thirdSaved = service.saveWorkingCopyTransactions(
+            draftId, session, token, 2, {third}, {thirdFrame});
+        require(thirdSaved.generation == 3 && thirdSaved.journalCount == 3,
+                "HDB-03c could not build the original Redo tail");
+        firstActionId = firstSaved.journal.front().id;
+        secondActionId = secondSaved.journal.front().id;
+        thirdActionId = thirdSaved.journal.front().id;
+        const WorkingCopyInfo undone = service.publishVerifiedDraftActionNavigation(
+            UuidV7::generate().toString(), draftId, session, token, 3, head, 1, {first});
+        require(undone.generation == 4 && undone.draftActionPosition == 1 &&
+                undone.journalCount == 3 && undone.dirty,
+                "HDB-03c could not select a middle action boundary");
+        expectConflict([&] { (void)service.commitWorkingCopy(
+            UuidV7::generate().toString(), draftId, session, token, 4, head,
+            commitMetadata()); });
+        expectConflict([&] { (void)service.saveWorkingCopyTransactions(
+            draftId, session, token, 3, {alternate}, {alternateFrame}); });
+        expectConflict([&] { (void)service.saveWorkingCopyTransactions(
+            draftId, session, UuidV7::generate().toString(), 4,
+            {alternate}, {alternateFrame}); });
+        expectConflict([&] { (void)service.saveWorkingCopyTransactions(
+            draftId, session, token, 4, {alternate}, {secondFrame}); });
+        const WorkingCopyInfo unchanged = service.workingCopy(draftId, true);
+        require(unchanged.generation == 4 && unchanged.journal.size() == 3 &&
+                unchanged.draftActionPosition == 1,
+                "HDB-03c rejected Save altered retained Redo frames");
+    }
+    {
+        ProjectService restarted(root.path);
+        const WorkingCopyInfo recovered = restarted.workingCopy(draftId, true);
+        require(recovered.generation == 4 && recovered.journalCount == 3 &&
+                recovered.draftActionPosition == 1,
+                "HDB-03c lost the Undo cursor before branching Save");
+        const WorkingCopyInfo saved = restarted.saveWorkingCopyTransactions(
+            draftId, session, token, 4, {alternate}, {alternateFrame});
+        require(saved.generation == 5 && saved.journalCount == 2 &&
+                !saved.draftActionPosition && saved.journal.size() == 1 &&
+                saved.dirty && saved.candidateChanges.size() == 1 &&
+                saved.candidateChanges.front().record &&
+                saved.candidateChanges.front().record->payload == alternate.record->payload,
+                "HDB-03c Save did not atomically branch at the cursor");
+        alternativeActionId = saved.journal.front().id;
+        const WorkingCopyInfo journal = restarted.workingCopy(draftId, true);
+        require(journal.journal.size() == 2 &&
+                journal.journal[0].id == firstActionId &&
+                journal.journal[1].id == alternativeActionId &&
+                journal.journal[0].encoded == firstFrame &&
+                journal.journal[1].encoded == alternateFrame &&
+                journal.journal[0].id != secondActionId &&
+                journal.journal[1].id != thirdActionId &&
+                !journal.lastHistoryNavigationOperationId,
+                "HDB-03c did not replace the Redo tail with only the new action");
+        expectConflict([&] { (void)restarted.publishVerifiedDraftActionNavigation(
+            UuidV7::generate().toString(), draftId, session, token, 5, head, 3, {}); });
+        const WorkingCopyInfo replay = restarted.saveWorkingCopyTransactions(
+            draftId, session, token, 4, {alternate}, {alternateFrame});
+        require(replay.generation == 5 && replay.journalCount == 2 &&
+                replay.journal.size() == 1 && replay.journal[0].id == alternativeActionId,
+                "HDB-03c identical Save retry appended a second action");
+        expectConflict([&] { (void)restarted.saveWorkingCopyTransactions(
+            draftId, session, token, 4, {another},
+            {aowis::dvmdb::test::editEvent(UuidV7::generate(), base.key, {50}, {60})}); });
+        const LocalCommitInfo committed = restarted.commitWorkingCopy(
+            UuidV7::generate().toString(), draftId, session, token, 5, head,
+            commitMetadata());
+        const aowis::dvmdb::LocalCommitActionHistory archive =
+            restarted.localCommitActionHistory(committed.id);
+        require(committed.state == LocalCommitState::Succeeded &&
+                archive.actions.size() == 2 &&
+                archive.actions[0].id == firstActionId &&
+                archive.actions[1].id == alternativeActionId &&
+                restarted.workingCopy(draftId).journalCount == 0,
+                "HDB-03c Commit archived discarded Redo actions");
+        head = RevisionId::parse(committed.reservedRevisionId);
+        require(head.has_value(), "HDB-03c Commit had no reserved revision");
+        const WorkingCopyInfo more = restarted.saveWorkingCopyTransactions(
+            draftId, session, token, 6, {another},
+            {aowis::dvmdb::test::editEvent(UuidV7::generate(), base.key, {50}, {60})});
+        require(more.generation == 7 && more.journalCount == 1,
+                "HDB-03c could not start a new journal after Commit");
+        const WorkingCopyInfo zero = restarted.publishVerifiedDraftActionNavigation(
+            UuidV7::generate().toString(), draftId, session, token, 7, head, 0, {});
+        require(zero.generation == 8 && zero.draftActionPosition == 0 &&
+                !zero.dirty && zero.journalCount == 1,
+                "HDB-03c could not Undo to the committed base");
+        const WorkingCopyInfo branched = restarted.saveWorkingCopyTransactions(
+            draftId, session, token, 8, {final},
+            {aowis::dvmdb::test::editEvent(UuidV7::generate(), base.key, {50}, {70})});
+        require(branched.generation == 9 && branched.journalCount == 1 &&
+                !branched.draftActionPosition && branched.dirty &&
+                restarted.workingCopy(draftId, true).journal.size() == 1,
+                "HDB-03c Save after position-zero Undo retained the old journal");
+    }
+    {
+        ProjectService finalRestart(root.path);
+        const WorkingCopyInfo recovered = finalRestart.workingCopy(draftId, true);
+        require(recovered.generation == 9 && recovered.journal.size() == 1 &&
+                recovered.candidateChanges.size() == 1 &&
+                recovered.candidateChanges.front().record &&
+                recovered.candidateChanges.front().record->payload == final.record->payload,
+                "HDB-03c position-zero branch did not survive restart");
+        const LocalCommitInfo committed = finalRestart.commitWorkingCopy(
+            UuidV7::generate().toString(), draftId, session, token, 9, head,
+            commitMetadata());
+        require(committed.state == LocalCommitState::Succeeded &&
+                finalRestart.localCommitActionHistory(committed.id).actions.size() == 1,
+                "HDB-03c position-zero branch Commit did not archive only the new action");
     }
 }
 
@@ -1776,6 +1927,7 @@ int main() {
         testAtomicHistoryCheckpointNavigation();
         testAtomicVerifiedActionNavigationPublication();
         testDurableActiveDraftNavigationPublication();
+        testBranchDraftActionJournalAfterUndo();
         testCommittedActionHistory();
         testVerifiedRevisionNativeWitness();
         testBranchDraftHistoryPaging();

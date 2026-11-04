@@ -94,7 +94,9 @@ struct WorkingCopyInfo {
     std::optional<std::uint64_t> historyActionPosition;
     std::optional<std::string> historyArchiveCommitOperationId;
     // Position in the still-retained active MODEL journal. When absent the
-    // draft is at the journal tip. Navigating does NOT discard redo frames.
+    // draft is at the journal tip. Navigation preserves redo frames; a new
+    // atomic event Save at a non-tip position replaces that redo tail with
+    // the new events, keeping only the selected acknowledged prefix.
     std::optional<std::uint64_t> draftActionPosition;
     std::optional<std::string> lastHistoryNavigationOperationId;
     std::optional<std::uint64_t> lastHistoryNavigationSourceGeneration;
@@ -520,9 +522,9 @@ public:
     // state. The caller must derive verifiedCandidate from the original journal
     // and complete canonical hydraulic model; this method is NOT an HTTP API
     // and must never receive client-generated native record changes. Journal
-    // frames remain intact for future Redo. At a non-tip position ordinary
-    // Save and Commit are intentionally fenced until redo invalidation is
-    // implemented. An uncertain reply is retried with the same operation ID.
+    // frames remain intact for future Redo until a subsequent atomic MODEL
+    // event Save invalidates the tail. Commit remains fenced away from tip.
+    // An uncertain reply is retried with the same operation ID.
     WorkingCopyInfo publishVerifiedDraftActionNavigation(
         std::string_view operationId, std::string_view draftId,
         std::string_view sessionId, std::string_view fencingToken,

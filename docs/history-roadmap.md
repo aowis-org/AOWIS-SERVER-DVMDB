@@ -32,9 +32,12 @@ constructs a complete HEAD-relative candidate. Its native operation publishes
 that candidate and the cursor atomically, retaining all original journal frames
 and the existing lease/generation/HEAD/idempotency protections. It currently
 refuses multi-root and unborn-base drafts rather than guessing ownership.
-Ordinary Save and local Commit still **reject** positions below the journal
-tip; no redo frames are silently archived or overwritten. No HTTP command
-invokes this native adapter yet.
+Navigation preserves the original journal and future Redo actions. A new
+atomic MODEL event Save from a non-tip position retains the selected prefix
+and replaces the redo tail with the new actions in a crash-safe metadata
+publication. Local Commit still **rejects** positions below the journal tip;
+no unapplied redo frames are silently archived. No HTTP navigation command
+invokes the native adapter yet.
 
 The archived action operation is **not** a general Undo or Redo command. It accepts only
 fully verified archived hydraulic local Commits and a draft with **no active
@@ -78,10 +81,11 @@ navigation test, with immutable revision and branch-ref checks.
 - Represent navigation itself durably as an operation with fresh UUIDv7 and
   provenance to the original action. Preserve an audit trail without
   pretending old immutable revisions were changed.
-- Replace the present fail-closed Save/Commit restriction below the journal
-  tip with an atomic operation that invalidates forward **eligibility** upon
-  a new ordinary edit;
-  neither delete the immutable Commit DAG nor fabricate a recovered redo path.
+- Qualify the implemented atomic redo invalidation through the real HTTP
+  MODEL Save route, including a stale before-image, wrong generation/lease,
+  failed publication and retry after restart. Only accepted atomic event
+  Saves branch the journal; Commit must refuse an unresolved non-tip cursor.
+  Never alter the immutable Commit DAG or fabricate a recovered redo path.
 - Specify what Save, Commit, import, branch change, checkout and two sessions
   do when a cursor is away from the tip; reject uncertain situations rather
   than silently resetting a user's selected state.

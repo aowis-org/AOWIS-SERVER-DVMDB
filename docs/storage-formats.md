@@ -287,11 +287,15 @@ edits, another selection, or a changed HEAD reject the retry. Normal Save or
 Commit clears these fields. Native verified action navigation atomically
 publishes a qualified action boundary and its complete replacement candidate
 under the same lease/generation/HEAD fencing. It is **not** a continuous
-Undo/Redo engine by itself: the native active-draft publication primitive
-requires a complete MODEL-verified candidate from a future hydraulic adapter,
-and deliberately rejects new Save and local Commit below the journal tip until
-redo invalidation is implemented. No migration from earlier pre-release draft
-meta records is provided: **V6 drafts must be recreated**.
+Undo/Redo engine by itself: the native active-draft selector requires a
+MODEL-verified candidate, and local Commit still refuses a cursor below the
+journal tip. A subsequent atomic MODEL event Save at a non-tip position
+invalidates the redo tail and persists the retained prefix plus new events
+in a fresh journal file together with the resulting candidate and cleared
+cursor. A failed or interrupted publication leaves the original acknowledged
+journal reachable by the old metadata; old, unreferenced files are cleaned
+on restart. No migration from earlier pre-release draft meta records is
+provided: **V6 drafts must be recreated**.
 
 Candidate file: `AOWC` `0x01`, then per change, sorted by entity key: key (16),
 length (u32, `0xffffffff` = deletion), `AOMD` model record. Journal file: per

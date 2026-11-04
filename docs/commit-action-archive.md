@@ -132,11 +132,15 @@ confirmed passing run against the current correction.
   publisher retains the journal and records `draft-action-position` across
   restart. Only **one existing network** in a committed base is currently
   supported; unjournaled native changes and ambiguous ownership fail closed.
-  Save and Commit reject positions behind the journal tip, preserving Redo.
+  Navigation preserves future Redo frames. A **new** atomic MODEL event
+  Save behind the tip branches the journal: retains the selected prefix,
+  replaces the redo tail with new actions, and publishes the model candidate
+  and journal metadata together. Commit still refuses a non-tip cursor.
 - The native adapter is **not** complete user-facing History: multi-network
-  or unborn-base draft replay, redo invalidation on new edits, durable
-  navigation-event provenance, continuous cross-Commit movement, HTTP
-  execution and GUI wiring remain outstanding.
+  or unborn-base draft replay, durable navigation-event provenance,
+  continuous cross-Commit movement, HTTP execution and GUI wiring remain
+  outstanding. The HTTP Save path must still receive an actual end-to-end
+  Undo → new Save regression before this behavior is considered GUI-ready.
 
 See [working-copy storage](storage-formats.md#private-drafts-aowis-working-copy-7)
 for the persisted cursor fields and [working copies](working-copies.md) for
