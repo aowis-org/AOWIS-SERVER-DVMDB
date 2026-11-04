@@ -2307,6 +2307,75 @@ void exerciseVerifiedRevisionHydraulicCoverage() {
         require(witness.hydraulicRootKeys.size() == 2 &&
                 witness.actualNativeChanges.size() >= 4,
                 "HIST-03c3b native witness omitted server-owned root/chunk changes");
+        // HIST-03c4a: turn authenticated full-history action coverage into
+        // COMPLETE draft overlays, both before and after the mixed action.
+        // Two networks must move at the same global action boundary while
+        // retaining canonical collection order and root metadata.
+        const std::string navigationDraft = service->createWorkingCopy(
+            projectId, "main", revision, session).id;
+        const std::optional<hydraulic::VerifiedHydraulicActionNavigationPlan> beforeAction =
+            hydraulic::planVerifiedHydraulicActionNavigation(
+                *service, navigationDraft, revision, 0, 0, &error);
+        const std::optional<hydraulic::VerifiedHydraulicActionNavigationPlan> afterAction =
+            hydraulic::planVerifiedHydraulicActionNavigation(
+                *service, navigationDraft, revision, 1, 0, &error);
+        require(beforeAction && afterAction && error.isEmpty() &&
+                beforeAction->expectedHead == revision &&
+                afterAction->expectedHead == revision &&
+                beforeAction->actionPosition == 0 && afterAction->actionPosition == 1 &&
+                beforeAction->commitOperationId == witness.commitOperationId &&
+                afterAction->candidateChanges.size() > 0,
+                "HIST-03c4a could not plan both verified multi-network action boundaries");
+        const std::function<NetworkHydraulic(
+            const hydraulic::VerifiedHydraulicActionNavigationPlan&, const QUuid&)>
+            plannedNetwork = [&service, &projectId, &revision](
+                const hydraulic::VerifiedHydraulicActionNavigationPlan& plan,
+                const QUuid& id) -> NetworkHydraulic {
+                std::map<native::Key, std::optional<native::ModelRecord>> overlay;
+                for (const native::ModelChange& change : plan.candidateChanges)
+                    require(overlay.emplace(change.key, change.record).second,
+                            "duplicate key in HIST-03c4a candidate overlay");
+                const std::function<std::optional<native::ModelRecord>(const native::Key&)> read =
+                    [&service, &projectId, &revision, &overlay](const native::Key& key)
+                    -> std::optional<native::ModelRecord> {
+                        const std::map<native::Key, std::optional<native::ModelRecord>>::const_iterator
+                            found = overlay.find(key);
+                        if (found != overlay.end()) return found->second;
+                        return service->getModelAtRevision(projectId, revision, key);
+                    };
+                const std::optional<NetworkHydraulic> network =
+                    hydraulic::loadDraftHydraulicNetwork(read, id);
+                require(network.has_value(), "HIST-03c4a candidate network cannot be reopened");
+                return *network;
+            };
+        NetworkHydraulic expectedA = a;
+        expectedA.nodes_junctions.append(added);
+        NetworkHydraulic expectedB = changedRootB;
+        expectedB.nodes_junctions.first() = changedB;
+        require(native::ModelCodec<NetworkHydraulic>::encode(
+                    plannedNetwork(*beforeAction, a.uuid)) ==
+                    native::ModelCodec<NetworkHydraulic>::encode(a) &&
+                native::ModelCodec<NetworkHydraulic>::encode(
+                    plannedNetwork(*beforeAction, b.uuid)) ==
+                    native::ModelCodec<NetworkHydraulic>::encode(b) &&
+                native::ModelCodec<NetworkHydraulic>::encode(
+                    plannedNetwork(*afterAction, a.uuid)) ==
+                    native::ModelCodec<NetworkHydraulic>::encode(expectedA) &&
+                native::ModelCodec<NetworkHydraulic>::encode(
+                    plannedNetwork(*afterAction, b.uuid)) ==
+                    native::ModelCodec<NetworkHydraulic>::encode(expectedB),
+                "HIST-03c4a reconstructed an incorrect draft-relative action boundary");
+        require(service->workingCopy(navigationDraft).generation == 0 &&
+                !service->workingCopy(navigationDraft).dirty &&
+                !service->workingCopy(navigationDraft).historyCheckpointRevisionId,
+                "HIST-03c4a read-only planning modified the actual draft");
+        require(!hydraulic::planVerifiedHydraulicActionNavigation(
+                    *service, navigationDraft, revision, 2, 0, &error) &&
+                !error.isEmpty() &&
+                !hydraulic::planVerifiedHydraulicActionNavigation(
+                    *service, navigationDraft, revision, 0, 1, &error) &&
+                !error.isEmpty(),
+                "HIST-03c4a accepted invalid action positions or stale draft generations");
 
         const std::string unrelatedDraft = service->createWorkingCopy(
             projectId, "main", revision, session).id;
@@ -2339,6 +2408,12 @@ void exerciseVerifiedRevisionHydraulicCoverage() {
                 "HIST-03c3b unjournaled native Commit failed");
         const native::RevisionId later =
             *native::RevisionId::parse(unrelatedCommit.reservedRevisionId);
+        // Planning cannot race a newly published branch HEAD, even if the
+        // selected older action archive itself remains immutable and readable.
+        require(!hydraulic::planVerifiedHydraulicActionNavigation(
+                    *service, navigationDraft, revision, 0, 0, &error) &&
+                error.contains(QStringLiteral("HEAD")),
+                "HIST-03c4a did not reject a draft after its branch HEAD advanced");
         require(!hydraulic::verifyHydraulicRevisionActionCoverage(
                     *service, projectId, "main", later, &error) &&
                 error.contains(QStringLiteral("unjournaled")),
@@ -2376,6 +2451,11 @@ void exerciseVerifiedRevisionHydraulicCoverage() {
                     *native::RevisionId::parse(missingCommit.reservedRevisionId), &error) &&
                 error.contains(QStringLiteral("unjournaled hydraulic network")),
                 "HIST-03c3b accepted a changed hydraulic network with no MODEL event");
+        require(!hydraulic::planVerifiedHydraulicActionNavigation(
+                    *service, missingDraft,
+                    *native::RevisionId::parse(missingCommit.reservedRevisionId),
+                    0, 2, &error) && !error.isEmpty(),
+                "HIST-03c4a built a candidate from an incomplete MODEL archive");
         // ProjectService owns an exclusive root lock. Simulate a real server
         // restart by destroying the first service before opening the second.
         service.reset();

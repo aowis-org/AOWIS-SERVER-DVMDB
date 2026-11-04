@@ -195,6 +195,24 @@ executor; it does **not** persist a history cursor or expose Undo/Redo.
 Reading large snapshots is bounded to 65,536 native records per revision;
 larger collections require a separate paginated verification design.
 
+**HIST-03c4a draft-relative action-boundary planning (implemented, Qt test
+acceptance pending):** `hydraulic::planVerifiedHydraulicActionNavigation(
+service, draftId, revision, actionPosition, expectedGeneration)` performs the
+complete HIST-03c3b archive/native-delta verification, retains the original
+global action indices even when one transaction spans several networks,
+replays the requested boundary for each affected network, and computes a
+**complete candidate replacement overlay relative to the active HEAD**.
+It starts with the immutable first-parent checkpoint plan, replaces affected
+network records and server-owned membership chunks, and inserts tombstones
+for obsolete records. It reopens the computed candidate in memory and demands
+exact canonical equality for every affected network. It refuses a live draft
+MODEL journal, unproven changes-only draft data, stale generation/HEAD,
+incomplete MODEL archives and excessive record counts. This is **read-only**:
+no draft, cursor, event journal or immutable revision is written. The next
+step must atomically publish the validated overlay and logical cursor with a
+fenced idempotent operation; a separate ordinary Save is not sufficient.
+The snapshot format and REST contract are unchanged by HIST-03c4a.
+
 ### HDB-03 — Durable Undo/Redo operation and concurrency
 
 Generate new canonical inverse or forward events with fresh operation IDs,

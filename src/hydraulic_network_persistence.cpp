@@ -1600,6 +1600,7 @@ std::optional<VerifiedHydraulicRevisionCoverage> verifyHydraulicRevisionActionCo
             std::set<Key> chunkKeys;
             std::set<Key> memberKeys;
             std::vector<Bytes> frames;
+            std::vector<std::size_t> globalPositions;
             QSet<QUuid> typedEdits;
             bool rootEdited = false;
             bool membershipEdited = false;
@@ -1673,7 +1674,8 @@ std::optional<VerifiedHydraulicRevisionCoverage> verifyHydraulicRevisionActionCo
             networks.push_back(std::move(state));
         }
         QSet<QUuid> seenActions;
-        for (const WorkingCopyEvent& archived : witness.actions) {
+        for (std::size_t global = 0; global < witness.actions.size(); ++global) {
+            const WorkingCopyEvent& archived = witness.actions[global];
             QString decodeError;
             const std::optional<aowis::model::ModelEditTransaction> event =
                 aowis::model::ModelEditTransactionCodec::decode(
@@ -1718,6 +1720,7 @@ std::optional<VerifiedHydraulicRevisionCoverage> verifyHydraulicRevisionActionCo
                 if (bytes.isEmpty())
                     return fail(QStringLiteral("Cannot encode a historical per-network MODEL action"));
                 networks[partition.first].frames.push_back(bytesFromQByteArray(bytes));
+                networks[partition.first].globalPositions.push_back(global);
             }
         }
         VerifiedHydraulicRevisionCoverage covered;
@@ -1761,7 +1764,151 @@ std::optional<VerifiedHydraulicRevisionCoverage> verifyHydraulicRevisionActionCo
                 return fail(QStringLiteral("Native revision delta has unknown ownership"));
             }
         }
+        for (NetworkState& state : networks) {
+            if (state.frames.empty()) continue;
+            covered.tracks.push_back(VerifiedHydraulicNetworkActionTrack{
+                std::move(state.before), std::move(state.after),
+                std::move(state.frames), std::move(state.globalPositions)});
+        }
         return covered;
+    } catch (const std::exception& exception) {
+        return fail(QString::fromUtf8(exception.what()));
+    }
+}
+
+// HIST-03c4a: bridge verified immutable action history to a draft-relative
+// replacement overlay. No candidate is exposed until the complete revision
+// proof and resulting model views have been checked for every changed root.
+std::optional<VerifiedHydraulicActionNavigationPlan> planVerifiedHydraulicActionNavigation(
+        ProjectService& service, std::string_view draftId,
+        const RevisionId& revision, std::size_t actionPosition,
+        std::uint64_t expectedGeneration, QString* error) {
+    if (error) error->clear();
+    const std::function<std::optional<VerifiedHydraulicActionNavigationPlan>(const QString&)> fail =
+        [error](const QString& reason) -> std::optional<VerifiedHydraulicActionNavigationPlan> {
+            if (error) *error = reason;
+            return std::nullopt;
+        };
+    try {
+        const WorkingCopyInfo draft = service.workingCopy(draftId, false);
+        if (draft.generation != expectedGeneration || !draft.baseRevision)
+            return fail(QStringLiteral("Historical action draft generation or HEAD is stale"));
+        // Never replace a live user journal. A previously selected checkpoint
+        // is the only accepted dirty candidate: its provenance was recorded
+        // by the atomic HIST-03b operation.
+        if (draft.journalCount != 0 ||
+            (draft.dirty && !draft.historyCheckpointRevisionId))
+            return fail(QStringLiteral("Historical action selection requires a clean or checkpoint-only draft"));
+        const std::optional<RevisionGraphHead> branch =
+            service.branchById(draft.projectId, draft.branchId);
+        if (!branch || branch->revision != draft.baseRevision)
+            return fail(QStringLiteral("Historical action draft no longer follows its branch HEAD"));
+        const std::optional<VerifiedHydraulicRevisionCoverage> covered =
+            verifyHydraulicRevisionActionCoverage(
+                service, draft.projectId, branch->name, revision, error);
+        if (!covered)
+            return std::nullopt;
+        if (covered->actionCount == 0 || actionPosition > covered->actionCount ||
+            covered->tracks.empty())
+            return fail(QStringLiteral("Historical action boundary is outside a completely verified archive"));
+        const RevisionNativeActionWitness witness =
+            service.verifiedRevisionNativeActionWitness(draft.projectId, branch->name, revision);
+        if (!witness.parentRevision || witness.actions.size() != covered->actionCount ||
+            witness.commitOperationId != covered->commitOperationId)
+            return fail(QStringLiteral("Historical action revision witness changed during planning"));
+        const HistoryCheckpointPlan checkpoint = service.planHistoryCheckpoint(
+            draftId, *witness.parentRevision, expectedGeneration);
+        if (checkpoint.expectedHead != draft.baseRevision ||
+            checkpoint.projectId != draft.projectId || checkpoint.branchId != draft.branchId)
+            return fail(QStringLiteral("Historical action source checkpoint is stale"));
+        std::map<Key, std::optional<ModelRecord>> overlay;
+        for (const ModelChange& change : checkpoint.candidateChanges)
+            if (!overlay.emplace(change.key, change.record).second)
+                return fail(QStringLiteral("Historical checkpoint contains duplicate record keys"));
+        std::vector<std::pair<QUuid, NetworkHydraulic>> expectedNetworks;
+        for (const VerifiedHydraulicNetworkActionTrack& track : covered->tracks) {
+            if (track.frames.size() != track.globalPositions.size())
+                return fail(QStringLiteral("Historical network action positions are inconsistent"));
+            std::size_t localPosition = 0;
+            for (const std::size_t global : track.globalPositions) {
+                if (global >= covered->actionCount)
+                    return fail(QStringLiteral("Historical action position is not part of the archive"));
+                if (global < actionPosition) ++localPosition;
+            }
+            QString replayError;
+            const std::optional<NetworkHydraulic> desired =
+                previewVerifiedHydraulicActionBoundary(
+                    track.parent, track.committed, track.frames, localPosition, &replayError);
+            if (!desired)
+                return fail(QStringLiteral("Historical action cannot be reconstructed: ") + replayError);
+            const std::vector<ModelChange> desiredRecords = fullDraftHydraulicNetworkChanges(*desired);
+            std::set<Key> generated;
+            for (const ModelChange& change : desiredRecords)
+                if (!generated.insert(change.key).second)
+                    return fail(QStringLiteral("Historical rebuilt network has duplicate record keys"));
+            // Remove all parent-state members and chunks that the chosen
+            // state no longer uses. The checkpoint overlay already replaces
+            // the HEAD with its parent; these changes now modify that parent
+            // snapshot, never merge with the current edited draft.
+            const Key rootKey = keyFromUuid(track.parent.uuid);
+            const std::function<std::optional<ModelRecord>(const Key&)> parentRead =
+                [&service, &draft, &witness](const Key& key) -> std::optional<ModelRecord> {
+                    return service.getModelAtRevision(draft.projectId, *witness.parentRevision, key);
+                };
+            const std::optional<ModelRecord> root = parentRead(rootKey);
+            if (!root || root->kind != hydraulicNetworkKind)
+                return fail(QStringLiteral("Historical parent root is missing"));
+            std::set<Key> parentKeys{rootKey};
+            for (const Key& chunkKey : root->references) {
+                if (!parentKeys.insert(chunkKey).second)
+                    return fail(QStringLiteral("Duplicate historical parent membership chunk"));
+                const std::optional<ModelRecord> chunk = parentRead(chunkKey);
+                if (!chunk || chunk->kind != 101)
+                    return fail(QStringLiteral("Invalid historical parent membership chunk"));
+                for (const Key& member : chunk->references)
+                    parentKeys.insert(member);
+            }
+            for (const Key& key : parentKeys)
+                if (!generated.contains(key)) overlay[key] = std::nullopt;
+            for (const ModelChange& change : desiredRecords)
+                overlay[change.key] = change.record;
+            expectedNetworks.emplace_back(desired->uuid, *desired);
+        }
+        if (overlay.size() > 20000)
+            return fail(QStringLiteral("Historical action candidate exceeds draft record limit"));
+        const std::function<std::optional<ModelRecord>(const Key&)> readDesired =
+            [&service, &draft, &overlay](const Key& key) -> std::optional<ModelRecord> {
+                const std::map<Key, std::optional<ModelRecord>>::const_iterator found =
+                    overlay.find(key);
+                if (found != overlay.end()) return found->second;
+                return service.getModelAtRevision(draft.projectId, *draft.baseRevision, key);
+            };
+        for (const std::pair<QUuid, NetworkHydraulic>& expected : expectedNetworks) {
+            const std::optional<NetworkHydraulic> actual =
+                loadDraftHydraulicNetwork(readDesired, expected.first);
+            if (!actual || ModelCodec<NetworkHydraulic>::encode(*actual) !=
+                           ModelCodec<NetworkHydraulic>::encode(expected.second))
+                return fail(QStringLiteral("Historical native overlay disagrees with verified MODEL state"));
+        }
+        // A concurrent Save or Commit can invalidate a preview, but may not
+        // make it executable: the next writer MUST recheck these two pins.
+        const WorkingCopyInfo rechecked = service.workingCopy(draftId, false);
+        const std::optional<RevisionGraphHead> currentBranch =
+            service.branchById(draft.projectId, draft.branchId);
+        if (rechecked.generation != expectedGeneration ||
+            rechecked.baseRevision != draft.baseRevision ||
+            !currentBranch || currentBranch->revision != draft.baseRevision)
+            return fail(QStringLiteral("Historical action draft changed during planning"));
+        VerifiedHydraulicActionNavigationPlan plan;
+        plan.draftId = draft.id;
+        plan.revisionId = revision.toString();
+        plan.commitOperationId = witness.commitOperationId;
+        plan.actionPosition = actionPosition;
+        plan.expectedHead = draft.baseRevision;
+        plan.expectedGeneration = expectedGeneration;
+        for (const std::pair<const Key, std::optional<ModelRecord>>& item : overlay)
+            plan.candidateChanges.push_back(ModelChange{item.first, item.second});
+        return plan;
     } catch (const std::exception& exception) {
         return fail(QString::fromUtf8(exception.what()));
     }

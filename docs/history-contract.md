@@ -135,6 +135,20 @@ The older reverse-only preview intentionally continues to reject structural
 changes when no parent snapshot is supplied. No new disk format or REST
 navigation command is introduced in this step.
 
+## Verified draft-relative action targets (HIST-03c4a)
+
+`hydraulic::planVerifiedHydraulicActionNavigation()` now generates the exact
+**replacement** native candidate for a selected action position. It requires
+full first-parent revision/action coverage, preserves the order of all 18
+hydraulic collections, splits cross-network actions by ownership without
+splitting their global timeline positions, and reconstructs from the
+immutable parent rather than modifying the current draft incrementally.
+Every affected network must reopen byte-for-byte from the proposed native
+overlay. A changed draft generation, branch HEAD or unverified native delta
+invalidates the plan. This is **not yet an executed history transition**;
+no cursor or candidate is published. Future execution requires replay-safe
+operation identity, a live writer lease, and an atomic state/cursor update.
+
 ## Retention, restart and UI
 
 The durable action archive survives a Commit; the bounded working-copy event

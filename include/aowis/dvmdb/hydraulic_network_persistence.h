@@ -71,6 +71,17 @@ void materializeDraftMembership(
     std::vector<ModelChange>& changes);
 
 
+// One network's ORIGINAL action subsequence, indexed by its position in the
+// entire Commit archive. A mixed action has one global position even when it
+// touches multiple networks. This evidence is emitted only after complete
+// native revision/action coverage has been verified.
+struct VerifiedHydraulicNetworkActionTrack final {
+    NetworkHydraulic parent;
+    NetworkHydraulic committed;
+    std::vector<Bytes> frames;
+    std::vector<std::size_t> globalPositions;
+};
+
 // HIST-03c3b: prove that a *real indexed local Commit* is completely
 // accounted for by its archived MODEL actions, including native-owned
 // membership chunks/root manifests and edits across multiple networks.
@@ -83,10 +94,33 @@ struct VerifiedHydraulicRevisionCoverage final {
     std::string commitOperationId;
     std::size_t actionCount = 0;
     std::vector<QUuid> changedNetworkIds;
+    std::vector<VerifiedHydraulicNetworkActionTrack> tracks;
 };
 std::optional<VerifiedHydraulicRevisionCoverage> verifyHydraulicRevisionActionCoverage(
     ProjectService& service, std::string_view projectId, std::string_view branch,
     const RevisionId& revision, QString* error = nullptr);
+
+// HIST-03c4a: compose an exact historical action boundary into the active
+// branch HEAD's native-record space. The result is the COMPLETE replacement
+// candidate overlay, not an incremental Save. Authenticated MODEL replay
+// must cover the entire immutable revision and all affected hydraulic
+// networks; parent-snapshot membership is rebuilt in canonical order.
+// Read-only: no lease or cursor is changed. A future fenced/idempotent writer
+// must recheck expectedGeneration and expectedHead before publishing this
+// overlay and its logical history cursor together.
+struct VerifiedHydraulicActionNavigationPlan final {
+    std::string draftId;
+    std::string revisionId;
+    std::string commitOperationId;
+    std::size_t actionPosition = 0;
+    std::optional<RevisionId> expectedHead;
+    std::uint64_t expectedGeneration = 0;
+    std::vector<ModelChange> candidateChanges;
+};
+std::optional<VerifiedHydraulicActionNavigationPlan> planVerifiedHydraulicActionNavigation(
+    ProjectService& service, std::string_view draftId,
+    const RevisionId& revision, std::size_t actionPosition,
+    std::uint64_t expectedGeneration, QString* error = nullptr);
 
 // HIST-03c2: read-only MODEL-aware reverse replay for scalar/member updates
 // and network-root metadata. The input frames must be ORIGINAL archived
