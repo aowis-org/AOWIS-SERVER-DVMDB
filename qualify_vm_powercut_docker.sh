@@ -14,6 +14,8 @@ provisions a disposable guest, and runs the real QEMU power-cut qualification.
 Examples:
   ./qualify_vm_powercut_docker.sh --rounds 4
   ./qualify_vm_powercut_docker.sh --rounds 24 --filesystems ext4 xfs
+  ./qualify_vm_powercut_docker.sh --workload deletions --rounds 10 --filesystems ext4 xfs
+  ./qualify_vm_powercut_docker.sh --workload deletion-stress --rounds 32 --filesystems ext4 xfs
   ./tools/prepare_vm_powercut_docker.sh
 
 Docker is the only required host application. /dev/kvm is passed to Docker

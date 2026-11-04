@@ -186,6 +186,174 @@ def powercut_round(args, port, qemu, expected, round_index, report):
                 writer.wait(timeout=7)
 
 
+DELETION_BARRIERS = ("before-intent", "after-intent", "after-ref",
+                     "after-drafts", "after-finish")
+
+
+def deletion_case(round_index):
+    # Alternate full branch removal and non-root truncation at each boundary.
+    scenario = "branch" if round_index % 2 == 0 else "truncate"
+    point = DELETION_BARRIERS[(round_index // 2) % len(DELETION_BARRIERS)]
+    return scenario, point
+
+
+def deletion_state(args, port, round_index, expected):
+    output = remote(args, port, WORKER, "delete-verify",
+                    MOUNT + f"/deletion-{round_index:03d}", expected, timeout=180)
+    if f"DELETE-VERIFIED " not in output or expected not in output:
+        raise RuntimeError("missing deletion recovery verification: " + output[-2000:])
+
+
+def deletion_powercut_round(args, port, qemu, round_index, report):
+    import shlex
+    scenario, point = deletion_case(round_index)
+    root = MOUNT + f"/deletion-{round_index:03d}"
+    remote(args, port, WORKER, "delete-init", root, scenario, timeout=180)
+    command = ssh_args(args, port) + [shlex.join(root_command(
+        args, "env", "AOWIS_VM_DELETE_POINT=" + point,
+        WORKER, "delete-writer", root))]
+    with open(report / f"delete-writer-{round_index:03d}.log", "wb") as log:
+        writer = subprocess.Popen(command, stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, stderr=log, bufsize=0)
+        try:
+            assert writer.stdout is not None
+            ready, _, _ = select.select([writer.stdout], [], [], 45)
+            if not ready:
+                raise RuntimeError(f"no deletion barrier {point} for {scenario}")
+            line = writer.stdout.readline().decode("ascii", errors="replace").strip()
+            if line != "BARRIER " + point:
+                raise RuntimeError(f"unexpected deletion barrier: {line!r}, wanted {point}")
+            # The guest is stopped INSIDE the requested deletion persistence
+            # phase. No millisecond sleep or probabilistic crash window.
+            stop_vm(qemu)
+        finally:
+            if writer.poll() is None:
+                writer.kill()
+            try:
+                writer.communicate(timeout=7)
+            except subprocess.TimeoutExpired:
+                writer.kill()
+                writer.wait(timeout=7)
+    return {"round": round_index, "scenario": scenario, "barrier": point,
+            "expected_recovery": "original" if point == "before-intent" else "deleted"}
+
+
+def run_fs_deletions(args, workspace, filesystem):
+    case = workspace / filesystem
+    case.mkdir()
+    disk = case / "disposable-data.raw"
+    with disk.open("wb") as stream:
+        stream.truncate(args.disk_mib * 1024 * 1024)
+    overlay = case / "guest-overlay.qcow2"
+    base_info = json.loads(execute(["qemu-img", "info", "--output=json", str(args.guest_image)]))
+    if base_info["format"] not in ("qcow2", "raw"):
+        raise RuntimeError("guest image format must be qcow2 or raw")
+    execute(["qemu-img", "create", "-f", "qcow2", "-F", base_info["format"],
+             "-b", str(args.guest_image.resolve()), str(overlay)])
+    results = []
+    with (case / "serial.log").open("wb") as log:
+        qemu = None
+        try:
+            for round_index in range(args.rounds + 1):
+                port = unused_port()
+                qemu = start_vm(args, overlay, disk, port, log)
+                await_ssh(args, port, qemu)
+                if args.cloud_init_seed:
+                    remote(args, port, "cloud-init", "status", "--wait", timeout=600)
+                setup_mount(args, port, filesystem, round_index == 0)
+                install_worker(args, port)
+                # Recheck EVERY preceding completed deletion. This detects
+                # regression in earlier durable state during later power cuts.
+                for previous in results:
+                    deletion_state(args, port, previous["round"], previous["expected_recovery"])
+                if results:
+                    results[-1]["verified_after_reboot"] = True
+                if round_index == args.rounds:
+                    break
+                result = deletion_powercut_round(args, port, qemu, round_index, case)
+                results.append(result)
+                qemu = None
+                print(f"{filesystem} deletion cut {round_index + 1}/{args.rounds}: "
+                      f"{result['scenario']} at {result['barrier']}", flush=True)
+        finally:
+            stop_vm(qemu)
+    return {"filesystem": filesystem, "workload": "deletions", "rounds": results,
+            "result": "passed"}
+
+
+def stress_powercut_round(args, port, qemu, round_index, report):
+    import shlex
+    command = ssh_args(args, port) + [shlex.join(root_command(
+        args, WORKER, "stress-writer", MOUNT + "/stress"))]
+    with open(report / f"stress-writer-{round_index:03d}.log", "wb") as log:
+        writer = subprocess.Popen(command, stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.PIPE, stderr=log, bufsize=0)
+        try:
+            assert writer.stdout is not None
+            ready, _, _ = select.select([writer.stdout], [], [], 45)
+            if not ready or writer.stdout.readline().decode("ascii", errors="replace").strip() != "STRESS-RUNNING":
+                raise RuntimeError("deletion stress writer did not start")
+            # Unlike the deterministic workload, these kills are deliberately
+            # randomized relative to a continuous stream of real operations.
+            time.sleep((37 + (round_index * 43) % 211) / 1000)
+            if writer.poll() is not None:
+                raise RuntimeError("deletion stress worker exited before VM cut")
+            stop_vm(qemu)
+        finally:
+            if writer.poll() is None:
+                writer.kill()
+            try:
+                writer.communicate(timeout=7)
+            except subprocess.TimeoutExpired:
+                writer.kill()
+                writer.wait(timeout=7)
+    return {"round": round_index, "crash_delay_ms": 37 + (round_index * 43) % 211}
+
+
+def run_fs_deletion_stress(args, workspace, filesystem):
+    case = workspace / filesystem
+    case.mkdir()
+    disk = case / "disposable-data.raw"
+    with disk.open("wb") as stream:
+        stream.truncate(args.disk_mib * 1024 * 1024)
+    overlay = case / "guest-overlay.qcow2"
+    base_info = json.loads(execute(["qemu-img", "info", "--output=json", str(args.guest_image)]))
+    if base_info["format"] not in ("qcow2", "raw"):
+        raise RuntimeError("guest image format must be qcow2 or raw")
+    execute(["qemu-img", "create", "-f", "qcow2", "-F", base_info["format"],
+             "-b", str(args.guest_image.resolve()), str(overlay)])
+    results = []
+    with (case / "serial.log").open("wb") as log:
+        qemu = None
+        try:
+            for round_index in range(args.rounds + 1):
+                port = unused_port()
+                qemu = start_vm(args, overlay, disk, port, log)
+                await_ssh(args, port, qemu)
+                if args.cloud_init_seed:
+                    remote(args, port, "cloud-init", "status", "--wait", timeout=600)
+                setup_mount(args, port, filesystem, round_index == 0)
+                install_worker(args, port)
+                if round_index == 0:
+                    remote(args, port, WORKER, "stress-init", MOUNT + "/stress", timeout=180)
+                else:
+                    result = remote(args, port, WORKER, "stress-verify",
+                                    MOUNT + "/stress", timeout=180)
+                    if "STRESS-VERIFIED " not in result:
+                        raise RuntimeError("stress recovery returned no verification marker")
+                    results[-1]["verified_after_reboot"] = True
+                if round_index == args.rounds:
+                    break
+                results.append(stress_powercut_round(args, port, qemu, round_index, case))
+                qemu = None
+                print(f"{filesystem} continuous deletion cut {round_index + 1}/{args.rounds}",
+                      flush=True)
+        finally:
+            stop_vm(qemu)
+    return {"filesystem": filesystem, "workload": "deletion-stress",
+            "rounds": results, "result": "passed"}
+
+
 def run_fs(args, workspace, filesystem):
     case = workspace / filesystem
     case.mkdir()
@@ -256,6 +424,7 @@ def main():
     parser.add_argument("--worker", type=Path, required=True, help="guest-compatible Release worker binary")
     parser.add_argument("--report-json", type=Path, help="write final verified JSON report outside disposable workspace")
     parser.add_argument("--filesystems", nargs="+", choices=["ext4", "xfs"], default=["ext4", "xfs"])
+    parser.add_argument("--workload", choices=("commits", "deletions", "deletion-stress"), default="commits")
     parser.add_argument("--rounds", type=int, default=16)
     parser.add_argument("--disk-mib", type=int, default=512)
     parser.add_argument("--memory-mib", type=int, default=1024)
@@ -279,7 +448,9 @@ def main():
     workspace = Path(tempfile.mkdtemp(prefix="aowis-powercut-vm-", dir=args.work_root))
     args.known_hosts = workspace / "known_hosts"
     try:
-        results = [run_fs(args, workspace, filesystem) for filesystem in args.filesystems]
+        runner = {"commits": run_fs, "deletions": run_fs_deletions,
+                  "deletion-stress": run_fs_deletion_stress}[args.workload]
+        results = [runner(args, workspace, filesystem) for filesystem in args.filesystems]
         (workspace / "results.json").write_text(json.dumps(results, indent=2) + "\n")
         if args.report_json:
             args.report_json.write_text(json.dumps(results, indent=2) + "\n")

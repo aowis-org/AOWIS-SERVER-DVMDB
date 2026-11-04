@@ -104,7 +104,8 @@ def build_worker(cache, source=SOURCE):
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         run(["cmake", "-S", source, "-B", build, "-G", "Ninja",
              "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_TESTING=ON",
-             "-DAOWIS_DVMDB_WITH_MODEL_CODEC=OFF", "-DAOWIS_DVMDB_WITH_HTTP_SERVER=OFF"])
+             "-DAOWIS_DVMDB_WITH_MODEL_CODEC=OFF", "-DAOWIS_DVMDB_WITH_HTTP_SERVER=OFF",
+             "-DAOWIS_DVMDB_VM_DELETION_BARRIERS=ON"])
         run(["cmake", "--build", build, "--target", "aowis-dvmdb-vm-powercut-worker",
              "--parallel", "2"])
     worker = build / "aowis-dvmdb-vm-powercut-worker"
@@ -146,6 +147,8 @@ runcmd:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--workload", choices=("commits", "deletions", "deletion-stress"), default="commits",
+                        help="existing commit qualification or deletion crash barriers")
     parser.add_argument("--rounds", type=int, default=4, help="power cuts per filesystem (default: 4)")
     parser.add_argument("--filesystems", nargs="+", choices=("ext4", "xfs"),
                         default=["ext4", "xfs"])
@@ -172,7 +175,7 @@ def main(argv=None):
         command = [sys.executable, SOURCE / "tools/qualify_vm_powercut.py",
                    "--guest-image", image, "--cloud-init-seed", seed,
                    "--ssh-key", key, "--guest-user", "aowis-test",
-                   "--worker", worker, "--rounds", args.rounds,
+                   "--worker", worker, "--workload", args.workload, "--rounds", args.rounds,
                    "--disk-mib", args.disk_mib, "--memory-mib", args.memory_mib,
                    "--boot-timeout", args.boot_timeout, "--filesystems", *args.filesystems,
                    "--work-root", run_dir, "--report-json", report]

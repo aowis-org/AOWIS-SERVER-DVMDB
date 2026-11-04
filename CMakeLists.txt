@@ -22,9 +22,15 @@ endif()
 
 # Project catalogue/lifecycle is a direct, Qt-free C++ API and remains usable
 # by the standalone build independently of network transport.
+option(AOWIS_DVMDB_VM_DELETION_BARRIERS
+    "Enable blocking deletion crash barriers (VM qualification builds ONLY)" OFF)
 add_library(aowis-dvmdb-project-service STATIC src/project_service.cpp)
 add_library(AOWIS::DvmdbProjectService ALIAS aowis-dvmdb-project-service)
 target_compile_features(aowis-dvmdb-project-service PUBLIC cxx_std_20)
+if(AOWIS_DVMDB_VM_DELETION_BARRIERS)
+    target_compile_definitions(aowis-dvmdb-project-service PRIVATE
+        AOWIS_DVMDB_VM_DELETION_BARRIERS=1)
+endif()
 target_include_directories(aowis-dvmdb-project-service PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(aowis-dvmdb-project-service PUBLIC aowis-dvmdb-store)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -213,13 +219,22 @@ if(BUILD_TESTING)
     # separately provisioned guest OS and disposable virtual disk.
     add_executable(aowis-dvmdb-vm-powercut-worker
         tests/native_vm_powercut_worker.cpp)
-    target_link_libraries(aowis-dvmdb-vm-powercut-worker PRIVATE aowis-dvmdb-store)
+    target_link_libraries(aowis-dvmdb-vm-powercut-worker PRIVATE
+        aowis-dvmdb-store aowis-dvmdb-project-service)
     add_test(NAME aowis-dvmdb-vm-powercut-worker-smoke
         COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/vm_powercut_worker_tests.py"
             --binary "$<TARGET_FILE:aowis-dvmdb-vm-powercut-worker>")
     set_tests_properties(aowis-dvmdb-vm-powercut-worker-smoke PROPERTIES
         LABELS "aowis;durability" TIMEOUT 90)
+    if(AOWIS_DVMDB_VM_DELETION_BARRIERS)
+        add_test(NAME aowis-dvmdb-vm-deletion-barrier-tests
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/vm_powercut_worker_tests.py"
+                --binary "$<TARGET_FILE:aowis-dvmdb-vm-powercut-worker>" --barriers)
+        set_tests_properties(aowis-dvmdb-vm-deletion-barrier-tests PROPERTIES
+            LABELS "aowis;durability;deletion" TIMEOUT 180)
+    endif()
 
     # Abrupt SIGKILL of the production store in independent processes,
     # followed by fresh-process verification and continued writes. This is

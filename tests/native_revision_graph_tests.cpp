@@ -2,6 +2,10 @@
 #include "aowis/dvmdb/project_service.h"
 
 #include <filesystem>
+#include <fstream>
+#include <csignal>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <iostream>
 #include <set>
 #include <stdexcept>
@@ -304,6 +308,147 @@ void runDestructiveBranchHistory() {
     }
 }
 
+// Reconstruct each durable on-disk state that a SIGKILL/power loss can leave
+// between a synced deletion intent, the ref mutation, and draft cleanup.
+void runDeletionCrashRecovery() {
+    {
+        Temporary tmp;
+        std::string projectId;
+        std::string branchId;
+        {
+            ProjectService service(tmp.path);
+            projectId = service.createProject("staged intent", commitMetadata()).id;
+            branchId = service.createUnbornBranch(projectId, "still-here").toString();
+        }
+        const fs::path directory = tmp.path / "history-deletions";
+        fs::create_directory(directory);
+        {
+            std::ofstream stage(directory / (".creating-" + UuidV7::generate().toString()));
+            stage << "partial intent, not published";
+        }
+        ProjectService recovered(tmp.path);
+        check(recovered.branchById(projectId, branchId).has_value() &&
+              fs::is_empty(directory),
+              "unpublished crash-stage intent damaged a valid branch");
+    }
+    for (int phase = 0; phase < 3; ++phase) {
+        Temporary tmp;
+        std::string projectId;
+        std::string branchId;
+        std::string draftId;
+        std::string survivorId;
+        std::optional<RevisionId> expected;
+        {
+            ProjectService service(tmp.path);
+            const ProjectInfo project = service.createProject("crash recovery", commitMetadata());
+            projectId = project.id;
+            service.configureRepositoryRole(RepositoryRole::Private);
+            const BranchId doomed = service.createUnbornBranch(projectId, "doomed");
+            branchId = doomed.toString();
+            const WorkingCopyInfo draft = service.createWorkingCopyForBranch(
+                projectId, branchId, std::nullopt, UuidV7::generate().toString());
+            draftId = draft.id;
+            const BranchId survivor = service.createUnbornBranch(projectId, "survivor");
+            survivorId = service.createWorkingCopyForBranch(projectId, survivor.toString(),
+                std::nullopt, UuidV7::generate().toString()).id;
+        }
+        const fs::path intents = tmp.path / "history-deletions";
+        fs::create_directory(intents);
+        {
+            std::ofstream out(intents / branchId, std::ios::binary);
+            out << "AOWIS-HISTORY-DELETION-1\n" << projectId << '\n' << branchId
+                << "\n-\n-\n" << draftId << '\n';
+            out.flush();
+            check(out.good(), "unable to stage interrupted history deletion");
+        }
+        const pid_t child = ::fork();
+        check(child >= 0, "cannot fork crash recovery scenario");
+        if (child == 0) {
+            try {
+                if (phase >= 1) {
+                    Repository repository(tmp.path / "projects" / projectId / "repository");
+                    repository.deleteBranch(*ProjectId::parse(projectId),
+                                            *BranchId::parse(branchId), std::nullopt);
+                }
+                if (phase == 2) {
+                    fs::rename(tmp.path / "working-copies" / draftId,
+                        tmp.path / "working-copies" / (".deleting-" + UuidV7::generate().toString()));
+                }
+                ::raise(SIGKILL); // no destructors, flushing or graceful close
+            } catch (...) { ::_exit(89); }
+            ::_exit(90);
+        }
+        int status = 0;
+        check(::waitpid(child, &status, 0) == child && WIFSIGNALED(status) &&
+              WTERMSIG(status) == SIGKILL,
+              "crash fixture did not terminate at the intended durable state");
+        {
+            ProjectService recovered(tmp.path);
+            check(!recovered.branchById(projectId, branchId),
+                  "restart resurrected an interrupted branch deletion");
+            check(!fs::exists(tmp.path / "working-copies" / draftId) &&
+                  recovered.listWorkingCopies().size() == 1 &&
+                  recovered.listWorkingCopies().front().id == survivorId,
+                  "recovery removed the wrong working copy or retained doomed draft");
+            check(!fs::exists(intents / branchId),
+                  "recovery left a pending durable deletion intent");
+        }
+        {
+            ProjectService reopened(tmp.path);
+            check(!reopened.branchById(projectId, branchId) &&
+                  reopened.listWorkingCopies().size() == 1,
+                  "history deletion recovery is not idempotent");
+        }
+    }
+    for (int phase = 0; phase < 2; ++phase) {
+        Temporary tmp;
+        std::string projectId;
+        std::string branchId;
+        std::string draftId;
+        RevisionId first = RevisionId::generate();
+        RevisionId second = RevisionId::generate();
+        {
+            ProjectService service(tmp.path);
+            const ProjectInfo project = service.createProject("truncate recovery", commitMetadata());
+            projectId = project.id;
+            service.configureRepositoryRole(RepositoryRole::Private);
+            const BranchCreationResult branch = service.createBranchWithIdentity(
+                projectId, "truncate-me", "main");
+            branchId = branch.branchId.toString();
+            service.withRepository(projectId, [&](Repository& repository) {
+                first = repository.commit(*ProjectId::parse(projectId), "truncate-me",
+                    {Change{Key{5}, Bytes{1, 2, 3}}}, commitMetadata(), branch.revisionId);
+                second = repository.commit(*ProjectId::parse(projectId), "truncate-me",
+                    {Change{Key{6}, Bytes{4, 5, 6}}}, commitMetadata(), first);
+            });
+            draftId = service.createWorkingCopyForBranch(projectId, branchId, second,
+                UuidV7::generate().toString()).id;
+        }
+        const fs::path intents = tmp.path / "history-deletions";
+        fs::create_directory(intents);
+        {
+            std::ofstream out(intents / branchId, std::ios::binary);
+            out << "AOWIS-HISTORY-DELETION-1\n" << projectId << '\n' << branchId
+                << '\n' << second.toString() << '\n' << second.toString() << '\n'
+                << draftId << '\n';
+        }
+        if (phase == 1) {
+            Repository repository(tmp.path / "projects" / projectId / "repository");
+            (void)repository.truncateBranch(*ProjectId::parse(projectId),
+                *BranchId::parse(branchId), second, second);
+        }
+        {
+            ProjectService recovered(tmp.path);
+            const std::optional<RevisionGraphHead> remaining =
+                recovered.branchById(projectId, branchId);
+            check(remaining && remaining->revision == first,
+                  "interrupted non-root truncation did not restore survivor HEAD");
+            check(recovered.listWorkingCopies().empty() && !fs::exists(intents / branchId),
+                  "interrupted truncation did not discard its journal");
+        }
+    }
+}
+
 void runService() {
     Temporary tmp;
     ProjectService service(tmp.path);
@@ -367,25 +512,6 @@ void runService() {
     service.deleteBranch(project.id, unborn.toString(), std::nullopt);
     check(!service.branchById(project.id, unborn.toString()).has_value(),
           "service deletion did not remove unborn HEAD");
-    // Deleting one branch must never discard another branch's saved edits.
-    const BranchId retained = service.createUnbornBranch(project.id, "retained-draft");
-    const WorkingCopyInfo retainedDraft = service.createWorkingCopyForBranch(
-        project.id, retained.toString(), std::nullopt, UuidV7::generate().toString());
-    const BranchId removed = service.createUnbornBranch(project.id, "removed-draft");
-    const WorkingCopyInfo removedDraft = service.createWorkingCopyForBranch(
-        project.id, removed.toString(), std::nullopt, UuidV7::generate().toString());
-    bool staleRejected = false;
-    try { service.deleteBranch(project.id, removed.toString(), RevisionId::generate(), true); }
-    catch (const ProjectError& error) { staleRejected = error.kind() == ProjectErrorKind::Conflict; }
-    check(staleRejected && service.workingCopy(removedDraft.id).id == removedDraft.id,
-          "stale confirmed deletion discarded an unrelated draft");
-    service.deleteBranch(project.id, removed.toString(), std::nullopt, true);
-    check(service.workingCopy(retainedDraft.id).id == retainedDraft.id,
-          "deleting a branch discarded the surviving branch's working copy");
-    check(service.listWorkingCopies().size() == 1,
-          "branch deletion did not clean up exactly the selected draft");
-    check(service.branchById(project.id, retained.toString()).has_value(),
-          "branch deletion removed another branch's HEAD");
 }
 }
 
@@ -396,6 +522,7 @@ int main() {
         runBranchOriginsAndNames();
         runImmutableForkProvenance();
         runService();
+        runDeletionCrashRecovery();
         runDestructiveBranchHistory();
         std::cout << "UUIDv7 first-parent history and pinned all-parent graph passed\n";
         return 0;

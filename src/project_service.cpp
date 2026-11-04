@@ -10,6 +10,7 @@
 #include <limits>
 #include <map>
 #include <cstring>
+#include <cstdlib>
 #include <fcntl.h>
 #include <fstream>
 #include <functional>
@@ -143,6 +144,8 @@ void removeCatalogueRemnants(const std::filesystem::path& root) {
         syncDirectory(root / "local-commits");
     if (removePrefixed(root / "local-commit-revisions", {".creating-"}, false))
         syncDirectory(root / "local-commit-revisions");
+    if (removePrefixed(root / "history-deletions", {".creating-"}, false))
+        syncDirectory(root / "history-deletions");
     if (removePrefixed(root / "projects", {".creating-"}, true)) syncDirectory(root / "projects");
     for (const std::filesystem::directory_entry& entry :
          std::filesystem::directory_iterator(root / "projects")) {
@@ -1254,6 +1257,135 @@ void removeDraftRemnants(const std::filesystem::path& root) {
     }
 }
 
+#ifdef AOWIS_DVMDB_VM_DELETION_BARRIERS
+// Enabled ONLY in the dedicated VM qualification build. The host observes
+// the barrier through SSH stdout, then SIGKILLs QEMU (not the guest process).
+// No sleep or timing assumption is involved.
+void vmDeletionBarrier(std::string_view point) {
+    const char* selected = ::getenv("AOWIS_VM_DELETE_POINT");
+    if (selected == nullptr || point != selected) return;
+    const std::string marker = "BARRIER " + std::string(point) + "\n";
+    syscallChecked(::write(STDOUT_FILENO, marker.data(), marker.size()) ==
+                   static_cast<ssize_t>(marker.size()), "emit VM deletion barrier");
+    for (;;) ::pause();
+}
+#else
+void vmDeletionBarrier(std::string_view) {}
+#endif
+
+// A confirmed deletion is a durable decision. The intent is fsynced before the
+// branch ref or any working copy is changed. Restart replays unfinished intents;
+// consequently a power loss cannot publish a half-completed deletion.
+struct HistoryDeletionIntent {
+    std::string project;
+    std::string branch;
+    std::optional<RevisionId> expectedHead;
+    std::optional<RevisionId> firstRemoved; // absent => delete entire branch
+    std::vector<std::string> drafts;
+};
+
+std::filesystem::path historyDeletionDirectory(const std::filesystem::path& root) {
+    return root / "history-deletions";
+}
+
+void persistHistoryDeletion(const std::filesystem::path& root,
+                            const HistoryDeletionIntent& intent) {
+    const std::filesystem::path directory = historyDeletionDirectory(root);
+    if (!std::filesystem::exists(directory)) {
+        const bool created = std::filesystem::create_directory(directory);
+        if (created) syncDirectory(root);
+    }
+    check(!std::filesystem::is_symlink(directory) && std::filesystem::is_directory(directory),
+          "unsafe history deletion directory");
+    std::string content = "AOWIS-HISTORY-DELETION-1\n" + intent.project + "\n" + intent.branch + "\n" +
+        (intent.expectedHead ? intent.expectedHead->toString() : "-") + "\n" +
+        (intent.firstRemoved ? intent.firstRemoved->toString() : "-") + "\n";
+    for (const std::string& id : intent.drafts) content += id + "\n";
+    const std::filesystem::path staging = directory /
+        (".creating-" + UuidV7::generate().toString());
+    const std::filesystem::path published = directory / intent.branch;
+    writeNewFile(staging, Bytes(content.begin(), content.end()));
+    // link() never replaces an existing confirmed deletion, unlike rename().
+    syscallChecked(::link(staging.c_str(), published.c_str()) == 0,
+                   "publish history deletion intent");
+    syncDirectory(directory);
+    syscallChecked(::unlink(staging.c_str()) == 0, "remove staged history deletion intent");
+    syncDirectory(directory);
+}
+
+void finishHistoryDeletion(const std::filesystem::path& root, std::string_view branch) {
+    const std::filesystem::path directory = historyDeletionDirectory(root);
+    syscallChecked(::unlink((directory / std::string(branch)).c_str()) == 0,
+                   "finish history deletion intent");
+    syncDirectory(directory);
+}
+
+HistoryDeletionIntent readHistoryDeletion(const std::filesystem::path& path) {
+    check(!std::filesystem::is_symlink(path) && std::filesystem::is_regular_file(path) &&
+          std::filesystem::file_size(path) < 2 * 1024 * 1024,
+          "invalid history deletion intent");
+    std::ifstream input(path);
+    std::string marker;
+    HistoryDeletionIntent intent;
+    std::string head;
+    std::string first;
+    check(std::getline(input, marker) && marker == "AOWIS-HISTORY-DELETION-1" &&
+          static_cast<bool>(std::getline(input, intent.project)) &&
+          static_cast<bool>(std::getline(input, intent.branch)) &&
+          static_cast<bool>(std::getline(input, head)) &&
+          static_cast<bool>(std::getline(input, first)), "malformed history deletion intent");
+    check(ProjectId::parse(intent.project).has_value() &&
+          BranchId::parse(intent.branch).has_value() &&
+          path.filename().string() == intent.branch, "invalid history deletion identity");
+    check(head == "-" || RevisionId::parse(head).has_value(), "invalid deletion HEAD");
+    check(first == "-" || RevisionId::parse(first).has_value(), "invalid truncation revision");
+    if (head != "-") intent.expectedHead = *RevisionId::parse(head);
+    if (first != "-") intent.firstRemoved = *RevisionId::parse(first);
+    std::string id;
+    while (std::getline(input, id)) {
+        check(UuidV7::parse(id).has_value(), "invalid deletion working-copy identity");
+        intent.drafts.push_back(id);
+    }
+    check(input.eof(), "truncated history deletion intent");
+    return intent;
+}
+
+StoredDraft loadDraft(const std::filesystem::path& root, std::string_view draftId, DraftLoad load,
+                      std::vector<std::string>* eventIds);
+
+// Called only under the project's operation mutex or during exclusive startup.
+// A replay is safe whether the crash was before or after the ref update.
+void replayHistoryDeletion(const std::filesystem::path& root, Repository& repository,
+                           const HistoryDeletionIntent& intent) {
+    const ProjectId project = *ProjectId::parse(intent.project);
+    const BranchId branch = *BranchId::parse(intent.branch);
+    const std::optional<RevisionGraphHead> current = repository.branchById(project, branch);
+    if (current && current->revision == intent.expectedHead) {
+        if (intent.firstRemoved)
+            (void)repository.truncateBranch(project, branch, intent.expectedHead, *intent.firstRemoved);
+        else
+            repository.deleteBranch(project, branch, intent.expectedHead);
+    } else if (current && !intent.firstRemoved) {
+        throw StorageError(StorageErrorKind::Corruption,
+                           "deleted branch changed identity during recovery");
+    }
+    vmDeletionBarrier("after-ref");
+    // Ref publication is durable before draft removal. Any draft directory
+    // left published at this point is a recoverable deletion remnant.
+    const std::filesystem::path drafts = workingCopyDirectory(root);
+    for (const std::string& id : intent.drafts) {
+        if (std::filesystem::exists(drafts / id)) {
+            const StoredDraft stored = loadDraft(root, id, DraftLoad::Meta, nullptr);
+            check(stored.info.projectId == intent.project && stored.info.branchId == intent.branch,
+                  "history deletion draft changed ownership");
+            deleteDraft(root, id);
+        }
+    }
+    vmDeletionBarrier("after-drafts");
+    finishHistoryDeletion(root, intent.branch);
+    vmDeletionBarrier("after-finish");
+}
+
 StoredDraft loadDraft(const std::filesystem::path& root, std::string_view draftId, DraftLoad load,
                       std::vector<std::string>* eventIds = nullptr) {
     std::optional<StoredDraft> stored =
@@ -1783,6 +1915,20 @@ ProjectService::ProjectService(std::filesystem::path root, std::size_t maxPendin
             check(validProjectId(id) && !entry.is_symlink() && entry.is_directory(),
                   "unexpected entry in project catalogue: " + entry.path().string());
             this->entries_.emplace(id, std::make_shared<Project>(readManifest(entry.path())));
+        }
+        const std::filesystem::path deletions = historyDeletionDirectory(this->root_);
+        if (std::filesystem::exists(deletions)) {
+            check(!std::filesystem::is_symlink(deletions) && std::filesystem::is_directory(deletions),
+                  "invalid history deletion directory");
+            for (const std::filesystem::directory_entry& item :
+                 std::filesystem::directory_iterator(deletions)) {
+                const HistoryDeletionIntent intent = readHistoryDeletion(item.path());
+                check(this->entries_.contains(intent.project),
+                      "history deletion refers to missing project");
+                withRepository(intent.project, [&](Repository& repository) {
+                    replayHistoryDeletion(this->root_, repository, intent);
+                });
+            }
         }
     } catch (...) {
         ::flock(this->lockFd_, LOCK_UN);
@@ -3662,20 +3808,29 @@ void ProjectService::deleteBranch(std::string_view projectId, std::string_view b
         if (!drafts.empty() && !discardWorkingCopies)
             throw ProjectError(ProjectErrorKind::Conflict,
                 "branch has a saved working copy; confirm deletion with discardWorkingCopies");
-        // The explicit destructive request includes all saved draft state and its
-        // history journal. Lock each draft before removing it, so an in-flight save
-        // cannot overwrite a discarded draft. Other branches are untouched.
+        // Never wait for a draft lock while holding the project lock: a history
+        // navigation may hold that draft lock while waiting for this project.
+        // A busy draft makes the deletion retryable instead of deadlocking.
+        std::vector<std::shared_ptr<std::mutex>> lockedDrafts;
+        std::vector<std::unique_lock<std::mutex>> draftGuards;
+        lockedDrafts.reserve(drafts.size());
+        draftGuards.reserve(drafts.size());
         for (const std::string& id : drafts) {
-            const std::shared_ptr<std::mutex> lock = draftLock(id);
-            std::lock_guard<std::mutex> guard(*lock);
-            const WorkingCopyInfo draft = loadDraft(this->root_, id, DraftLoad::Meta).info;
-            if (draft.projectId != projectId || draft.branchId != branchId)
-                throw ProjectError(ProjectErrorKind::Conflict, "working copy changed ownership");
-            try { deleteDraft(this->root_, id); }
-            catch (...) { markUncertain(); throw; }
-            forgetLease(id);
+            lockedDrafts.push_back(draftLock(id));
+            draftGuards.emplace_back(*lockedDrafts.back(), std::try_to_lock);
+            if (!draftGuards.back().owns_lock())
+                throw ProjectError(ProjectErrorKind::Busy,
+                                   "working copy is being edited; retry deletion");
         }
-        translated<int>([&]() { repository.deleteBranch(*project, *branch, expectedHead); return 0; });
+        const HistoryDeletionIntent intent{std::string(projectId), std::string(branchId),
+                                           expectedHead, std::nullopt, drafts};
+        try {
+            vmDeletionBarrier("before-intent");
+            persistHistoryDeletion(this->root_, intent);
+            vmDeletionBarrier("after-intent");
+            replayHistoryDeletion(this->root_, repository, intent);
+            for (const std::string& id : drafts) forgetLease(id);
+        } catch (...) { markUncertain(); throw; }
     });
 }
 
@@ -3706,19 +3861,30 @@ bool ProjectService::truncateBranch(std::string_view projectId, std::string_view
         if (!drafts.empty() && !discardWorkingCopies)
             throw ProjectError(ProjectErrorKind::Conflict,
                 "branch has a saved working copy; confirm deletion with discardWorkingCopies");
+        // Never wait for a draft lock while holding the project lock: a history
+        // navigation may hold that draft lock while waiting for this project.
+        // A busy draft makes the deletion retryable instead of deadlocking.
+        std::vector<std::shared_ptr<std::mutex>> lockedDrafts;
+        std::vector<std::unique_lock<std::mutex>> draftGuards;
+        lockedDrafts.reserve(drafts.size());
+        draftGuards.reserve(drafts.size());
         for (const std::string& id : drafts) {
-            const std::shared_ptr<std::mutex> lock = draftLock(id);
-            std::lock_guard<std::mutex> guard(*lock);
-            const WorkingCopyInfo draft = loadDraft(this->root_, id, DraftLoad::Meta).info;
-            if (draft.projectId != projectId || draft.branchId != branchId)
-                throw ProjectError(ProjectErrorKind::Conflict, "working copy changed ownership");
-            try { deleteDraft(this->root_, id); }
-            catch (...) { markUncertain(); throw; }
-            forgetLease(id);
+            lockedDrafts.push_back(draftLock(id));
+            draftGuards.emplace_back(*lockedDrafts.back(), std::try_to_lock);
+            if (!draftGuards.back().owns_lock())
+                throw ProjectError(ProjectErrorKind::Busy,
+                                   "working copy is being edited; retry deletion");
         }
-        deleted = translated<bool>([&]() {
-            return repository.truncateBranch(*project, *branch, expectedHead, firstRemoved);
-        });
+        const HistoryDeletionIntent intent{std::string(projectId), std::string(branchId),
+                                           expectedHead, firstRemoved, drafts};
+        try {
+            vmDeletionBarrier("before-intent");
+            persistHistoryDeletion(this->root_, intent);
+            vmDeletionBarrier("after-intent");
+            replayHistoryDeletion(this->root_, repository, intent);
+            for (const std::string& id : drafts) forgetLease(id);
+        } catch (...) { markUncertain(); throw; }
+        deleted = !repository.branchById(*project, *branch).has_value();
     });
     return deleted;
 }

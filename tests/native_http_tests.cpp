@@ -3588,6 +3588,82 @@ void exerciseCommitMetadataHttp() {
           "merge revision lost its author or default message");
 }
 
+// Real cpp-httplib route, JSON request and native repository state. A deletion
+// confirmation must discard only the selected branch's persisted draft.
+void exerciseDestructiveHistoryHttp() {
+    namespace native = aowis::dvmdb;
+    TemporaryRoot temp;
+    std::string projectId;
+    std::string survivorDraft;
+    std::string deletedBranch;
+    {
+        native::ProjectService service(temp.root());
+        service.configureRepositoryRole(native::RepositoryRole::Private);
+        const native::ProjectInfo project = service.createProject("HTTP deletion", commitMetadata());
+        projectId = project.id;
+        const native::RevisionId root = service.head(projectId, "main");
+        const native::BranchCreationResult feature = service.createBranchWithIdentity(
+            projectId, "feature", "main");
+        const native::BranchId unborn = service.createUnbornBranch(projectId, "unborn-doomed");
+        deletedBranch = unborn.toString();
+        const native::WorkingCopyInfo doomedDraft = service.createWorkingCopyForBranch(
+            projectId, deletedBranch, std::nullopt,
+            native::UuidV7::generate().toString());
+        survivorDraft = service.createWorkingCopyForBranch(projectId,
+            feature.branchId.toString(), root, native::UuidV7::generate().toString()).id;
+        TestServer server(service, native::BundleLimits{4ULL * 1024ULL * 1024ULL, 10000, 1024ULL * 1024ULL});
+        Client client(server.port());
+        const QString base = QStringLiteral("/dvmdb/v1/projects/") +
+                             QString::fromStdString(projectId) + "/branch-ids/";
+        const QString deletePath = base + QString::fromStdString(deletedBranch) + "/delete";
+        check(client.call("POST", deletePath, QJsonObject{{"expectedHead", QJsonValue(QJsonValue::Null)}})
+                .status == 409, "HTTP deleted a draft without explicit consent");
+        check(service.workingCopy(doomedDraft.id).id == doomedDraft.id,
+              "HTTP refusal discarded a draft");
+        check(client.call("POST", deletePath,
+            QJsonObject{{"expectedHead", QString::fromStdString(root.toString())},
+                        {"discardWorkingCopies", true}}).status == 409,
+              "HTTP stale HEAD accepted destructive confirmation");
+        check(service.workingCopy(doomedDraft.id).id == doomedDraft.id,
+              "stale deletion discarded draft");
+        const Response deleted = client.call("POST", deletePath,
+            QJsonObject{{"expectedHead", QJsonValue(QJsonValue::Null)},
+                        {"discardWorkingCopies", true}});
+        check(deleted.status == 200 && deleted.json.value("deleted").toBool() &&
+              client.call("GET", base + QString::fromStdString(deletedBranch)).status == 404,
+              "HTTP confirmed deletion did not remove branch");
+        check(service.listWorkingCopies().size() == 1 &&
+              service.listWorkingCopies().front().id == survivorDraft,
+              "HTTP deletion damaged another branch's working copy");
+        const QString truncatePath = base + QString::fromStdString(feature.branchId.toString()) +
+                                    "/truncate";
+        const QJsonObject invalid{{"expectedHead", QString::fromStdString(root.toString())},
+            {"firstRemoved", QString::fromStdString(native::RevisionId::generate().toString())},
+            {"discardWorkingCopies", true}};
+        check(client.call("POST", truncatePath, invalid).status == 400,
+              "HTTP invalid truncation selection was accepted");
+        check(service.workingCopy(survivorDraft).id == survivorDraft,
+              "invalid HTTP truncation discarded unrelated draft");
+        const Response truncated = client.call("POST", truncatePath,
+            QJsonObject{{"expectedHead", QString::fromStdString(root.toString())},
+                        {"firstRemoved", QString::fromStdString(root.toString())},
+                        {"discardWorkingCopies", true}});
+        check(truncated.status == 200 && truncated.json.value("branchDeleted").toBool() &&
+              service.listWorkingCopies().empty(),
+              "HTTP truncate did not delete branch and its draft");
+        check(service.optionalHead(projectId, "main") == root,
+              "HTTP branch truncation changed another branch's HEAD");
+        server.stop();
+    }
+    {
+        native::ProjectService reopened(temp.root());
+        check(!reopened.branchById(projectId, deletedBranch) &&
+              reopened.listWorkingCopies().empty() &&
+              reopened.optionalHead(projectId, "main").has_value(),
+              "HTTP deletion was not durable across server restart");
+    }
+}
+
 void exercisePinnedRepositoryMetadataHttp() {
     namespace native = aowis::dvmdb;
     TemporaryRoot temp;
@@ -3648,6 +3724,7 @@ int main(int argc, char** argv) {
         // on these routes is a UUIDv7.
         exerciseTransferStagingBudget();
         exercisePinnedRepositoryMetadataHttp();
+        exerciseDestructiveHistoryHttp();
         exercise();
         exerciseConcurrency();
         exerciseRevisionGraphHttp();

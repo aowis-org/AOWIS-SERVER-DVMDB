@@ -97,10 +97,112 @@ def check_worker_installed_after_each_boot(runner):
         assert result["rounds"][1]["recovered_sequence"] == 3
 
 
+def check_deletion_reboot_runner(runner):
+    expected = [("branch", "before-intent"), ("truncate", "before-intent"),
+                ("branch", "after-intent"), ("truncate", "after-intent"),
+                ("branch", "after-ref"), ("truncate", "after-ref"),
+                ("branch", "after-drafts"), ("truncate", "after-drafts"),
+                ("branch", "after-finish"), ("truncate", "after-finish")]
+    assert [runner.deletion_case(index) for index in range(10)] == expected
+    with tempfile.TemporaryDirectory(prefix="aowis-vm-deletion-runner-") as location:
+        root = Path(location)
+        image = root / "guest.qcow2"
+        image.write_bytes(b"mock image")
+        args = SimpleNamespace(guest_image=image, disk_mib=256, rounds=3,
+                               cloud_init_seed=None)
+        boots = []
+        verified = []
+        cuts = []
+        installed = []
+
+        def fake_execute(command, **_kwargs):
+            if command[:3] == ["qemu-img", "info", "--output=json"]:
+                return json.dumps({"format": "qcow2"})
+            if command[:3] == ["qemu-img", "create", "-f"]:
+                return ""
+            raise AssertionError("unexpected command: " + repr(command))
+
+        def fake_cut(_args, _port, _qemu, number, _case):
+            scenario, point = runner.deletion_case(number)
+            assert len(installed) == number + 1
+            cuts.append((scenario, point))
+            return {"round": number, "scenario": scenario, "barrier": point,
+                    "expected_recovery": "original" if point == "before-intent" else "deleted"}
+
+        def fake_state(_args, _port, number, expected_recovery):
+            assert len(installed) > number + 1, "verification occurred before reboot"
+            assert expected_recovery == ("original" if number < 2 else "deleted")
+            verified.append((number, expected_recovery))
+
+        with patch.object(runner, "execute", side_effect=fake_execute), \
+             patch.object(runner, "unused_port", return_value=22022), \
+             patch.object(runner, "start_vm", side_effect=lambda *_: boots.append(1) or object()), \
+             patch.object(runner, "stop_vm"), \
+             patch.object(runner, "await_ssh"), \
+             patch.object(runner, "setup_mount"), \
+             patch.object(runner, "install_worker", side_effect=lambda *_: installed.append(1)), \
+             patch.object(runner, "deletion_powercut_round", side_effect=fake_cut), \
+             patch.object(runner, "deletion_state", side_effect=fake_state):
+            result = runner.run_fs_deletions(args, root, "xfs")
+        assert len(boots) == len(installed) == 4
+        assert cuts == expected[:3]
+        assert verified == [(0, "original"), (0, "original"),
+                            (1, "original"), (0, "original"),
+                            (1, "original"), (2, "deleted")], verified
+        assert len(result["rounds"]) == 3 and result["result"] == "passed"
+        assert all(entry["verified_after_reboot"] for entry in result["rounds"])
+
+
+def check_continuous_deletion_reboots(runner):
+    with tempfile.TemporaryDirectory(prefix="aowis-vm-stress-runner-") as location:
+        root = Path(location)
+        image = root / "guest.qcow2"
+        image.write_bytes(b"mock image")
+        args = SimpleNamespace(guest_image=image, disk_mib=256, rounds=2,
+                               cloud_init_seed=None)
+        remote_calls = []
+        boots = []
+        cuts = []
+
+        def fake_execute(command, **_kwargs):
+            if command[:3] == ["qemu-img", "info", "--output=json"]:
+                return json.dumps({"format": "qcow2"})
+            if command[:3] == ["qemu-img", "create", "-f"]:
+                return ""
+            raise AssertionError("unexpected command: " + repr(command))
+
+        def fake_remote(_args, _port, worker, mode, path, **_kwargs):
+            assert worker == runner.WORKER and path == runner.MOUNT + "/stress"
+            remote_calls.append((mode, len(boots)))
+            return "STRESS-VERIFIED 0" if mode == "stress-verify" else "STRESS-READY"
+
+        def fake_cut(_args, _port, _qemu, number, _case):
+            cuts.append(number)
+            return {"round": number}
+
+        with patch.object(runner, "execute", side_effect=fake_execute), \
+             patch.object(runner, "unused_port", return_value=22022), \
+             patch.object(runner, "start_vm", side_effect=lambda *_: boots.append(1) or object()), \
+             patch.object(runner, "stop_vm"), \
+             patch.object(runner, "await_ssh"), \
+             patch.object(runner, "setup_mount"), \
+             patch.object(runner, "install_worker"), \
+             patch.object(runner, "remote", side_effect=fake_remote), \
+             patch.object(runner, "stress_powercut_round", side_effect=fake_cut):
+            result = runner.run_fs_deletion_stress(args, root, "ext4")
+        assert len(boots) == 3 and cuts == [0, 1]
+        assert remote_calls == [("stress-init", 1), ("stress-verify", 2),
+                                ("stress-verify", 3)]
+        assert result["result"] == "passed"
+        assert all(entry["verified_after_reboot"] for entry in result["rounds"])
+
+
 def main():
     runner = load_runner(Path(__file__).resolve().parents[1] / "tools" / "qualify_vm_powercut.py")
     check_worker_installed_after_each_boot(runner)
-    print("QEMU orchestration smoke passed: helper restaged after every power cut")
+    check_deletion_reboot_runner(runner)
+    check_continuous_deletion_reboots(runner)
+    print("QEMU orchestration smoke passed: commits and deletion reboot verification")
 
 
 if __name__ == "__main__":

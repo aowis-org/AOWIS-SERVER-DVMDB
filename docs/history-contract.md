@@ -129,11 +129,27 @@ the root or first branch-local revision deletes the entire branch. This is not
 an all-DAG recursive deletion: immutable revisions remain in the pack and can
 still be reached through surviving merge parents or other branch references.
 
-Both operations reject stored working copies of the branch rather than silently
-orphaning their separately fenced edit journals. Users must close/discard such
-copies first. Storage compaction and eventual reclamation are separate matters;
-no synchronous pack GC occurs during branch deletion. An uncertain network
-reply must be reconciled by re-reading authoritative branch refs; a blind
-retry based on an old HEAD is rejected. Cross-resource atomicity for draft
-creation versus branch removal is not yet provided and requires a coordinated
-lifecycle lock in a later hardening pass.
+A destructive request must explicitly set `discardWorkingCopies=true` if
+saved drafts exist. The confirmation includes those drafts and their journals;
+no separate manual discard is required. Branch deletion and draft creation
+share the project's operation mutex. Deletion takes nonblocking per-draft locks
+while holding that mutex: a concurrent Save/navigation makes deletion fail
+with a retryable busy status, avoiding an inverted-lock deadlock.
+
+The service fsyncs `history-deletions/<branch UUIDv7>` before mutating either
+the branch reference or draft records. The reference is published first; draft
+removal follows. Successful completion removes and syncs the intent. On a
+restart, the exclusive catalogue owner replays remaining intents, regardless
+of whether the previous process stopped before the ref update, after it, or
+during draft removal. This is **roll-forward recovery**, not a multi-file
+filesystem transaction: once the confirmed intent is durable, a crash can
+cause deletion to complete during restart even if the client never received
+a success response. Do not blindly retry an uncertain response; refresh the
+server's authoritative refs and drafts. Immutable revisions/merge ancestry
+are retained and synchronous pack GC is deliberately excluded.
+
+Tests cover restart replay from each persisted interruption state (including
+mid-draft cleanup), preservation of another branch's draft, idempotent reopen,
+HTTP consent/CAS/invalid revision behavior, and optional live GUI-writer →
+HTTP → DVMDB deletion/restart. Simulated interruption-state tests do not replace
+filesystem power-cut qualification on ext4/XFS.
