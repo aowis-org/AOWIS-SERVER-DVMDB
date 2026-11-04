@@ -6,8 +6,10 @@ archive. The read-only `branchActionHistory` API and its HTTP route return
 first-parent Commit markers, real archived action UUIDs and optionally paged
 active-draft action UUIDs. A durable revision-keyed index resolves those
 archives, and `revisionActionPage` / the frame endpoint expose paged original
-MODEL bytes for UI decoding. All requests are read-only: there is **no durable
-logical cursor, inverse application, Undo/Redo command or jump-to-state API**.
+MODEL bytes for UI decoding. HIST-03b and HIST-03c4b provide **native C++
+checkpoint/action-boundary selection with a durable cursor** for verified,
+non-journalled private drafts. There is still **no general Undo/Redo command,
+redo eligibility, continuous cursor or public HTTP navigation endpoint**.
 See [committed action archives](commit-action-archive.md) for current product
 behavior and [history-contract.md](history-contract.md) for the agreed future
 navigation semantics. The left History dock belongs to the GUI repository.
@@ -212,6 +214,24 @@ no draft, cursor, event journal or immutable revision is written. The next
 step must atomically publish the validated overlay and logical cursor with a
 fenced idempotent operation; a separate ordinary Save is not sufficient.
 The snapshot format and REST contract are unchanged by HIST-03c4a.
+
+**HIST-03c4b atomic verified action navigation (native implementation;
+Qt acceptance pending):** `hydraulic::navigateVerifiedHydraulicAction` validates
+and materializes the chosen action boundary using HIST-03c4a, then calls the
+internal native publication API with the complete overlay and provenance.
+DVMDB rechecks the active lease, draft generation, branch HEAD, immutable
+indexed archive operation ID and action position under the existing draft
+and project locks. Candidate and cursor metadata publish atomically; same-ID
+retries (including after restart) return the already published result.
+Active MODEL journals and unrelated unproven draft candidates remain
+ineligible. The draft marker advances to **AOWIS-WORKING-COPY-6**, adding
+`history-action-position` and `history-archive-operation`. Pre-release V5
+working copies require recreation; committed revisions do not.
+
+This completes one verified action-boundary publication operation, **not**
+continuous Undo/Redo. Recording navigation itself as a permanent action,
+redo-eligibility semantics after new edits, cross-Commit action cursor chains,
+HTTP operations and GUI activation remain future HDB-03 work.
 
 ### HDB-03 — Durable Undo/Redo operation and concurrency
 

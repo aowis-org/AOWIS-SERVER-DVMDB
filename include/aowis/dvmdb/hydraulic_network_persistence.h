@@ -122,6 +122,20 @@ std::optional<VerifiedHydraulicActionNavigationPlan> planVerifiedHydraulicAction
     const RevisionId& revision, std::size_t actionPosition,
     std::uint64_t expectedGeneration, QString* error = nullptr);
 
+// HIST-03c4b: MODEL-verified, fenced and atomic action-boundary publication.
+// Generates the plan from immutable archived frames, then rechecks lease,
+// generation and branch HEAD inside ProjectService before publishing. The
+// original archived events and immutable revisions are not modified.
+// Same-operation retries after a lost acknowledgement return the persisted
+// cursor without re-running the planner. This is not yet a general Undo/Redo
+// engine (active unsaved MODEL journals are refused).
+std::optional<WorkingCopyInfo> navigateVerifiedHydraulicAction(
+    ProjectService& service, std::string_view operationId,
+    std::string_view draftId, std::string_view sessionId,
+    std::string_view fencingToken, const RevisionId& expectedHead,
+    const RevisionId& revision, std::size_t actionPosition,
+    std::uint64_t expectedGeneration, QString* error = nullptr);
+
 // HIST-03c2: read-only MODEL-aware reverse replay for scalar/member updates
 // and network-root metadata. The input frames must be ORIGINAL archived
 // forward events in newest-first order, and `committed` must be the exact

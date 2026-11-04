@@ -2324,8 +2324,9 @@ void exerciseVerifiedRevisionHydraulicCoverage() {
                 afterAction->expectedHead == revision &&
                 beforeAction->actionPosition == 0 && afterAction->actionPosition == 1 &&
                 beforeAction->commitOperationId == witness.commitOperationId &&
-                afterAction->candidateChanges.size() > 0,
-                "HIST-03c4a could not plan both verified multi-network action boundaries");
+                !beforeAction->candidateChanges.empty() &&
+                afterAction->candidateChanges.empty(),
+                "HIST-03c4a overlays must be relative to HEAD, without no-op records");
         const std::function<NetworkHydraulic(
             const hydraulic::VerifiedHydraulicActionNavigationPlan&, const QUuid&)>
             plannedNetwork = [&service, &projectId, &revision](
@@ -2376,6 +2377,53 @@ void exerciseVerifiedRevisionHydraulicCoverage() {
                     *service, navigationDraft, revision, 0, 1, &error) &&
                 !error.isEmpty(),
                 "HIST-03c4a accepted invalid action positions or stale draft generations");
+
+        // HIST-03c4b: publish a completely verified action boundary, with a
+        // durable action coordinate and one complete native candidate overlay.
+        const std::string navLease = service->acquireWorkingCopyLease(
+            navigationDraft, session, 120).token;
+        const std::string navOperation0 = native::UuidV7::generate().toString();
+        const std::string navOperation1 = native::UuidV7::generate().toString();
+        const std::optional<native::WorkingCopyInfo> selectedBefore =
+            hydraulic::navigateVerifiedHydraulicAction(*service, navOperation0,
+                navigationDraft, session, navLease, revision, revision, 0, 0, &error);
+        require(selectedBefore && error.isEmpty() && selectedBefore->generation == 1 &&
+                selectedBefore->historyActionPosition == 0 &&
+                selectedBefore->historyCheckpointRevisionId == revision.toString() &&
+                selectedBefore->historyArchiveCommitOperationId == witness.commitOperationId &&
+                selectedBefore->lastHistoryNavigationOperationId == navOperation0 &&
+                selectedBefore->journalCount == 0,
+                "HIST-03c4b failed atomic action boundary zero publication");
+        const std::optional<native::WorkingCopyInfo> retryBefore =
+            hydraulic::navigateVerifiedHydraulicAction(*service, navOperation0,
+                navigationDraft, session, navLease, revision, revision, 0, 0, &error);
+        require(retryBefore && retryBefore->generation == 1,
+                "HIST-03c4b retried action navigation advanced generation");
+        require(!hydraulic::navigateVerifiedHydraulicAction(*service, navOperation0,
+                    navigationDraft, session, navLease, revision, revision, 1, 0, &error) &&
+                !error.isEmpty(), "HIST-03c4b reused operation ID at a different boundary");
+        const std::optional<native::WorkingCopyInfo> selectedAfter =
+            hydraulic::navigateVerifiedHydraulicAction(*service, navOperation1,
+                navigationDraft, session, navLease, revision, revision, 1, 1, &error);
+        const std::string forwardError =
+            "HIST-03c4b could not publish forward navigation: " + error.toStdString();
+        require(selectedAfter.has_value(), forwardError.c_str());
+        require(error.isEmpty() && selectedAfter->generation == 2 &&
+                selectedAfter->historyActionPosition == 1 &&
+                selectedAfter->historyArchiveCommitOperationId == witness.commitOperationId &&
+                selectedAfter->candidateChanges.empty() && !selectedAfter->dirty,
+                "HIST-03c4b failed atomic action forward navigation");
+        require(!hydraulic::navigateVerifiedHydraulicAction(*service,
+                    native::UuidV7::generate().toString(), navigationDraft,
+                    session, navLease, revision, revision, 0, 1, &error) &&
+                !error.isEmpty(), "HIST-03c4b accepted stale generation after navigation");
+        const std::optional<native::WorkingCopyInfo> selectedAgain =
+            hydraulic::navigateVerifiedHydraulicAction(*service,
+                native::UuidV7::generate().toString(), navigationDraft,
+                session, navLease, revision, revision, 0, 2, &error);
+        require(selectedAgain && selectedAgain->generation == 3 &&
+                selectedAgain->historyActionPosition == 0,
+                "HIST-03c4b failed reverse action navigation after forward navigation");
 
         const std::string unrelatedDraft = service->createWorkingCopy(
             projectId, "main", revision, session).id;
@@ -2461,6 +2509,12 @@ void exerciseVerifiedRevisionHydraulicCoverage() {
         service.reset();
         {
             native::ProjectService reopened(folder);
+            const native::WorkingCopyInfo persistentCursor = reopened.workingCopy(navigationDraft);
+            require(persistentCursor.generation == 3 &&
+                    persistentCursor.historyActionPosition == 0 &&
+                    persistentCursor.historyCheckpointRevisionId == revision.toString() &&
+                    persistentCursor.historyArchiveCommitOperationId == witness.commitOperationId,
+                    "HIST-03c4b action cursor was not durable across DVMDB restart");
             const std::optional<hydraulic::VerifiedHydraulicRevisionCoverage> recovered =
                 hydraulic::verifyHydraulicRevisionActionCoverage(
                     reopened, projectId, "main", revision, &error);

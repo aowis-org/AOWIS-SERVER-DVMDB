@@ -181,6 +181,106 @@ void testHistoryCheckpointPlan() {
     }
 }
 
+// HIST-03c4b: the native publication step owns the durable cursor and
+// generation/lease fences. The MODEL-aware hydraulic adapter supplies the
+// verified candidate in production; this fixture tests ONLY the atomic
+// publication protocol with an indexed single-action local Commit.
+void testAtomicVerifiedActionNavigationPublication() {
+    TempRoot root;
+    const std::string session = UuidV7::generate().toString();
+    std::string draftId;
+    std::string projectId;
+    std::string archiveId;
+    std::string cursorOperation;
+    std::string lease;
+    RevisionId revision = RevisionId::generate();
+    ModelChange value = changeWithValue(41);
+    const aowis::dvmdb::Bytes frame = aowis::dvmdb::test::editEvent(
+        UuidV7::generate(), value.key, {}, {41});
+    {
+        ProjectService service(root.path);
+        service.configureRepositoryRole(RepositoryRole::Private);
+        projectId = service.createUnbornProject("HIST-03c4b publication").id;
+        const std::string source = service.createWorkingCopy(
+            projectId, "main", std::nullopt, session).id;
+        const std::string token = service.acquireWorkingCopyLease(source, session, 120).token;
+        require(service.saveWorkingCopyTransactions(source, session, token, 0,
+                    {value}, {frame}).generation == 1,
+                "HIST-03c4b source action was not saved");
+        const LocalCommitInfo committed = service.commitWorkingCopy(
+            UuidV7::generate().toString(), source, session, token, 1,
+            std::nullopt, commitMetadata());
+        require(committed.state == LocalCommitState::Succeeded,
+                "HIST-03c4b source Commit did not succeed");
+        revision = *RevisionId::parse(committed.reservedRevisionId);
+        archiveId = committed.id;
+        draftId = service.createWorkingCopy(projectId, "main", revision, session).id;
+        lease = service.acquireWorkingCopyLease(draftId, session, 120).token;
+        cursorOperation = UuidV7::generate().toString();
+        const WorkingCopyInfo before = service.publishVerifiedHistoryActionNavigation(
+            cursorOperation, draftId, session, lease, 0, revision, revision,
+            archiveId, 0, {ModelChange{value.key, std::nullopt}});
+        require(before.generation == 1 && before.dirty &&
+                before.historyCheckpointRevisionId == revision.toString() &&
+                before.historyActionPosition == 0 &&
+                before.historyArchiveCommitOperationId == archiveId &&
+                before.lastHistoryNavigationOperationId == cursorOperation &&
+                before.candidateChanges.size() == 1 &&
+                !before.candidateChanges[0].record &&
+                before.journalCount == 0 &&
+                service.optionalHead(projectId, "main") == revision,
+                "HIST-03c4b failed atomic candidate and cursor publication");
+        const WorkingCopyInfo same = service.publishVerifiedHistoryActionNavigation(
+            cursorOperation, draftId, session, lease, 0, revision, revision,
+            archiveId, 0, {});
+        require(same.generation == 1 && same.historyActionPosition == 0,
+                "HIST-03c4b repeated operation was applied twice");
+        expectConflict([&] { (void)service.publishVerifiedHistoryActionNavigation(
+            cursorOperation, draftId, session, lease, 0, revision, revision,
+            archiveId, 1, {}); });
+        expectConflict([&] { (void)service.publishVerifiedHistoryActionNavigation(
+            UuidV7::generate().toString(), draftId, session, lease, 1, revision, revision,
+            archiveId, 2, {}); });
+        expectConflict([&] { (void)service.publishVerifiedHistoryActionNavigation(
+            UuidV7::generate().toString(), draftId, session, lease, 1, revision, revision,
+            UuidV7::generate().toString(), 1, {}); });
+        expectConflict([&] { (void)service.publishVerifiedHistoryActionNavigation(
+            UuidV7::generate().toString(), draftId, session, lease, 0, revision, revision,
+            archiveId, 1, {}); });
+    }
+    {
+        ProjectService restarted(root.path);
+        const WorkingCopyInfo persisted = restarted.workingCopy(draftId);
+        require(persisted.generation == 1 && persisted.historyActionPosition == 0 &&
+                persisted.historyArchiveCommitOperationId == archiveId &&
+                persisted.lastHistoryNavigationOperationId == cursorOperation,
+                "HIST-03c4b action cursor was lost after a restart");
+        const WorkingCopyInfo replayed = restarted.publishVerifiedHistoryActionNavigation(
+            cursorOperation, draftId, session, lease, 0, revision, revision,
+            archiveId, 0, {});
+        require(replayed.generation == 1, "HIST-03c4b retry after restart was not idempotent");
+        const std::string newToken = restarted.acquireWorkingCopyLease(draftId, session, 120).token;
+        expectConflict([&] { (void)restarted.publishVerifiedHistoryActionNavigation(
+            UuidV7::generate().toString(), draftId, session, lease,
+            1, revision, revision, archiveId, 1, {}); });
+        const WorkingCopyInfo forward = restarted.publishVerifiedHistoryActionNavigation(
+            UuidV7::generate().toString(), draftId, session, newToken,
+            1, revision, revision, archiveId, 1, {});
+        require(forward.generation == 2 && !forward.dirty &&
+                forward.historyActionPosition == 1 &&
+                forward.candidateChanges.empty(),
+                "HIST-03c4b did not restore the terminal action boundary");
+        require(restarted.saveWorkingCopyChanges(draftId, session, newToken,
+                    2, {value}).generation == 3,
+                "HIST-03c4b follow-up ordinary Save failed");
+        const WorkingCopyInfo edited = restarted.workingCopy(draftId);
+        require(!edited.historyActionPosition &&
+                !edited.historyArchiveCommitOperationId &&
+                !edited.historyCheckpointRevisionId,
+                "HIST-03c4b ordinary Save failed to clear action navigation cursor");
+    }
+}
+
 // HIST-03b: selecting an immutable checkpoint atomically replaces the private
 // overlay and the persistent cursor. It never changes committed HEAD, and
 // replay of an uncertain request cannot advance the generation a second time.
@@ -1582,6 +1682,7 @@ int main() {
     try {
         testHistoryCheckpointPlan();
         testAtomicHistoryCheckpointNavigation();
+        testAtomicVerifiedActionNavigationPublication();
         testCommittedActionHistory();
         testVerifiedRevisionNativeWitness();
         testBranchDraftHistoryPaging();

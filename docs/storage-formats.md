@@ -236,7 +236,7 @@ Hard ceilings: 64 GiB and 1,000,000 objects per bundle, 64 MiB per object;
 callers set lower `BundleLimits`. Import rules:
 [synchronization](offline-repository-synchronization.md).
 
-## Private drafts (`AOWIS-WORKING-COPY-5`)
+## Private drafts (`AOWIS-WORKING-COPY-6`)
 
 Each draft is a directory `working-copies/<draft-uuidv7>/` (mode 0700):
 
@@ -246,7 +246,7 @@ Each draft is a directory `working-copies/<draft-uuidv7>/` (mode 0700):
 * `journal-<uuidv7>` — the MODEL event journal, append-only binary.
 
 ```text
-AOWIS-WORKING-COPY-5
+AOWIS-WORKING-COPY-6
 project\t<project-uuidv7>
 branch\t<branch-uuidv7>
 base\t<revision-uuidv7|->
@@ -263,19 +263,25 @@ last-save\t<SHA-256 fingerprint of the last event Save|->
 history-revision\t<exact checkpoint revision UUIDv7|->
 history-operation\t<last checkpoint-navigation operation UUIDv7|->
 history-source-generation\t<generation before last checkpoint selection|->
+history-action-position\t<global action boundary within archived Commit|->
+history-archive-operation\t<archived local Commit operation UUIDv7|->
 ```
 
 HIST-03b uses the existing atomic meta publication to persist the full
 checkpoint replacement candidate and its checkpoint identity **together**.
-The three `history-*` fields are either all absent (`-`) or all present;
-the source generation must be exactly one less than the draft generation.
+The first three `history-*` fields are either all absent (`-`) or all present.
+For an exact checkpoint the last two are absent; for a verified action
+boundary they are both present. The source generation must be exactly one
+less than the draft generation. The action position is zero-based and
+references the immutable indexed Commit archive.
 Selecting a checkpoint requires a live lease, a pinned HEAD, an empty MODEL
 journal, and a first-parent ancestor of that HEAD. Retrying the same operation
 at its original generation returns the already published result; intervening
 edits, another selection, or a changed HEAD reject the retry. Normal Save or
-Commit clears these fields. This is an exact-snapshot cursor, **not** a durable
-per-action Undo/Redo cursor or a permanent navigation event archive. No
-migration from earlier pre-release draft meta records is provided.
+Commit clears these fields. HIST-03c4b atomically publishes a verified action
+boundary and candidate with the same lease/generation/HEAD fencing. This is not yet a general
+Undo/Redo engine for active draft journals. No migration from earlier
+pre-release draft meta records is provided: **V5 drafts must be recreated**.
 
 Candidate file: `AOWC` `0x01`, then per change, sorted by entity key: key (16),
 length (u32, `0xffffffff` = deletion), `AOMD` model record. Journal file: per

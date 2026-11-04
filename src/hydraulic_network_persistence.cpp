@@ -1890,6 +1890,24 @@ std::optional<VerifiedHydraulicActionNavigationPlan> planVerifiedHydraulicAction
                            ModelCodec<NetworkHydraulic>::encode(expected.second))
                 return fail(QStringLiteral("Historical native overlay disagrees with verified MODEL state"));
         }
+        // The overlay is relative to the current immutable HEAD. Rebuilding
+        // the parent and replaying actions can leave records in the overlay
+        // that are byte-identical to HEAD (or tombstones for absent records).
+        // Those are not edits: retaining them would falsely mark a Redo back
+        // to HEAD as dirty, even though every MODEL network already matches.
+        // Normalize only after the complete candidate passed MODEL validation.
+        for (std::map<Key, std::optional<ModelRecord>>::iterator item = overlay.begin();
+             item != overlay.end();) {
+            const std::optional<ModelRecord> current =
+                service.getModelAtRevision(draft.projectId, *draft.baseRevision, item->first);
+            const bool equal = (!item->second && !current) ||
+                (item->second && current &&
+                 item->second->kind == current->kind &&
+                 item->second->references == current->references &&
+                 item->second->payload == current->payload);
+            if (equal) item = overlay.erase(item);
+            else ++item;
+        }
         // A concurrent Save or Commit can invalidate a preview, but may not
         // make it executable: the next writer MUST recheck these two pins.
         const WorkingCopyInfo rechecked = service.workingCopy(draftId, false);
@@ -1909,6 +1927,48 @@ std::optional<VerifiedHydraulicActionNavigationPlan> planVerifiedHydraulicAction
         for (const std::pair<const Key, std::optional<ModelRecord>>& item : overlay)
             plan.candidateChanges.push_back(ModelChange{item.first, item.second});
         return plan;
+    } catch (const std::exception& exception) {
+        return fail(QString::fromUtf8(exception.what()));
+    }
+}
+
+// Only this MODEL-aware adapter constructs the overlay passed to the native
+// action-navigation publisher. Client payloads must never supply it directly.
+std::optional<WorkingCopyInfo> navigateVerifiedHydraulicAction(
+        ProjectService& service, std::string_view operationId,
+        std::string_view draftId, std::string_view sessionId,
+        std::string_view fencingToken, const RevisionId& expectedHead,
+        const RevisionId& revision, std::size_t actionPosition,
+        std::uint64_t expectedGeneration, QString* error) {
+    if (error) error->clear();
+    const std::function<std::optional<WorkingCopyInfo>(const QString&)> fail =
+        [error](const QString& message) -> std::optional<WorkingCopyInfo> {
+            if (error) *error = message;
+            return std::nullopt;
+        };
+    try {
+        // An uncertain publication must be reconciled BEFORE rebuilding the
+        // plan: the successful operation already advanced draft generation.
+        const WorkingCopyInfo current = service.workingCopy(draftId, false);
+        if (current.lastHistoryNavigationOperationId == operationId) {
+            return service.publishVerifiedHistoryActionNavigation(
+                operationId, draftId, sessionId, fencingToken,
+                expectedGeneration, expectedHead, revision,
+                current.historyArchiveCommitOperationId.value_or(""),
+                actionPosition, {});
+        }
+        const std::optional<VerifiedHydraulicActionNavigationPlan> plan =
+            planVerifiedHydraulicActionNavigation(
+                service, draftId, revision, actionPosition, expectedGeneration, error);
+        if (!plan) return std::nullopt;
+        if (plan->expectedHead != expectedHead ||
+            plan->draftId != draftId || plan->revisionId != revision.toString() ||
+            plan->actionPosition != actionPosition)
+            return fail(QStringLiteral("Verified navigation plan identity or HEAD mismatch"));
+        return service.publishVerifiedHistoryActionNavigation(
+            operationId, draftId, sessionId, fencingToken,
+            expectedGeneration, expectedHead, revision,
+            plan->commitOperationId, actionPosition, plan->candidateChanges);
     } catch (const std::exception& exception) {
         return fail(QString::fromUtf8(exception.what()));
     }
