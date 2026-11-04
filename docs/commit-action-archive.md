@@ -125,9 +125,12 @@ from the original journal and atomically publishes it with the cursor. It does
 not accept client-generated overlay records. Repeating the exact request is
 idempotent even if the response was lost.
 
-This endpoint does **not** navigate archived Commit actions or support unborn
-and multi-network drafts. Those are separate eligibility boundaries; DVMDB's
-storage capability for multiple networks is unchanged. The GUI History dock
+With an archived `revisionId`, the same POST endpoint selects verified
+immutable Commit action boundaries when the draft has no live journal.
+The cursor GET now resolves `previousAction` and `nextAction` coordinates,
+including across adjacent archived Commits. It does not yet hand off from a
+retained live journal to archived history, or support unborn/multi-network
+draft navigation; DVMDB's multi-network storage capability is unchanged. The GUI History dock
 remains read-only until continuous navigation is integrated.
 
 ## Limits and interpretation

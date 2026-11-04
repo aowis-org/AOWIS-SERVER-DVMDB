@@ -158,8 +158,9 @@ the selected branch's first-parent ancestry are rejected. Both endpoints are **r
 provide Undo/Redo.
 
 The two branch-history responses are read-only. The separate draft-scoped
-`POST /working-copies/{draftId}/history/navigate` mutates **only a verified
-active draft journal boundary**, not archived Commit history. See
+`POST /working-copies/{draftId}/history/navigate` selects a verified active
+draft journal boundary or, with `revisionId`, an archived Commit action
+boundary. Both require a fenced and pinned private draft. See
 [committed action archive](commit-action-archive.md) for current limits and
 the [History roadmap](history-roadmap.md) for future work.
 
@@ -169,8 +170,14 @@ Read `GET /working-copies/{draftId}/history/cursor` for `generation`,
 `baseRevision`, `journalCount` and `actionPosition` (decimal strings). If the
 cursor is greater than zero, the adjacent Undo target is `actionPosition - 1`;
 if below `journalCount`, the adjacent Redo target is `actionPosition + 1`.
-The booleans report **adjacent positions**, not verified eligibility; the
-server may reject unsupported/unprovable drafts. A GUI must not advance its
+Prefer the server's `previousAction` and `nextAction` objects: each supplies
+`selectionKind`, nullable `revisionId` and decimal `actionPosition`. These
+coordinates also navigate between two archived Commit action sequences, and
+skip the duplicate end/start snapshot at their shared Commit boundary.
+When the draft retains an active journal at position zero, no archived
+previous target is advertised yet; that handoff remains unsupported.
+The booleans report **adjacent draft positions**, not verified eligibility;
+the server may reject unsupported/unprovable drafts. A GUI must not advance its
 cursor optimistically.
 
 Submit `POST /working-copies/{draftId}/history/navigate` with the same draft's
@@ -186,6 +193,8 @@ refresh the cursor and resolve any uncertain previous request first.
 
 This first executable HTTP slice supports one existing hydraulic network in a
 committed base. It intentionally refuses unborn/multi-network drafts, mixed
-native-only edits and archived action navigation. DVMDB retains the ability to
-store multiple networks; multi-network History is not a prerequisite for the
-single-network GUI workflow.
+native-only edits, and crossing from a retained live journal at position zero
+into archived actions. Explicit archived action navigation is supported when
+the draft journal is empty. DVMDB retains the ability to store multiple
+networks; multi-network History is not a prerequisite for the single-network
+GUI workflow.

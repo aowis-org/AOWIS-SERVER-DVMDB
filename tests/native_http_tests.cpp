@@ -2816,7 +2816,10 @@ void exerciseHydraulicDraftMembershipHttp() {
           atTip.json.value("journalCount") == "2" &&
           atTip.json.value("actionPosition") == "2" &&
           atTip.json.value("hasPreviousDraftAction").toBool() &&
-          !atTip.json.value("hasNextDraftAction").toBool(),
+          !atTip.json.value("hasNextDraftAction").toBool() &&
+          atTip.json.value("previousAction").toObject().value("selectionKind") == "draft" &&
+          atTip.json.value("previousAction").toObject().value("actionPosition") == "1" &&
+          atTip.json.value("nextAction").isNull(),
           "HTTP history cursor did not report initial journal tip");
     const std::function<QJsonObject(const QString&, const QString&, const QString&)> navBody =
         [&](const QString& operation, const QString& generation, const QString& position) {
@@ -2858,7 +2861,10 @@ void exerciseHydraulicDraftMembershipHttp() {
           baseAgain->nodes_junctions.first().uuid == oldUuid &&
           cursorAtBase.json.value("actionPosition") == "0" &&
           !cursorAtBase.json.value("hasPreviousDraftAction").toBool() &&
-          cursorAtBase.json.value("hasNextDraftAction").toBool(),
+          cursorAtBase.json.value("hasNextDraftAction").toBool() &&
+          cursorAtBase.json.value("previousAction").isNull() &&
+          cursorAtBase.json.value("nextAction").toObject().value("selectionKind") == "draft" &&
+          cursorAtBase.json.value("nextAction").toObject().value("actionPosition") == "1",
           "HDB-03d HTTP Undo to the immutable base failed");
     check(client.call("POST", navigatePath, navBody(
               QString::fromStdString(native::UuidV7::generate().toString()), "4", "1")).status == 200 &&
@@ -3000,7 +3006,11 @@ void exerciseHydraulicDraftMembershipHttp() {
           beforeArchived.json.value("generation") == "9" &&
           beforeArchived.json.value("journalCount") == "0" &&
           beforeArchived.json.value("selectionKind") == "draft" &&
-          beforeArchived.json.value("archivedRevisionId").isNull(),
+          beforeArchived.json.value("archivedRevisionId").isNull() &&
+          beforeArchived.json.value("previousAction").toObject().value("selectionKind") == "archived" &&
+          beforeArchived.json.value("previousAction").toObject().value("revisionId") == archivedRevision &&
+          beforeArchived.json.value("previousAction").toObject().value("actionPosition") == "1" &&
+          beforeArchived.json.value("nextAction").isNull(),
           "HDB-03e freshly committed draft reported a phantom archived selection");
     QJsonObject malformedArchived = archivedBody(
         QString::fromStdString(native::UuidV7::generate().toString()), "9", "0");
@@ -3026,6 +3036,9 @@ void exerciseHydraulicDraftMembershipHttp() {
           parentCursor.json.value("selectionKind") == "archived" &&
           parentCursor.json.value("archivedRevisionId") == archivedRevision &&
           parentCursor.json.value("archivedActionPosition") == "0" &&
+          parentCursor.json.value("previousAction").isNull() &&
+          parentCursor.json.value("nextAction").toObject().value("revisionId") == archivedRevision &&
+          parentCursor.json.value("nextAction").toObject().value("actionPosition") == "1" &&
           !parentCursor.json.value("hasPreviousDraftAction").toBool() &&
           service.optionalHead(project.id, "main") == archivedHead,
           "HDB-03e archived parent selection did not preserve the immutable HEAD");
@@ -3067,12 +3080,95 @@ void exerciseHydraulicDraftMembershipHttp() {
           tipNetwork->nodes_junctions.size() == 2 &&
           tipNetwork->nodes_junctions.last().elevation_m == 66 &&
           tipCursor.json.value("archivedActionPosition") == "2" &&
+          tipCursor.json.value("previousAction").toObject().value("actionPosition") == "1" &&
+          tipCursor.json.value("nextAction").isNull() &&
           service.optionalHead(project.id, "main") == archivedHead,
           "HDB-03e Redo to committed archive tip did not yield clean HEAD");
     check(archiveClient.call("POST", archivedPath,
               archivedBody(QString::fromStdString(native::UuidV7::generate().toString()),
                            "12", "3")).status == 409,
           "HDB-03e accepted action position beyond immutable archive");
+    // HDB-03f: a second real MODEL Commit provides an adjacent immutable
+    // action sequence. The cursor supplies exact previous/next coordinates
+    // across the Commit marker, without asking the GUI to infer ancestry.
+    HydraulicNodeJunction finalJunction = revised;
+    finalJunction.elevation_m = 77;
+    const QByteArray finalBytes = native::ModelCodec<HydraulicNodeJunction>::encode(finalJunction);
+    const QString secondCommitEvent = eventFrame(newUuid,
+        QStringLiteral("hydraulic.junction.update"), revisedBytes, finalBytes);
+    const QJsonObject finalMember{{"uuid", newId}, {"kind", 1},
+                                  {"references", QJsonArray{}},
+                                  {"payloadBase64", QString::fromLatin1(finalBytes.toBase64())}};
+    const Response savedAgain = archiveClient.call("POST", path + "/save-events",
+        QJsonObject{{"sessionId", session}, {"fencingToken", QString::fromStdString(renewed.token)},
+                    {"expectedGeneration", "12"}, {"changes", QJsonArray{finalMember}},
+                    {"events", QJsonArray{secondCommitEvent}}});
+    check(savedAgain.status == 200 && savedAgain.json.value("generation") == "13",
+          "HDB-03f cannot establish second journalled Commit fixture");
+    const native::LocalCommitInfo secondCommit = service.commitWorkingCopy(
+        native::UuidV7::generate().toString(), draftId, sessionId, renewed.token,
+        13, archivedHead, commitMetadata());
+    const QString secondRevision = QString::fromStdString(secondCommit.reservedRevisionId);
+    check(secondCommit.state == native::LocalCommitState::Succeeded &&
+          service.workingCopy(draftId).generation == 14,
+          "HDB-03f second archived Commit was not durable");
+    const Response committedCursor = archiveClient.call("GET", archivedCursorPath);
+    check(committedCursor.status == 200 &&
+          committedCursor.json.value("previousAction").toObject().value("revisionId") == secondRevision &&
+          committedCursor.json.value("previousAction").toObject().value("actionPosition") == "0" &&
+          committedCursor.json.value("nextAction").isNull(),
+          "HDB-03f clean post-Commit cursor did not locate latest archived action");
+    const std::function<QJsonObject(const QString&, const QString&, const QString&, const QString&)>
+        nextArchivedBody = [&](const QString& operation, const QString& generation,
+                                const QString& revision, const QString& position) {
+            return QJsonObject{{"operationId", operation}, {"sessionId", session},
+                {"fencingToken", QString::fromStdString(renewed.token)},
+                {"expectedGeneration", generation}, {"expectedHead", secondRevision},
+                {"revisionId", revision}, {"actionPosition", position}};
+        };
+    const Response selectedSecondParent = archiveClient.call("POST", archivedPath,
+        nextArchivedBody(QString::fromStdString(native::UuidV7::generate().toString()),
+                         "14", secondRevision, "0"));
+    const Response secondParentCursor = archiveClient.call("GET", archivedCursorPath);
+    check(selectedSecondParent.status == 200 &&
+          secondParentCursor.json.value("previousAction").toObject().value("revisionId") == archivedRevision &&
+          secondParentCursor.json.value("previousAction").toObject().value("actionPosition") == "1" &&
+          secondParentCursor.json.value("nextAction").toObject().value("revisionId") == secondRevision &&
+          secondParentCursor.json.value("nextAction").toObject().value("actionPosition") == "1",
+          "HDB-03f did not skip duplicate Commit boundary snapshot");
+    const Response crossedBack = archiveClient.call("POST", archivedPath,
+        nextArchivedBody(QString::fromStdString(native::UuidV7::generate().toString()),
+                         "15", archivedRevision, "1"));
+    const Response oldActionView = archiveClient.call("GET", path + "/networks/" + networkId);
+    const std::optional<NetworkHydraulic> oldActionNetwork =
+        native::ModelCodec<NetworkHydraulic>::decode(QByteArray::fromBase64(
+            oldActionView.json.value("payloadBase64").toString().toLatin1()));
+    check(crossedBack.status == 200 && oldActionView.status == 200 &&
+          oldActionNetwork && oldActionNetwork->nodes_junctions.size() == 2 &&
+          oldActionNetwork->nodes_junctions.last().elevation_m == 55,
+          "HDB-03f backward movement across two real Commits changed the wrong state");
+    const Response oldTip = archiveClient.call("POST", archivedPath,
+        nextArchivedBody(QString::fromStdString(native::UuidV7::generate().toString()),
+                         "16", archivedRevision, "2"));
+    const Response oldTipCursor = archiveClient.call("GET", archivedCursorPath);
+    check(oldTip.status == 200 &&
+          oldTipCursor.json.value("nextAction").toObject().value("revisionId") == secondRevision &&
+          oldTipCursor.json.value("nextAction").toObject().value("actionPosition") == "1",
+          "HDB-03f forward movement did not cross the subsequent Commit marker");
+    const Response crossedForward = archiveClient.call("POST", archivedPath,
+        nextArchivedBody(QString::fromStdString(native::UuidV7::generate().toString()),
+                         "17", secondRevision, "1"));
+    const Response finalNetworkView = archiveClient.call("GET", path + "/networks/" + networkId);
+    const std::optional<NetworkHydraulic> finalNetworkState =
+        native::ModelCodec<NetworkHydraulic>::decode(QByteArray::fromBase64(
+            finalNetworkView.json.value("payloadBase64").toString().toLatin1()));
+    check(crossedForward.status == 200 &&
+          !crossedForward.json.value("dirty").toBool() &&
+          finalNetworkView.status == 200 && finalNetworkState &&
+          finalNetworkState->nodes_junctions.last().elevation_m == 77 &&
+          service.optionalHead(project.id, "main") == native::RevisionId::parse(
+              secondCommit.reservedRevisionId),
+          "HDB-03f forward movement across Commits changed immutable HEAD or model state");
     archiveServer.stop();
 }
 #endif

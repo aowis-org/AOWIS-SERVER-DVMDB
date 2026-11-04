@@ -37,9 +37,12 @@ server now exposes a draft-scoped HTTP cursor read and fenced, idempotent
 HTTP selection of an explicit verified active-journal position for this
 single-network case. Providing an archived `revisionId` instead selects an
 explicit verified action boundary within an indexed local Commit, when the
-draft has no active MODEL journal. These HTTP operations do **not** yet hand off
-automatically between the live journal and immutable Commit boundaries, or
-activate the GUI History dock. A new
+draft has no active MODEL journal. The HTTP cursor now also supplies server-resolved `previousAction` and
+`nextAction` targets for active journal steps and eligible archived Commit
+boundaries, skipping duplicate states at Commit markers. A client submits
+those coordinates to the existing fenced POST selector. The server does **not**
+yet hand off from a retained live journal into immutable archives, and the
+GUI History dock is not yet active. A new
 atomic MODEL event Save from a non-tip position retains the selected prefix
 and replaces the redo tail with the new actions in a crash-safe metadata
 publication. Local Commit still **rejects** positions below the journal tip;
@@ -75,9 +78,12 @@ navigation test, with immutable revision and branch-ref checks.
 
 ## 2. Make active draft actions navigable
 
-- Define a single server-owned cursor that can move from the selected
-  committed action boundaries into the **current draft event journal**,
-  including the unborn first draft.
+- Complete the server-owned handoff when the **current draft journal is
+  retained** and the cursor reaches its zero boundary. The existing archived
+  selector refuses nonempty journals, so the resolver deliberately advertises
+  no unsupported cross-mode step. Preserve the active redo tail, lease,
+  model-equivalent overlay and operation identity through this handoff.
+- Support the normal unborn first draft without fabricating any base snapshot.
 - Support the normal **unborn first draft** and network initialization/import
   in active history without weakening MODEL/native coverage verification.
   Multiple hydraulic networks in one revision remain legal in storage, but

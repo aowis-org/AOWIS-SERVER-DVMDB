@@ -48,8 +48,9 @@ plus a MODEL-verified active-journal navigator for one existing network.
 An atomic event Save after Undo invalidates the redo tail safely. The HTTP
 server now exposes fenced selection of verified **active single-network**
 draft action boundaries and explicit **archived Commit** action boundaries,
-plus the authoritative cursor read. This is not yet
-continuous cross-Commit Undo/Redo and the GUI dock remains read-only.
+plus the authoritative cursor read with adjacent action coordinates for
+eligible archived Commit boundaries. This is not yet a seamless handoff from
+a retained live draft journal into archived Commit actions and the GUI dock remains read-only.
 
 **Remaining:** confirm the corrected Qt hydraulic navigation regression;
 support navigation of the normal unborn-base draft, connect continuous

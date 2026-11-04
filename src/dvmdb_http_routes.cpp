@@ -1522,14 +1522,114 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
         });
     });
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
-    // HDB-03d: read only the persisted active-draft action coordinate. This
-    // reports available adjacent positions, not a promise that the complete
-    // MODEL/nav proof will succeed (e.g. a multi-network draft fails closed).
+    // Resolve neighboring MODEL boundaries on the server, not in the GUI.
+    // An archived revision's position zero equals the preceding Commit's
+    // tip; crossing that marker skips the duplicate snapshot. Results are
+    // coordinates for the existing fenced navigation endpoint, not a claim
+    // that MODEL verification will necessarily accept an unknown archive.
+    // Retained active journals cannot yet hand off into archived history;
+    // never advertise a cross-mode transition that the publisher will reject.
     server.Get("/dvmdb/v1/working-copies/:draft/history/cursor",
                [&service](const httplib::Request& request, httplib::Response& response) {
         guarded(response, [&]() {
             const WorkingCopyInfo draft = service.workingCopy(pathParam(request, "draft"), false);
             const std::uint64_t position = draft.draftActionPosition.value_or(draft.journalCount);
+            QJsonValue previous(QJsonValue::Null);
+            QJsonValue next(QJsonValue::Null);
+            const std::function<QJsonValue(const QString&, const QString&, std::size_t)> target =
+                [](const QString& kind, const QString& revision, std::size_t positionValue)
+                    -> QJsonValue {
+                    return QJsonObject{{"selectionKind", kind},
+                        {"revisionId", revision.isEmpty() ? QJsonValue(QJsonValue::Null)
+                                                          : QJsonValue(revision)},
+                        {"actionPosition", QString::number(static_cast<qulonglong>(positionValue))}};
+                };
+            const bool archived = draft.historyCheckpointRevisionId &&
+                                  draft.historyActionPosition;
+            if (draft.journalCount > 0 && !archived &&
+                !draft.historyCheckpointRevisionId) {
+                if (position > 0)
+                    previous = target(QStringLiteral("draft"), QString(),
+                                      static_cast<std::size_t>(position - 1));
+                if (position < draft.journalCount)
+                    next = target(QStringLiteral("draft"), QString(),
+                                  static_cast<std::size_t>(position + 1));
+            } else if (draft.journalCount == 0 && draft.baseRevision &&
+                       (!draft.dirty || draft.historyCheckpointRevisionId) &&
+                       (archived || !draft.historyCheckpointRevisionId)) {
+                const std::optional<RevisionGraphHead> branch =
+                    service.branchById(draft.projectId, draft.branchId);
+                if (branch && branch->revision == draft.baseRevision) {
+                    // Paged first-parent order, newest to oldest. Bound the
+                    // scan so a malformed or enormous history cannot turn a
+                    // cursor read into an unbounded request.
+                    const std::string wanted = archived
+                        ? *draft.historyCheckpointRevisionId : draft.baseRevision->toString();
+                    std::optional<RevisionId> after;
+                    std::optional<BranchActionHistoryEntry> newer;
+                    std::optional<BranchActionHistoryEntry> selected;
+                    std::optional<BranchActionHistoryEntry> older;
+                    for (std::size_t pageIndex = 0; pageIndex < 256 && !older; ++pageIndex) {
+                        const BranchActionHistoryPage page = service.branchActionHistory(
+                            draft.projectId, branch->name, 10, after);
+                        for (const BranchActionHistoryEntry& entry : page.commits) {
+                            if (selected) {
+                                older = entry;
+                                break;
+                            }
+                            if (entry.revision.id.toString() == wanted) {
+                                selected = entry;
+                            } else {
+                                newer = entry;
+                            }
+                        }
+                        if (!page.next) break;
+                        after = page.next;
+                    }
+                    if (selected && selected->commitOperationId &&
+                        !selected->actionIds.empty()) {
+                        const std::size_t count = selected->actionIds.size();
+                        const std::uint64_t archivedPosition = archived
+                            ? *draft.historyActionPosition : count;
+                        if (archivedPosition <= count) {
+                            if (archivedPosition > 0) {
+                                previous = target(QStringLiteral("archived"),
+                                    QString::fromStdString(wanted),
+                                    static_cast<std::size_t>(archivedPosition - 1));
+                            } else if (older && older->commitOperationId &&
+                                       !older->actionIds.empty()) {
+                                previous = target(QStringLiteral("archived"),
+                                    QString::fromStdString(older->revision.id.toString()),
+                                    older->actionIds.size() - 1);
+                            }
+                            if (archived) {
+                                if (archivedPosition < count) {
+                                    next = target(QStringLiteral("archived"),
+                                        QString::fromStdString(wanted),
+                                        static_cast<std::size_t>(archivedPosition + 1));
+                                } else if (newer && newer->commitOperationId &&
+                                           !newer->actionIds.empty()) {
+                                    next = target(QStringLiteral("archived"),
+                                        QString::fromStdString(newer->revision.id.toString()), 1);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // An intervening Save/Commit invalidates even a freshly read
+            // target: the POST must still supply and match this generation.
+            const WorkingCopyInfo current = service.workingCopy(draft.id, false);
+            const std::optional<RevisionGraphHead> currentBranch =
+                service.branchById(draft.projectId, draft.branchId);
+            if (!currentBranch || currentBranch->revision != draft.baseRevision ||
+                current.generation != draft.generation ||
+                current.baseRevision != draft.baseRevision ||
+                current.historyCheckpointRevisionId != draft.historyCheckpointRevisionId ||
+                current.historyActionPosition != draft.historyActionPosition ||
+                current.draftActionPosition != draft.draftActionPosition)
+                throw ProjectError(ProjectErrorKind::Conflict,
+                                   "history cursor changed while resolving adjacent actions");
             return Reply{200, QJsonObject{
                 {"draftId", QString::fromStdString(draft.id)},
                 {"generation", QString::number(static_cast<qulonglong>(draft.generation))},
@@ -1538,6 +1638,8 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 {"actionPosition", QString::number(static_cast<qulonglong>(position))},
                 {"hasPreviousDraftAction", position > 0},
                 {"hasNextDraftAction", position < draft.journalCount},
+                {"previousAction", previous},
+                {"nextAction", next},
                 {"selectionKind", draft.historyActionPosition
                     ? QStringLiteral("archived") : draft.historyCheckpointRevisionId
                         ? QStringLiteral("checkpoint") : QStringLiteral("draft")},

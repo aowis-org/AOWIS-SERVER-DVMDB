@@ -200,7 +200,14 @@ paths:
         generation/base HEAD and, when selected, the archived Commit revision
         and action coordinate. Archived and draft positions are distinct;
         adjacent draft actions are not guaranteed executable until MODEL replay
-        succeeds. This is NOT a continuous cross-Commit cursor.
+        succeeds. `previousAction` and `nextAction` are server-resolved candidate
+        coordinates for the existing fenced POST navigate endpoint: they include
+        archived Commit steps and skip the duplicate snapshot at a Commit marker.
+        A null target means no currently addressable adjacent step. A retained
+        draft journal at position zero does NOT advertise archived navigation,
+        since safe cross-mode handoff is not yet implemented. These targets are
+        not executable proof: a POST still verifies the MODEL and repository.
+        This is NOT yet a continuous live-journal/Commit cursor.
       responses:
         '200':
           description: Authoritative active journal coordinate; all counters are decimal strings.
@@ -208,7 +215,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [draftId, generation, baseRevision, journalCount, actionPosition, hasPreviousDraftAction, hasNextDraftAction, selectionKind, archivedRevisionId, archivedActionPosition, archiveCommitOperationId]
+                required: [draftId, generation, baseRevision, journalCount, actionPosition, hasPreviousDraftAction, hasNextDraftAction, previousAction, nextAction, selectionKind, archivedRevisionId, archivedActionPosition, archiveCommitOperationId]
                 properties:
                   draftId: {type: string, format: uuid}
                   generation: {type: string, pattern: '^[0-9]{1,20}$'}
@@ -217,6 +224,24 @@ paths:
                   actionPosition: {type: string, pattern: '^[0-9]{1,20}$'}
                   hasPreviousDraftAction: {type: boolean}
                   hasNextDraftAction: {type: boolean}
+                  previousAction:
+                    oneOf:
+                      - type: 'null'
+                      - type: object
+                        required: [selectionKind, revisionId, actionPosition]
+                        properties:
+                          selectionKind: {type: string, enum: [draft, archived]}
+                          revisionId: {type: [string, 'null'], format: uuid}
+                          actionPosition: {type: string, pattern: '^[0-9]{1,20}$'}
+                  nextAction:
+                    oneOf:
+                      - type: 'null'
+                      - type: object
+                        required: [selectionKind, revisionId, actionPosition]
+                        properties:
+                          selectionKind: {type: string, enum: [draft, archived]}
+                          revisionId: {type: [string, 'null'], format: uuid}
+                          actionPosition: {type: string, pattern: '^[0-9]{1,20}$'}
                   selectionKind: {type: string, enum: [draft, checkpoint, archived]}
                   archivedRevisionId: {type: [string, 'null'], format: uuid}
                   archivedActionPosition: {type: [string, 'null'], pattern: '^[0-9]{1,20}$'}

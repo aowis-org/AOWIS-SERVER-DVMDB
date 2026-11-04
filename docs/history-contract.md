@@ -43,8 +43,9 @@ are listed only in the [History roadmap](history-roadmap.md).
 | Plan archived action boundary | `planVerifiedHydraulicActionNavigation` builds an exact, **HEAD-relative replacement** candidate without mutation |
 | Select archived action boundary | `navigateVerifiedHydraulicAction` atomically publishes verified replacement state and V7 cursor metadata under lease, HEAD and generation fences, idempotent by navigation operation UUID |
 | Navigate an existing network's active draft actions | `planVerifiedHydraulicDraftActionNavigation` verifies all retained MODEL frames against the persisted selected network state; `navigateVerifiedHydraulicDraftAction` publishes the rebuilt HEAD-relative candidate and cursor through the fenced/idempotent native writer. **Currently limited to one existing hydraulic network per committed base snapshot** |
-| HTTP action navigation | `GET /working-copies/{draftId}/history/cursor` distinguishes an active journal cursor from an archived Commit coordinate; fenced `POST /working-copies/{draftId}/history/navigate` selects a verified active boundary, or an indexed archived boundary when `revisionId` is supplied. Both use a UUIDv7 operation identity and server-built overlays |
-| Continuous cross-Commit Undo/Redo and GUI navigation | **Not implemented** |
+| HTTP action navigation | `GET /working-copies/{draftId}/history/cursor` distinguishes an active journal cursor from an archived Commit coordinate and supplies bounded, server-resolved `previousAction`/`nextAction` coordinates (including adjacent Commit archives); fenced `POST /working-copies/{draftId}/history/navigate` selects a verified active boundary, or an indexed archived boundary when `revisionId` is supplied. Both use a UUIDv7 operation identity and server-built overlays |
+| Server-resolved adjacent archived actions | Cursor GET exposes candidate previous/next coordinates and skips the duplicate snapshot at an adjacent Commit marker. Selecting them still uses fenced MODEL-verified POST; moving from a retained draft journal into the archive is not yet supported |
+| Continuous live-journal/Commit Undo/Redo and GUI navigation | **Not implemented** |
 
 The **archived** HTTP/native action selector is restricted to an indexed, complete,
 first-parent local hydraulic Commit and a draft with **no active MODEL journal**.
