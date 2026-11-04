@@ -43,7 +43,9 @@ A test passing against an in-process fake is not sufficient.
 **Already implemented:** durable indexed archives of original MODEL events,
 paged native/HTTP read-only action history, native full-revision coverage
 verification, checkpoint planning/selection and native atomic selection of a
-verified archived hydraulic action boundary with a V6 draft cursor.
+verified archived hydraulic action boundary with a V7 draft cursor,
+plus an internal durable active-journal position publisher. The latter is
+not yet MODEL-verified or reachable over HTTP.
 
 **Remaining:** confirm the corrected Qt hydraulic navigation regression;
 support active draft journals, continuous cursor/redo eligibility, inverse

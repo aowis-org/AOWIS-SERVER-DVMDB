@@ -7,7 +7,7 @@ journal that produced it. Saving a draft **never creates a revision or moves a
 branch HEAD**; only a local Commit does. The product rules are in the
 [version-control contract](version-control-semantics.md) and
 [private working repositories](private-working-repositories.md); the bytes are
-in [storage formats](storage-formats.md#private-drafts-aowis-working-copy-6).
+in [storage formats](storage-formats.md#private-drafts-aowis-working-copy-7).
 
 Drafts exist only in a catalogue whose repository role is explicitly set to
 `private` ([repository tracking](repository-tracking.md)). The role is
@@ -85,13 +85,23 @@ immutable revision content never change. A subsequent normal Save or Commit
 clears the exact-checkpoint cursor. Native `hydraulic::navigateVerifiedHydraulicAction`
 can also select an **individual archived hydraulic action boundary**, once
 complete original MODEL replay and native-record coverage have been verified.
-It publishes the entire replacement overlay and V6 action coordinate together,
+It publishes the entire replacement overlay and V7 archived-action coordinate together,
 with lease/generation/HEAD checks and exact-operation retry. The draft must
 have **no active MODEL journal**, and the action's local Commit must be fully
 covered by archived events. Returning to the committed HEAD is intended to
 leave an empty (clean) candidate. These selectors are not exposed over HTTP;
-they do not implement continuous Undo/Redo or navigation of live draft events.
-See [History](commit-action-archive.md).
+they do not yet implement continuous Undo/Redo.
+
+`ProjectService::publishVerifiedDraftActionNavigation` is a separate, native
+**internal** publication primitive for a MODEL-verified position in the active
+journal. It atomically replaces the candidate and persists
+`draft-action-position`, retaining the original journal for Redo and supporting
+exact-operation retries after restart. It has **no public MODEL-aware wrapper
+or HTTP route yet**: callers may not supply unchecked candidate overlays.
+While the cursor is below `journalCount`, new Save and local Commit are
+rejected rather than silently archiving unapplied actions. At the tip, ordinary
+Save and Commit are permitted, with normal cursor clearing. See
+[History](commit-action-archive.md).
 
 ## Saving
 
@@ -122,6 +132,9 @@ atomically:
   membership, the server applies metadata to the resulting root manifest,
   emitting one final atomic candidate change set. Unjournaled extra typed
   changes, duplicate root edits and stale before-images are rejected.
+* A new event Save while the active draft cursor is **behind** its journal
+  tip is a `409 Conflict`, until an explicit redo-branch invalidation operation
+  is implemented. No retained forward action is silently discarded.
 * A retry of the **immediately preceding** identical request (same
   fingerprint, generation one ahead) returns the earlier result instead of
   saving twice. The response lists only this Save's accepted event UUIDs and

@@ -109,7 +109,7 @@ root metadata, insertions, deletions and multi-network transactions), check
 canonical equality with immutable parent/child states, and construct a
 complete candidate overlay relative to the current committed HEAD. With a
 live private draft lease it can atomically select a verified archived action
-boundary and persist a V6 cursor. An **active draft MODEL journal is rejected**;
+boundary and persist a V7 cursor. An **active draft MODEL journal is rejected**;
 this is not continuous Undo/Redo or an HTTP execution endpoint. See
 [History](commit-action-archive.md).
 

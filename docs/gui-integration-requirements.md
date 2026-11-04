@@ -57,7 +57,7 @@ Publish are not yet operational GUI flows.
 `action-history` and revision events routes expose **archived original MODEL
 actions across local Commit markers**, alongside the bounded live-draft
 journal; readers can page both without changing HEAD or draft state.
-Native code has a persisted V6 cursor for **restricted, verified archived
+Native code has a persisted V7 cursor for **restricted, verified archived
 action-boundary selection**. There is **no HTTP action-navigation endpoint**,
 continuous active-draft Undo/Redo or completed GUI controller. The existing
 GUI left History dock is therefore **read-only**, with Undo/Redo disabled.

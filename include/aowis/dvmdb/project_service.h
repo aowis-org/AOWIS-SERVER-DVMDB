@@ -93,6 +93,9 @@ struct WorkingCopyInfo {
     // immutable archive. Absent for snapshot-only checkpoint selection.
     std::optional<std::uint64_t> historyActionPosition;
     std::optional<std::string> historyArchiveCommitOperationId;
+    // Position in the still-retained active MODEL journal. When absent the
+    // draft is at the journal tip. Navigating does NOT discard redo frames.
+    std::optional<std::uint64_t> draftActionPosition;
     std::optional<std::string> lastHistoryNavigationOperationId;
     std::optional<std::uint64_t> lastHistoryNavigationSourceGeneration;
     std::optional<std::string> leaseSessionId;
@@ -512,6 +515,18 @@ public:
         std::string_view sessionId, std::string_view fencingToken,
         std::uint64_t expectedGeneration, const RevisionId& expectedHead,
         const RevisionId& revision, std::string_view archiveCommitOperationId,
+        std::size_t actionPosition, const std::vector<ModelChange>& verifiedCandidate);
+    // Internal publication boundary for a MODEL-verified active-draft action
+    // state. The caller must derive verifiedCandidate from the original journal
+    // and complete canonical hydraulic model; this method is NOT an HTTP API
+    // and must never receive client-generated native record changes. Journal
+    // frames remain intact for future Redo. At a non-tip position ordinary
+    // Save and Commit are intentionally fenced until redo invalidation is
+    // implemented. An uncertain reply is retried with the same operation ID.
+    WorkingCopyInfo publishVerifiedDraftActionNavigation(
+        std::string_view operationId, std::string_view draftId,
+        std::string_view sessionId, std::string_view fencingToken,
+        std::uint64_t expectedGeneration, std::optional<RevisionId> expectedHead,
         std::size_t actionPosition, const std::vector<ModelChange>& verifiedCandidate);
     void releaseWorkingCopyLease(
         std::string_view draftId, std::string_view sessionId,

@@ -88,6 +88,7 @@ client-supplied arbitrary changes:
 | `planVerifiedHydraulicActionNavigation` | Full **current-HEAD-relative** candidate overlay for a global archived action position; read-only |
 | `navigateHistoryCheckpoint` | Atomic, fenced exact-checkpoint candidate+marker publication in a private draft |
 | `navigateVerifiedHydraulicAction` | Atomic, fenced, idempotent candidate+action-coordinate publication; restores the selected archived hydraulic state without moving the committed HEAD |
+| `publishVerifiedDraftActionNavigation` | Native-only fenced atomic publication of a **preverified** live-draft journal position and complete candidate; journal frames persist. No public MODEL-aware planner or HTTP execution route exists yet |
 
 MODEL actions in a multi-network Commit retain a **single global action
 position** even when verification splits their edits by network. The
@@ -102,7 +103,7 @@ For action-boundary navigation the service verifies the draft's private
 role, leased session/fencing token, generation and current committed HEAD;
 checks the revision's indexed archive/operation and action coordinate
 under locks; then replaces the **whole** candidate overlay and publishes
-the V6 cursor in the same durable metadata update. Repeating the identical
+the V7 cursor in the same durable metadata update. Repeating the identical
 operation UUID/parameters, including after restart, does not increment
 generation twice. New ordinary Save and local Commit clear the one-shot
 selection marker. A selected state equal to committed HEAD must be a clean
@@ -122,10 +123,16 @@ confirmed passing run against the current correction.
   first action and position N after its Nth action. Commit markers are not
   extra MODEL edits. A checkpoint-only revision cannot yield fabricated
   internal action positions.
+- Native active-draft publication retains the original journal and records
+  `draft-action-position`, even after restart. Until a MODEL-aware wrapper
+  proves its candidate, this internal method is **not** user-executable.
+  Save and Commit reject a position behind the journal tip rather than losing
+  Redo. This is a temporary fail-closed restriction, not finalized redo
+  invalidation semantics.
 - Archive verification is **not** complete user-facing History: redo
   eligibility, active-draft action navigation, durable navigation-event
   provenance, HTTP execution and GUI wiring are still outstanding.
 
-See [working-copy storage](storage-formats.md#private-drafts-aowis-working-copy-6)
+See [working-copy storage](storage-formats.md#private-drafts-aowis-working-copy-7)
 for the persisted cursor fields and [working copies](working-copies.md) for
 the ordinary Save/Commit contract.

@@ -41,10 +41,11 @@ are listed only in the [History roadmap](history-roadmap.md).
 | Verify one hydraulic action sequence | `previewVerifiedHydraulicActionBoundary` replays ordered insert/delete/update/root operations and checks byte-equal committed network |
 | Verify an entire revision | `verifiedRevisionNativeActionWitness` plus `verifyHydraulicRevisionActionCoverage` account for every changed native record across affected networks |
 | Plan archived action boundary | `planVerifiedHydraulicActionNavigation` builds an exact, **HEAD-relative replacement** candidate without mutation |
-| Select archived action boundary | `navigateVerifiedHydraulicAction` atomically publishes verified replacement state and V6 cursor metadata under lease, HEAD and generation fences, idempotent by navigation operation UUID |
-| Navigate live draft events / HTTP Undo / GUI buttons | **Not implemented** |
+| Select archived action boundary | `navigateVerifiedHydraulicAction` atomically publishes verified replacement state and V7 cursor metadata under lease, HEAD and generation fences, idempotent by navigation operation UUID |
+| Publish active draft action selection | Internal `publishVerifiedDraftActionNavigation` atomically persists a candidate and `draft-action-position`; retains all journal frames. **No MODEL-aware active-draft reconstruction yet** |
+| HTTP Undo / GUI Undo/Redo | **Not implemented** |
 
-The action-selection API is restricted to an indexed, complete, first-parent
+The **archived** action-selection API is restricted to an indexed, complete, first-parent
 local hydraulic Commit and a draft with **no active MODEL journal**. Network
 creation/removal, non-hydraulic data, merge Commits and missing archives are
 not action-level targets today. Returning to the committed HEAD must produce
@@ -78,6 +79,11 @@ not** an Undo/Redo, Save or Commit gate.
 
 Original accepted MODEL frames are retained in a permanent local-Commit
 archive; the bounded active-draft journal is cleared after that Commit.
+A native active-journal publication primitive now retains all original frames,
+persists an exact journal position and refuses Save/Commit below the tip; this
+primitive is intentionally **not executable by users** without MODEL-aware
+candidate verification and complete active-journal coverage.
+
 The GUI History dock may show committed action metadata, draft actions and
 checkpoints already, but it must not advertise operational Undo/Redo until
 the continuous cursor, HTTP commands, redo rules and recovery tests exist.
@@ -85,5 +91,5 @@ Imported, old and merge checkpoints must be labelled honestly rather than
 shown as sequences of invented edits.
 
 No automatic compatibility migration is provided for pre-release draft
-formats. The current working-copy marker is `AOWIS-WORKING-COPY-6`;
+formats. The current working-copy marker is `AOWIS-WORKING-COPY-7`;
 recreate older disposable drafts. See [storage formats](storage-formats.md).

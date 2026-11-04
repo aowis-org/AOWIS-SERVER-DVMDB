@@ -181,6 +181,98 @@ void testHistoryCheckpointPlan() {
     }
 }
 
+// HDB-03a: the original active journal must remain available while the
+// selected draft candidate moves backward/forward. A cursor below the tip
+// must not be silently committed or overwritten by a new Save.
+void testDurableActiveDraftNavigationPublication() {
+    TempRoot root;
+    const std::string session = UuidV7::generate().toString();
+    const ModelChange base = changeWithValue(10);
+    const ModelChange first = changeWithValue(20);
+    const ModelChange second = changeWithValue(30);
+    std::string projectId;
+    std::string draftId;
+    std::string token;
+    std::string undoOperation;
+    std::optional<RevisionId> head;
+    {
+        ProjectService service(root.path);
+        service.configureRepositoryRole(RepositoryRole::Private);
+        projectId = service.createUnbornProject("active journal navigation").id;
+        head = service.commitModelAtExpectedHead(projectId, "main", {base},
+                                                  commitMetadata(), std::nullopt);
+        draftId = service.createWorkingCopy(projectId, "main", head, session).id;
+        token = service.acquireWorkingCopyLease(draftId, session, 120).token;
+        const aowis::dvmdb::Bytes firstFrame = aowis::dvmdb::test::editEvent(
+            UuidV7::generate(), base.key, {10}, {20});
+        const aowis::dvmdb::Bytes secondFrame = aowis::dvmdb::test::editEvent(
+            UuidV7::generate(), base.key, {20}, {30});
+        require(service.saveWorkingCopyTransactions(draftId, session, token, 0,
+                    {first}, {firstFrame}).generation == 1 &&
+                service.saveWorkingCopyTransactions(draftId, session, token, 1,
+                    {second}, {secondFrame}).generation == 2,
+                "HDB-03a could not create two accepted draft actions");
+        undoOperation = UuidV7::generate().toString();
+        const WorkingCopyInfo undone = service.publishVerifiedDraftActionNavigation(
+            undoOperation, draftId, session, token, 2, head, 1, {first});
+        require(undone.generation == 3 && undone.draftActionPosition == 1 &&
+                undone.journalCount == 2 && undone.dirty &&
+                undone.candidateChanges.size() == 1 &&
+                undone.candidateChanges.front().record &&
+                undone.candidateChanges.front().record->payload == first.record->payload &&
+                service.optionalHead(projectId, "main") == head,
+                "HDB-03a did not publish the selected candidate and durable cursor");
+        const WorkingCopyInfo exactRetry = service.publishVerifiedDraftActionNavigation(
+            undoOperation, draftId, session, token, 2, head, 1, {});
+        require(exactRetry.generation == 3 && exactRetry.draftActionPosition == 1,
+                "HDB-03a replay changed generation or cursor");
+        expectConflict([&] { (void)service.publishVerifiedDraftActionNavigation(
+            undoOperation, draftId, session, token, 2, head, 0, {}); });
+        expectConflict([&] { (void)service.publishVerifiedDraftActionNavigation(
+            UuidV7::generate().toString(), draftId, session, token, 2, head, 0, {}); });
+        expectConflict([&] { (void)service.saveWorkingCopyTransactions(
+            draftId, session, token, 3, {second},
+            {aowis::dvmdb::test::editEvent(UuidV7::generate(), base.key, {20}, {30})}); });
+        expectConflict([&] { (void)service.commitWorkingCopy(
+            UuidV7::generate().toString(), draftId, session, token, 3, head,
+            commitMetadata()); });
+        require(service.workingCopy(draftId, true).journal.size() == 2,
+                "HDB-03a blocked Save/Commit still altered the action journal");
+    }
+    {
+        ProjectService restarted(root.path);
+        const WorkingCopyInfo recovered = restarted.workingCopy(draftId, true);
+        require(recovered.generation == 3 && recovered.draftActionPosition == 1 &&
+                recovered.journal.size() == 2 &&
+                recovered.candidateChanges.front().record->payload == first.record->payload,
+                "HDB-03a draft cursor/candidate/journal did not survive restart");
+        const WorkingCopyInfo retry = restarted.publishVerifiedDraftActionNavigation(
+            undoOperation, draftId, session, token, 2, head, 1, {});
+        require(retry.generation == 3 && retry.draftActionPosition == 1,
+                "HDB-03a retry after restart was not idempotent");
+        const WorkingCopyInfo beforeFirst = restarted.publishVerifiedDraftActionNavigation(
+            UuidV7::generate().toString(), draftId, session, token, 3, head, 0, {});
+        require(beforeFirst.generation == 4 && !beforeFirst.dirty &&
+                beforeFirst.draftActionPosition == 0 && beforeFirst.journalCount == 2,
+                "HDB-03a position zero did not restore a clean base candidate");
+        const WorkingCopyInfo redone = restarted.publishVerifiedDraftActionNavigation(
+            UuidV7::generate().toString(), draftId, session, token, 4, head, 2, {second});
+        require(redone.generation == 5 && redone.draftActionPosition == 2 &&
+                redone.journalCount == 2 && redone.dirty,
+                "HDB-03a could not redo the original final action");
+        const LocalCommitInfo committed = restarted.commitWorkingCopy(
+            UuidV7::generate().toString(), draftId, session, token, 5, head,
+            commitMetadata());
+        require(committed.state == LocalCommitState::Succeeded,
+                "HDB-03a Commit at journal tip was refused");
+        const WorkingCopyInfo rebased = restarted.workingCopy(draftId, true);
+        require(!rebased.draftActionPosition && rebased.journalCount == 0 &&
+                rebased.generation == 6 && !rebased.dirty &&
+                restarted.localCommitActionHistory(committed.id).actions.size() == 2,
+                "HDB-03a Commit did not archive both original actions and clear the cursor");
+    }
+}
+
 // HIST-03c4b: the native publication step owns the durable cursor and
 // generation/lease fences. The MODEL-aware hydraulic adapter supplies the
 // verified candidate in production; this fixture tests ONLY the atomic
@@ -1683,6 +1775,7 @@ int main() {
         testHistoryCheckpointPlan();
         testAtomicHistoryCheckpointNavigation();
         testAtomicVerifiedActionNavigationPublication();
+        testDurableActiveDraftNavigationPublication();
         testCommittedActionHistory();
         testVerifiedRevisionNativeWitness();
         testBranchDraftHistoryPaging();

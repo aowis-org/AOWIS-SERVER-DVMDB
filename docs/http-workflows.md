@@ -86,7 +86,7 @@ branch's committed HEAD. Network summaries are read-only and do not save.
 the **permanent local-Commit MODEL action archive** is available through the
 read-only `/action-history` and `/action-history/{revisionId}/events` routes
 below, including real actions across Commit markers. Native code can persist
-a verified historical action cursor in a private V6 draft, but no HTTP Undo,
+a verified historical action cursor in a private V7 draft, but no HTTP Undo,
 Redo or jump mutation endpoint exists yet. The GUI History dock remains
 read-only until continuous active-draft navigation, HTTP execution and
 recovery semantics are implemented. See [History](commit-action-archive.md)

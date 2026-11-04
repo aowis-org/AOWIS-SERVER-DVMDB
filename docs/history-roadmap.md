@@ -22,9 +22,17 @@ behavior. This work is part of the [overall DVMDB roadmap](roadmap.md).
 - Native fenced publication of a verified action boundary into a private draft
   with an atomically persisted coordinate, generation CAS, branch-HEAD pin and
   same-operation retry after restart. Draft metadata uses
-  `AOWIS-WORKING-COPY-6`.
+  `AOWIS-WORKING-COPY-7`.
 
-That last operation is **not** a general Undo or Redo command. It accepts only
+An internal native active-draft publication primitive also persists a
+selected journal position and full replacement candidate in one durable
+operation, retaining all original journal frames, with lease/generation/HEAD
+fences, exact-operation retry and restart recovery. Ordinary Save and local
+Commit currently **reject** positions below the journal tip; no redo frames
+are silently archived or overwritten. No MODEL-aware live-journal planner or
+HTTP command invokes this primitive yet.
+
+The archived action operation is **not** a general Undo or Redo command. It accepts only
 fully verified archived hydraulic local Commits and a draft with **no active
 MODEL journal**. It does not preserve redo eligibility across arbitrary user
 edits, generate a continuous action log, or expose an HTTP mutation endpoint.
@@ -55,13 +63,19 @@ navigation test, with immutable revision and branch-ref checks.
 - Define a single server-owned cursor that can move from the selected
   committed action boundaries into the **current draft event journal**,
   including the unborn first draft.
+- Build the MODEL-aware adapter to materialize a complete, verified candidate
+  for every active-journal position (including newborn/unborn drafts), and
+  invoke the existing native atomic publication primitive only after full
+  revision/draft native-record coverage checks.
 - Materialize Undo/Redo of accepted draft actions with canonical MODEL
   before/after verification, physical membership/root consistency and an
   atomic candidate+cursor update. Preserve unrelated project and branch refs.
 - Represent navigation itself durably as an operation with fresh UUIDv7 and
   provenance to the original action. Preserve an audit trail without
   pretending old immutable revisions were changed.
-- Make a new ordinary edit after Undo invalidate forward **eligibility**;
+- Replace the present fail-closed Save/Commit restriction below the journal
+  tip with an atomic operation that invalidates forward **eligibility** upon
+  a new ordinary edit;
   neither delete the immutable Commit DAG nor fabricate a recovered redo path.
 - Specify what Save, Commit, import, branch change, checkout and two sessions
   do when a cursor is away from the tip; reject uncertain situations rather

@@ -13,8 +13,8 @@ layouts are in [storage formats](storage-formats.md). Names such as
 the **current** format, not a compatibility layer. When a format changes, the
 marker changes and the old one is rejected (for example,
 pre-release single-file draft layouts are refused). Current private drafts
-use **`AOWIS-WORKING-COPY-6`**, with an atomic history action coordinate.
-Earlier V5 draft metadata cannot be loaded and **must be recreated**; a
+use **`AOWIS-WORKING-COPY-7`**, with archived and active draft action coordinates.
+Earlier V6 draft metadata cannot be loaded and **must be recreated**; a
 working-copy format change does not invalidate immutable committed revisions.
 `aowis-dvmdb-format-compatibility-tests` keeps a frozen pre-release pack and
 its bundles (`tests/fixtures/pack-20261024`) to prove they are refused without

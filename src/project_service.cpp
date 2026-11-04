@@ -468,7 +468,7 @@ ProjectService::Project::Project(ProjectInfo value) : info(std::move(value)) {}
 namespace {
 // Private draft format (see docs/storage-formats.md). Earlier
 // pre-release formats are rejected, never migrated.
-constexpr std::string_view workingCopyMarker = "AOWIS-WORKING-COPY-6\n";
+constexpr std::string_view workingCopyMarker = "AOWIS-WORKING-COPY-7\n";
 constexpr std::size_t workingCopyMaxBytes = 8 * 1024 * 1024;
 constexpr std::size_t workingCopyMaxChanges = 20000;
 constexpr std::size_t workingCopyMaxEvents = 4096;
@@ -605,7 +605,7 @@ std::string saveBatchFingerprint(const std::vector<ModelChange>& changes,
 }
 
 // ---------------------------------------------------------------------------
-// Draft storage (AOWIS-WORKING-COPY-6). One directory per draft:
+// Draft storage (AOWIS-WORKING-COPY-7). One directory per draft:
 //   meta                  small text record, atomically replaced; authoritative
 //   candidate-<uuidv7>    immutable binary candidate overlay (sorted changes)
 //   journal-<uuidv7>      append-only binary MODEL event journal
@@ -683,7 +683,9 @@ std::string metaBody(const WorkingCopyInfo& draft, const DraftFiles& files) {
             ? std::to_string(*draft.lastHistoryNavigationSourceGeneration) : "-") + "\n"
         + "history-action-position\t" + (draft.historyActionPosition
             ? std::to_string(*draft.historyActionPosition) : "-") + "\n"
-        + "history-archive-operation\t" + draft.historyArchiveCommitOperationId.value_or("-") + "\n";
+        + "history-archive-operation\t" + draft.historyArchiveCommitOperationId.value_or("-") + "\n"
+        + "draft-action-position\t" + (draft.draftActionPosition
+            ? std::to_string(*draft.draftActionPosition) : "-") + "\n";
 }
 
 Bytes encodeCandidate(const std::vector<ModelChange>& changes) {
@@ -901,6 +903,14 @@ std::optional<StoredDraft> readDraftMeta(const std::filesystem::path& directory)
     const std::string historyGeneration = nextField("history-source-generation");
     const std::string historyPosition = nextField("history-action-position");
     const std::string historyArchive = nextField("history-archive-operation");
+    const std::string draftPosition = nextField("draft-action-position");
+    if (draftPosition != "-") {
+        draft.draftActionPosition = decimalField(draftPosition);
+        check(draft.journalCount > 0 &&
+              *draft.draftActionPosition <= draft.journalCount &&
+              historyRevision == "-" && historyPosition == "-" && historyArchive == "-",
+              "invalid active draft history cursor");
+    }
     check((historyPosition == "-" && historyArchive == "-") ||
           (historyPosition != "-" && UuidV7::parse(historyArchive).has_value() &&
            historyRevision != "-"),
@@ -911,17 +921,19 @@ std::optional<StoredDraft> readDraftMeta(const std::filesystem::path& directory)
               "history action position is out of range");
         draft.historyArchiveCommitOperationId = historyArchive;
     }
-    check((historyRevision == "-" && historyOperation == "-" && historyGeneration == "-") ||
-          (RevisionId::parse(historyRevision).has_value() &&
+    check((historyRevision == "-" && historyOperation == "-" && historyGeneration == "-" &&
+           !draft.draftActionPosition) ||
+          ((RevisionId::parse(historyRevision).has_value() || draft.draftActionPosition) &&
            UuidV7::parse(historyOperation).has_value() && historyGeneration != "-"),
           "incomplete history navigation cursor in draft meta");
-    if (historyRevision != "-") {
-        draft.historyCheckpointRevisionId = historyRevision;
+    if (historyRevision != "-" || draft.draftActionPosition) {
+        if (historyRevision != "-") draft.historyCheckpointRevisionId = historyRevision;
         draft.lastHistoryNavigationOperationId = historyOperation;
         draft.lastHistoryNavigationSourceGeneration = decimalField(historyGeneration);
         check(*draft.lastHistoryNavigationSourceGeneration < draft.generation &&
               *draft.lastHistoryNavigationSourceGeneration + 1 == draft.generation &&
-              draft.journalCount == 0 && !draft.lastSaveFingerprint,
+              (draft.draftActionPosition ? draft.journalCount > 0 :
+                  (draft.journalCount == 0 && !draft.lastSaveFingerprint)),
               "invalid history navigation generation or journal state");
     }
     std::string extra;
@@ -2297,6 +2309,7 @@ WorkingCopyInfo ProjectService::saveWorkingCopyChanges(
     draft.historyCheckpointRevisionId.reset();
     draft.historyActionPosition.reset();
     draft.historyArchiveCommitOperationId.reset();
+    draft.draftActionPosition.reset();
     draft.lastHistoryNavigationOperationId.reset();
     draft.lastHistoryNavigationSourceGeneration.reset();
     ++draft.generation;
@@ -2342,6 +2355,9 @@ WorkingCopyInfo ProjectService::saveWorkingCopyTransactions(
     std::vector<std::string> journalIds;
     StoredDraft stored = loadDraft(this->root_, draftId, DraftLoad::Candidate, &journalIds);
     WorkingCopyInfo draft = stored.info;
+    if (draft.draftActionPosition && *draft.draftActionPosition < draft.journalCount)
+        throw ProjectError(ProjectErrorKind::Conflict,
+                           "redo actions remain: return to the journal tip before Save");
     if (!draft.leaseSessionId || *draft.leaseSessionId != sessionId ||
         !draft.leaseToken || *draft.leaseToken != fencingToken ||
         !workingCopyLeaseLive(draft))
@@ -2378,6 +2394,7 @@ WorkingCopyInfo ProjectService::saveWorkingCopyTransactions(
     draft.historyCheckpointRevisionId.reset();
     draft.historyActionPosition.reset();
     draft.historyArchiveCommitOperationId.reset();
+    draft.draftActionPosition.reset();
     draft.lastHistoryNavigationOperationId.reset();
     draft.lastHistoryNavigationSourceGeneration.reset();
     ++draft.generation;
@@ -2419,6 +2436,7 @@ void rebaseCommittedDraft(const std::filesystem::path& root, const PersistedLoca
     draft.historyCheckpointRevisionId.reset();
     draft.historyActionPosition.reset();
     draft.historyArchiveCommitOperationId.reset();
+    draft.draftActionPosition.reset();
     draft.lastHistoryNavigationOperationId.reset();
     draft.lastHistoryNavigationSourceGeneration.reset();
     draft.dirty = false;
@@ -2525,6 +2543,9 @@ LocalCommitInfo ProjectService::commitWorkingCopy(
                 draft.generation != expectedGeneration)
                 throw ProjectError(ProjectErrorKind::Conflict,
                                    "local Commit draft/base/lease/generation changed");
+            if (draft.draftActionPosition && *draft.draftActionPosition < draft.journalCount)
+                throw ProjectError(ProjectErrorKind::Conflict,
+                                   "redo actions remain: return to journal tip before Commit");
             if (!draft.dirty || draft.candidateChanges.empty())
                 throw ProjectError(ProjectErrorKind::InvalidInput,
                                    "local Commit requires a saved dirty candidate");
@@ -3202,6 +3223,84 @@ WorkingCopyInfo ProjectService::publishVerifiedHistoryActionNavigation(
         draft.historyCheckpointRevisionId = revision.toString();
         draft.historyActionPosition = static_cast<std::uint64_t>(actionPosition);
         draft.historyArchiveCommitOperationId = std::string(archiveCommitOperationId);
+        draft.lastHistoryNavigationOperationId = std::string(operationId);
+        draft.lastHistoryNavigationSourceGeneration = expectedGeneration;
+        ++draft.generation;
+        DraftUpdate update;
+        update.candidate = draft.candidateChanges;
+        prepareDraftUpdate(stored, update);
+        try { updateDraft(workingCopyDirectory(this->root_) / draft.id,
+                          stored, draft, update); }
+        catch (...) { markUncertain(); throw; }
+        result = draft;
+    });
+    return result;
+}
+
+WorkingCopyInfo ProjectService::publishVerifiedDraftActionNavigation(
+        std::string_view operationId, std::string_view draftId,
+        std::string_view sessionId, std::string_view fencingToken,
+        std::uint64_t expectedGeneration, std::optional<RevisionId> expectedHead,
+        std::size_t actionPosition, const std::vector<ModelChange>& verifiedCandidate) {
+    if (!UuidV7::parse(operationId) || !UuidV7::parse(draftId) ||
+        !UuidV7::parse(sessionId) || !UuidV7::parse(fencingToken) ||
+        actionPosition > workingCopyMaxEvents ||
+        verifiedCandidate.size() > workingCopyMaxChanges)
+        throw ProjectError(ProjectErrorKind::InvalidInput,
+                           "invalid draft action navigation request");
+    requirePrivateRepository("draft action navigation requires a private repository");
+    const std::shared_ptr<std::mutex> lock = draftLock(draftId);
+    std::lock_guard<std::mutex> guard(*lock);
+    StoredDraft stored = loadDraft(this->root_, draftId, DraftLoad::Candidate);
+    WorkingCopyInfo draft = stored.info;
+    if (!draft.leaseSessionId || *draft.leaseSessionId != sessionId ||
+        !draft.leaseToken || *draft.leaseToken != fencingToken ||
+        !workingCopyLeaseLive(draft))
+        throw ProjectError(ProjectErrorKind::Conflict,
+                           "draft action navigation requires the current lease");
+    WorkingCopyInfo result;
+    withRepository(draft.projectId, [&](Repository& repository) {
+        const std::optional<ProjectId> project = ProjectId::parse(draft.projectId);
+        const std::optional<BranchId> branch = BranchId::parse(draft.branchId);
+        if (!project || !branch)
+            throw ProjectError(ProjectErrorKind::InvalidInput,
+                               "invalid draft action project or branch");
+        const std::optional<RevisionGraphHead> selected = translated<
+            std::optional<RevisionGraphHead>>([&] {
+                return repository.branchById(*project, *branch);
+            });
+        if (!selected || selected->revision != expectedHead ||
+            draft.baseRevision != expectedHead)
+            throw ProjectError(ProjectErrorKind::Conflict,
+                               "draft branch HEAD changed during action navigation");
+        if (draft.lastHistoryNavigationOperationId == operationId) {
+            if (draft.draftActionPosition != actionPosition ||
+                draft.lastHistoryNavigationSourceGeneration != expectedGeneration ||
+                expectedGeneration == std::numeric_limits<std::uint64_t>::max() ||
+                draft.generation != expectedGeneration + 1)
+                throw ProjectError(ProjectErrorKind::Conflict,
+                                   "draft action operation reused with different arguments");
+            result = draft;
+            return;
+        }
+        if (draft.generation != expectedGeneration ||
+            draft.generation == std::numeric_limits<std::uint64_t>::max())
+            throw ProjectError(ProjectErrorKind::Conflict,
+                               "draft action generation changed");
+        if (draft.journalCount == 0 || actionPosition > draft.journalCount ||
+            draft.historyCheckpointRevisionId || draft.historyActionPosition)
+            throw ProjectError(ProjectErrorKind::Conflict,
+                               "draft action navigation requires an active uninterrupted journal");
+        std::set<Key> seen;
+        for (const ModelChange& change : verifiedCandidate)
+            if (!seen.insert(change.key).second)
+                throw ProjectError(ProjectErrorKind::InvalidInput,
+                                   "duplicate verified draft action overlay key");
+        // Keep the original action frames, including the forward Redo tail.
+        // This position and candidate are one atomic durable publication.
+        draft.candidateChanges = verifiedCandidate;
+        draft.dirty = !verifiedCandidate.empty();
+        draft.draftActionPosition = static_cast<std::uint64_t>(actionPosition);
         draft.lastHistoryNavigationOperationId = std::string(operationId);
         draft.lastHistoryNavigationSourceGeneration = expectedGeneration;
         ++draft.generation;

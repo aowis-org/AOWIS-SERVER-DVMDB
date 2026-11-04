@@ -236,7 +236,7 @@ Hard ceilings: 64 GiB and 1,000,000 objects per bundle, 64 MiB per object;
 callers set lower `BundleLimits`. Import rules:
 [synchronization](offline-repository-synchronization.md).
 
-## Private drafts (`AOWIS-WORKING-COPY-6`)
+## Private drafts (`AOWIS-WORKING-COPY-7`)
 
 Each draft is a directory `working-copies/<draft-uuidv7>/` (mode 0700):
 
@@ -246,7 +246,7 @@ Each draft is a directory `working-copies/<draft-uuidv7>/` (mode 0700):
 * `journal-<uuidv7>` — the MODEL event journal, append-only binary.
 
 ```text
-AOWIS-WORKING-COPY-6
+AOWIS-WORKING-COPY-7
 project\t<project-uuidv7>
 branch\t<branch-uuidv7>
 base\t<revision-uuidv7|->
@@ -265,15 +265,21 @@ history-operation\t<last checkpoint-navigation operation UUIDv7|->
 history-source-generation\t<generation before last checkpoint selection|->
 history-action-position\t<global action boundary within archived Commit|->
 history-archive-operation\t<archived local Commit operation UUIDv7|->
+draft-action-position\t<selected position in retained active MODEL journal|->
 ```
 
 Native checkpoint selection uses the existing atomic meta publication to persist
 the full replacement candidate and its checkpoint identity **together**.
-The first three `history-*` fields are either all absent (`-`) or all present.
-For an exact checkpoint the last two are absent; for a verified action
-boundary they are both present. The source generation must be exactly one
-less than the draft generation. The action position is zero-based and
-references the immutable indexed Commit archive.
+For a committed checkpoint/action selection, the checkpoint revision,
+navigation operation UUID and source generation must agree; an archived
+action selection additionally carries both archive operation and position.
+For an **active draft action selection**, `history-revision`,
+`history-action-position` and `history-archive-operation` are absent,
+`draft-action-position` ranges from 0 through the retained `journal` count,
+and the navigation operation UUID/source generation identify its last atomic
+publication. The source generation is exactly one less than the resulting
+generation. At the ordinary journal tip, `draft-action-position` may be absent.
+The journal and its original frames are never discarded by selection.
 Selecting a checkpoint requires a live lease, a pinned HEAD, an empty MODEL
 journal, and a first-parent ancestor of that HEAD. Retrying the same operation
 at its original generation returns the already published result; intervening
@@ -281,8 +287,11 @@ edits, another selection, or a changed HEAD reject the retry. Normal Save or
 Commit clears these fields. Native verified action navigation atomically
 publishes a qualified action boundary and its complete replacement candidate
 under the same lease/generation/HEAD fencing. It is **not** a continuous
-Undo/Redo engine for active draft journals. No migration from earlier
-pre-release draft meta records is provided: **V5 drafts must be recreated**.
+Undo/Redo engine by itself: the native active-draft publication primitive
+requires a complete MODEL-verified candidate from a future hydraulic adapter,
+and deliberately rejects new Save and local Commit below the journal tip until
+redo invalidation is implemented. No migration from earlier pre-release draft
+meta records is provided: **V6 drafts must be recreated**.
 
 Candidate file: `AOWC` `0x01`, then per change, sorted by entity key: key (16),
 length (u32, `0xffffffff` = deletion), `AOMD` model record. Journal file: per
