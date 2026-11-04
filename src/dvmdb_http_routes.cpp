@@ -64,6 +64,7 @@ const char* const routeWorkingCopySave = "/dvmdb/v1/working-copies/:draft/save";
 const char* const routeWorkingCopyInitializeNetwork = "/dvmdb/v1/working-copies/:draft/initialize-network";
 const char* const routeWorkingCopyImportNetwork = "/dvmdb/v1/working-copies/:draft/import-network";
 const char* const routeWorkingCopyEventSave = "/dvmdb/v1/working-copies/:draft/save-events";
+const char* const routeWorkingCopyHistoryNavigate = "/dvmdb/v1/working-copies/:draft/history/navigate";
 const char* const routeWorkingCopyLease = "/dvmdb/v1/working-copies/:draft/lease";
 const char* const routeWorkingCopyRelease = "/dvmdb/v1/working-copies/:draft/release";
 const char* const routeWorkingCopyDiscard = "/dvmdb/v1/working-copies/:draft/discard";
@@ -348,6 +349,11 @@ QJsonObject workingCopyJson(const WorkingCopyInfo& draft, bool includeChanges = 
     };
     result.insert(QStringLiteral("eventCount"),
                   QString::number(static_cast<qulonglong>(draft.journalCount)));
+    // Absent native cursor means the tip; do not confuse this active-journal
+    // coordinate with the separate committed-checkpoint selection marker.
+    result.insert(QStringLiteral("draftActionPosition"),
+                  QString::number(static_cast<qulonglong>(
+                      draft.draftActionPosition.value_or(draft.journalCount))));
     if (includeChanges) {
         result.insert(QStringLiteral("changes"), changes);
         QJsonArray events;
@@ -821,6 +827,7 @@ std::optional<std::size_t> jsonBodyLimit(const httplib::Request& request) {
     if (route == routeProjects || route == routeBranches ||
         route == routeRepositoryRole || route == routeWorkingCopies || route == routeWorkingCopyLease ||
         route == routeWorkingCopyInitializeNetwork ||
+        route == routeWorkingCopyHistoryNavigate ||
         route == routeWorkingCopyRelease || route == routeWorkingCopyDiscard) return maxJsonSmallBytes;
     if (route == routeWorkingCopySave || route == routeWorkingCopyEventSave ||
         route == routeWorkingCopyImportNetwork) return maxJsonModelBytes;
@@ -1500,6 +1507,62 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
         });
     });
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
+    // HDB-03d: read only the persisted active-draft action coordinate. This
+    // reports available adjacent positions, not a promise that the complete
+    // MODEL/nav proof will succeed (e.g. a multi-network draft fails closed).
+    server.Get("/dvmdb/v1/working-copies/:draft/history/cursor",
+               [&service](const httplib::Request& request, httplib::Response& response) {
+        guarded(response, [&]() {
+            const WorkingCopyInfo draft = service.workingCopy(pathParam(request, "draft"), false);
+            const std::uint64_t position = draft.draftActionPosition.value_or(draft.journalCount);
+            return Reply{200, QJsonObject{
+                {"draftId", QString::fromStdString(draft.id)},
+                {"generation", QString::number(static_cast<qulonglong>(draft.generation))},
+                {"baseRevision", optionalRevisionJson(draft.baseRevision)},
+                {"journalCount", QString::number(static_cast<qulonglong>(draft.journalCount))},
+                {"actionPosition", QString::number(static_cast<qulonglong>(position))},
+                {"hasPreviousDraftAction", position > 0},
+                {"hasNextDraftAction", position < draft.journalCount}}};
+        });
+    });
+    // Fenced action-boundary selection for ONE existing hydraulic network.
+    // The client supplies only a logical position, never native record bytes.
+    // The MODEL-aware adapter verifies the entire journal, reconstructs the
+    // complete candidate, and delegates atomic cursor+candidate publication.
+    // Explicit coordinates make an uncertain POST retry stable after a move.
+    server.Post(routeWorkingCopyHistoryNavigate,
+                [&service](const httplib::Request& request, httplib::Response& response) {
+        guarded(response, [&]() {
+            if (const std::optional<Reply> pin = repositoryPinFailure(request, service))
+                return *pin;
+            const QJsonObject body = parseBody(request, maxJsonSmallBytes);
+            requireKeys(body, {"operationId", "sessionId", "fencingToken",
+                               "expectedGeneration", "expectedHead", "actionPosition"});
+            const std::string operationId = requiredString(body, "operationId");
+            requireInput(UuidV7::parse(operationId).has_value(),
+                         "history navigation operationId must be UUIDv7");
+            requireInput(body.contains("expectedHead") &&
+                         (body.value("expectedHead").isNull() ||
+                          body.value("expectedHead").isString()),
+                         "expectedHead must be a revision UUIDv7 or null");
+            const std::optional<RevisionId> expectedHead = body.value("expectedHead").isNull()
+                ? std::nullopt : std::optional<RevisionId>(parseRevisionId(
+                    requiredString(body, "expectedHead")));
+            const std::uint64_t position = strictUint64(body, "actionPosition");
+            requireInput(position <= 4096, "draft actionPosition exceeds journal limit");
+            QString reason;
+            const std::optional<WorkingCopyInfo> result =
+                hydraulic::navigateVerifiedHydraulicDraftAction(service, operationId,
+                    pathParam(request, "draft"), requiredString(body, "sessionId"),
+                    requiredString(body, "fencingToken"), expectedHead,
+                    static_cast<std::size_t>(position),
+                    strictUint64(body, "expectedGeneration"), &reason);
+            if (!result)
+                return errorReply(409, QStringLiteral("history_not_navigable"),
+                    QStringLiteral("Draft action navigation is stale, unsupported or failed MODEL verification"));
+            return Reply{200, workingCopyJson(*result, false)};
+        });
+    });
     // Summarize the SAVED candidate of one specific private draft generation.
     // Unlike the committed branch-tip summary, this includes unpublished edits
     // and also works for unborn branches. This is read-only and needs no lease.

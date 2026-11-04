@@ -33,6 +33,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <map>
 #include <memory>
 #include <netinet/in.h>
 #include <optional>
@@ -2805,12 +2806,161 @@ void exerciseHydraulicDraftMembershipHttp() {
           finalNetwork && finalNetwork->nodes_junctions.size() == 1 &&
           finalNetwork->nodes_junctions.first().uuid == newUuid,
           "deleted pinned-base member was resurrected during draft hydration");
+    // HDB-03d: real HTTP Undo and Redo across two structural MODEL actions.
+    // HEAD remains immutable; each request selects an exact journal position
+    // and never accepts caller-supplied native overlay records.
+    const QString cursorPath = path + "/history/cursor";
+    const QString navigatePath = path + "/history/navigate";
+    const Response atTip = client.call("GET", cursorPath);
+    check(atTip.status == 200 && atTip.json.value("generation") == "2" &&
+          atTip.json.value("journalCount") == "2" &&
+          atTip.json.value("actionPosition") == "2" &&
+          atTip.json.value("hasPreviousDraftAction").toBool() &&
+          !atTip.json.value("hasNextDraftAction").toBool(),
+          "HTTP history cursor did not report initial journal tip");
+    const std::function<QJsonObject(const QString&, const QString&, const QString&)> navBody =
+        [&](const QString& operation, const QString& generation, const QString& position) {
+            return QJsonObject{{"operationId", operation}, {"sessionId", session},
+                {"fencingToken", token}, {"expectedGeneration", generation},
+                {"expectedHead", QString::fromStdString(base.toString())},
+                {"actionPosition", position}};
+        };
+    const QString undoOneId = QString::fromStdString(native::UuidV7::generate().toString());
+    const QJsonObject undoOneBody = navBody(undoOneId, "2", "1");
+    const Response undoneOne = client.call("POST", navigatePath, undoOneBody);
+    const Response atOne = client.call("GET", path + "/networks/" + networkId);
+    const std::optional<NetworkHydraulic> oneNetwork = native::ModelCodec<NetworkHydraulic>::decode(
+        QByteArray::fromBase64(atOne.json.value("payloadBase64").toString().toLatin1()));
+    check(undoneOne.status == 200 && undoneOne.json.value("generation") == "3" &&
+          undoneOne.json.value("draftActionPosition") == "1" &&
+          atOne.status == 200 && oneNetwork && oneNetwork->nodes_junctions.size() == 2 &&
+          oneNetwork->nodes_junctions.first().uuid == oldUuid &&
+          oneNetwork->nodes_junctions.last().uuid == newUuid,
+          "HDB-03d HTTP Undo did not restore the exact intermediate network");
+    check(client.call("POST", navigatePath, undoOneBody).status == 200 &&
+          client.call("GET", cursorPath).json.value("generation") == "3",
+          "HDB-03d HTTP same-operation replay advanced generation twice");
+    check(client.call("POST", navigatePath, navBody(undoOneId, "2", "0")).status == 409,
+          "HDB-03d HTTP accepted operation UUID reuse with different position");
+    check(client.call("POST", navigatePath, navBody(
+              QString::fromStdString(native::UuidV7::generate().toString()), "2", "0")).status == 409,
+          "HDB-03d HTTP accepted stale generation");
+    check(client.call("POST", navigatePath, navBody("invalid-uuid", "3", "0")).status == 400,
+          "HDB-03d HTTP accepted malformed navigation operation ID");
+    check(client.call("POST", navigatePath, navBody(
+              QString::fromStdString(native::UuidV7::generate().toString()), "3", "0")).status == 200,
+          "HDB-03d HTTP Undo to base rejected");
+    const Response atBase = client.call("GET", path + "/networks/" + networkId);
+    const std::optional<NetworkHydraulic> baseAgain = native::ModelCodec<NetworkHydraulic>::decode(
+        QByteArray::fromBase64(atBase.json.value("payloadBase64").toString().toLatin1()));
+    const Response cursorAtBase = client.call("GET", cursorPath);
+    check(atBase.status == 200 && baseAgain && baseAgain->nodes_junctions.size() == 1 &&
+          baseAgain->nodes_junctions.first().uuid == oldUuid &&
+          cursorAtBase.json.value("actionPosition") == "0" &&
+          !cursorAtBase.json.value("hasPreviousDraftAction").toBool() &&
+          cursorAtBase.json.value("hasNextDraftAction").toBool(),
+          "HDB-03d HTTP Undo to the immutable base failed");
+    check(client.call("POST", navigatePath, navBody(
+              QString::fromStdString(native::UuidV7::generate().toString()), "4", "1")).status == 200 &&
+          client.call("POST", navigatePath, navBody(
+              QString::fromStdString(native::UuidV7::generate().toString()), "5", "2")).status == 200,
+          "HDB-03d HTTP Redo rejected a valid original action boundary");
+    const Response restoredView = client.call("GET", path + "/networks/" + networkId);
+    const std::optional<NetworkHydraulic> restoredNetwork = native::ModelCodec<NetworkHydraulic>::decode(
+        QByteArray::fromBase64(restoredView.json.value("payloadBase64").toString().toLatin1()));
+    check(restoredView.status == 200 && restoredNetwork &&
+          restoredNetwork->nodes_junctions.size() == 1 &&
+          restoredNetwork->nodes_junctions.first().uuid == newUuid &&
+          client.call("GET", cursorPath).json.value("actionPosition") == "2" &&
+          service.optionalHead(project.id, "main") == base,
+          "HDB-03d HTTP Redo did not recover terminal network without moving HEAD");
+    check(client.call("POST", navigatePath, navBody(
+              QString::fromStdString(native::UuidV7::generate().toString()), "6", "3")).status == 409,
+          "HDB-03d HTTP accepted navigation past journal tip");
+    // Make a new edit after Undo. The HTTP event Save must replace only the
+    // ineligible redo tail; it must not archive the now-discarded deletion.
+    check(client.call("POST", navigatePath, navBody(
+              QString::fromStdString(native::UuidV7::generate().toString()), "6", "1")).status == 200,
+          "HDB-03d cannot select prefix before branching draft history");
+    HydraulicNodeJunction revised = added;
+    revised.elevation_m = 66;
+    const QByteArray revisedBytes = native::ModelCodec<HydraulicNodeJunction>::encode(revised);
+    const QString newEvent = eventFrame(newUuid, QStringLiteral("hydraulic.junction.update"),
+                                        encoded, revisedBytes);
+    const QJsonObject modified{{"uuid", newId}, {"kind", 1},
+                               {"references", QJsonArray{}},
+                               {"payloadBase64", QString::fromLatin1(revisedBytes.toBase64())}};
+    const Response branched = client.call("POST", path + "/save-events",
+        QJsonObject{{"sessionId", session}, {"fencingToken", token},
+                    {"expectedGeneration", "7"}, {"changes", QJsonArray{modified}},
+                    {"events", QJsonArray{newEvent}}});
+    const Response journalNow = client.call("GET", path);
+    const QJsonArray acceptedEvents = journalNow.json.value("events").toArray();
+    check(branched.status == 200 && branched.json.value("generation") == "8" &&
+          branched.json.value("eventCount") == "2" &&
+          journalNow.json.value("draftActionPosition") == "2" &&
+          acceptedEvents.size() == 2 &&
+          acceptedEvents.at(0).toObject().value("payloadBase64") == firstEvent &&
+          acceptedEvents.at(1).toObject().value("payloadBase64") == newEvent &&
+          !client.call("GET", cursorPath).json.value("hasNextDraftAction").toBool(),
+          "HDB-03d event Save did not invalidate the redo tail through HTTP");
+    const Response branchedView = client.call("GET", path + "/networks/" + networkId);
+    const std::optional<NetworkHydraulic> branchedNetwork = native::ModelCodec<NetworkHydraulic>::decode(
+        QByteArray::fromBase64(branchedView.json.value("payloadBase64").toString().toLatin1()));
+    check(branchedView.status == 200 && branchedNetwork &&
+          branchedNetwork->nodes_junctions.size() == 2 &&
+          branchedNetwork->nodes_junctions.first().uuid == oldUuid &&
+          branchedNetwork->nodes_junctions.last().uuid == newUuid &&
+          branchedNetwork->nodes_junctions.last().elevation_m == 66,
+          "HDB-03d HTTP redo invalidation lost the new edited network state");
     server.stop();
     const native::WorkingCopyInfo persisted = service.workingCopy(
         created.json.value("id").toString().toStdString());
-    check(persisted.generation == 2 && persisted.journal.size() == 2 &&
-          persisted.candidateChanges.size() >= 3,
-          "hydraulic member changes not durable as one candidate and journal");
+    // A valid native overlay need not contain three records: insertion into
+    // an existing membership chunk changes that chunk and the new junction,
+    // while the root manifest can remain byte-identical to committed HEAD.
+    // Check the actual persisted MODEL frames and reconstruct the candidate
+    // from the stored overlay instead of relying on an arbitrary record count.
+    const bool persistedJournalMatches = persisted.journal.size() == 2 &&
+        native::hydraulic::qByteArrayFromBytes(persisted.journal[0].encoded) ==
+            QByteArray::fromBase64(firstEvent.toLatin1()) &&
+        native::hydraulic::qByteArrayFromBytes(persisted.journal[1].encoded) ==
+            QByteArray::fromBase64(newEvent.toLatin1());
+    const native::Key revisedKey = native::hydraulic::keyFromUuid(newUuid);
+    bool persistedJunctionMatches = false;
+    std::map<native::Key, std::optional<native::ModelRecord>> persistedOverlay;
+    for (const native::ModelChange& change : persisted.candidateChanges) {
+        check(persistedOverlay.emplace(change.key, change.record).second,
+              "branched HTTP history persisted duplicate native keys");
+        if (change.key == revisedKey)
+            persistedJunctionMatches = change.record &&
+                change.record->kind == native::hydraulic::junctionKind &&
+                change.record->payload == native::hydraulic::bytesFromQByteArray(revisedBytes);
+    }
+    const std::function<std::optional<native::ModelRecord>(const native::Key&)> readPersisted =
+        [&persistedOverlay, &service, &project, &base](const native::Key& key)
+            -> std::optional<native::ModelRecord> {
+            const std::map<native::Key, std::optional<native::ModelRecord>>::const_iterator found =
+                persistedOverlay.find(key);
+            if (found != persistedOverlay.end()) return found->second;
+            return service.getModelAtRevision(project.id, base, key);
+        };
+    const std::optional<NetworkHydraulic> persistedNetwork =
+        native::hydraulic::loadDraftHydraulicNetwork(readPersisted, networkUuid);
+    check(persisted.generation == 8 && persisted.journalCount == 2 &&
+          !persisted.draftActionPosition,
+          "HDB-03d durable HTTP draft generation, journal count or cursor mismatch");
+    check(persistedJournalMatches,
+          "HDB-03d durable HTTP journal lost or reordered its original MODEL frames");
+    check(persistedJunctionMatches,
+          "HDB-03d durable HTTP overlay lost the revised junction record");
+    check(persistedNetwork && persistedNetwork->nodes_junctions.size() == 2 &&
+          persistedNetwork->nodes_junctions.first().uuid == oldUuid &&
+          persistedNetwork->nodes_junctions.last().uuid == newUuid &&
+          persistedNetwork->nodes_junctions.last().elevation_m == 66,
+          "HDB-03d durable HTTP native overlay does not reconstruct branched hydraulic network");
+    check(service.optionalHead(project.id, "main") == base,
+          "HDB-03d durable HTTP draft history advanced committed HEAD");
 }
 #endif
 

@@ -32,12 +32,16 @@ constructs a complete HEAD-relative candidate. Its native operation publishes
 that candidate and the cursor atomically, retaining all original journal frames
 and the existing lease/generation/HEAD/idempotency protections. It currently
 refuses multi-root and unborn-base drafts rather than guessing ownership.
-Navigation preserves the original journal and future Redo actions. A new
+Navigation preserves the original journal and future Redo actions. The
+server now exposes a draft-scoped HTTP cursor read and fenced, idempotent
+HTTP selection of an explicit verified active-journal position for this
+single-network case. These routes do **not** navigate archived Commit actions
+or activate the GUI History dock. A new
 atomic MODEL event Save from a non-tip position retains the selected prefix
 and replaces the redo tail with the new actions in a crash-safe metadata
 publication. Local Commit still **rejects** positions below the journal tip;
-no unapplied redo frames are silently archived. No HTTP navigation command
-invokes the native adapter yet.
+no unapplied redo frames are silently archived. A limited HTTP command now invokes this adapter; continuous cross-Commit
+navigation remains outstanding.
 
 The archived action operation is **not** a general Undo or Redo command. It accepts only
 fully verified archived hydraulic local Commits and a draft with **no active
@@ -70,10 +74,11 @@ navigation test, with immutable revision and branch-ref checks.
 - Define a single server-owned cursor that can move from the selected
   committed action boundaries into the **current draft event journal**,
   including the unborn first draft.
-- Extend the verified native active-journal adapter beyond a single existing
-  hydraulic root: attribute ambiguous created members in multi-network edits,
-  prove complete native-key coverage and support unborn-base drafts and
-  network import/creation/removal without guessed owners.
+- Support the normal **unborn first draft** and network initialization/import
+  in active history without weakening MODEL/native coverage verification.
+  Multiple hydraulic networks in one revision remain legal in storage, but
+  multi-network *navigation* is explicitly deferred and is not a gate for
+  a usable single-network History dock.
 - Qualify the existing action-boundary selection and publication with the Qt
   hydraulic regression, including all 18 collections, physical membership
   order, root metadata, restart, generation/lease conflicts and canonical
@@ -95,11 +100,11 @@ markers, Undo, Redo, new edit and local Commit; survives GUI/service restart.
 
 ## 3. Expose safe navigation over HTTP
 
-- Add read methods for the selected cursor, available Undo/Redo boundaries,
-  and enough display metadata for Commit markers and draft actions.
-- Add fenced navigation commands with repository/draft identity, session
-  lease, expected generation, expected branch HEAD and an idempotent
-  operation UUID. Never accept caller-supplied unchecked native overlays.
+- **Available for the active single-network journal:** read the persisted
+  cursor and select a verified boundary over HTTP using draft/session/lease,
+  expected generation and branch HEAD, repository pin and UUIDv7 operation ID.
+- Extend those safe HTTP controls to **continuous cross-Commit navigation**
+  and the normal unborn first draft; never accept unchecked native overlays.
 - Ensure identical retry after a lost reply returns the persisted outcome;
   a different request reusing the operation UUID is a conflict. Make stale
   results, absent archives and unsupported merges explicit errors.

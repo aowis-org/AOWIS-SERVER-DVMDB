@@ -90,7 +90,7 @@ client-supplied arbitrary changes:
 | `navigateHistoryCheckpoint` | Atomic, fenced exact-checkpoint candidate+marker publication in a private draft |
 | `navigateVerifiedHydraulicAction` | Atomic, fenced, idempotent candidate+action-coordinate publication; restores the selected archived hydraulic state without moving the committed HEAD |
 | `planVerifiedHydraulicDraftActionNavigation` | Verifies the full retained active MODEL journal against the draft's selected canonical network and constructs a complete HEAD-relative candidate, read-only. Currently requires one existing hydraulic root in the committed base |
-| `navigateVerifiedHydraulicDraftAction` | Calls the MODEL-aware planner and fenced/idempotent native publisher; retains redo frames and survives service restart. Native C++ only |
+| `navigateVerifiedHydraulicDraftAction` | Calls the MODEL-aware planner and fenced/idempotent native publisher; retains redo frames and survives service restart. Also exposed as restricted HTTP active-journal selection |
 | `publishVerifiedDraftActionNavigation` | Atomic storage boundary for a **preverified** live-draft journal position and complete candidate; never accepts unchecked client native overlays |
 
 MODEL actions in a multi-network Commit retain a **single global action
@@ -113,6 +113,22 @@ generation twice. New ordinary Save and local Commit clear the one-shot
 selection marker. A selected state equal to committed HEAD must be a clean
 overlay; the Qt forward-navigation acceptance test still requires a
 confirmed passing run against the current correction.
+
+## HTTP active-journal action selection
+
+For **one existing hydraulic network** in a committed base, the draft-scoped
+`GET /working-copies/{draftId}/history/cursor` reports the saved journal tip
+and selected action boundary. `POST /working-copies/{draftId}/history/navigate`
+accepts only an explicit boundary, UUIDv7 operation ID, session/fencing token,
+expected generation and HEAD. The server rebuilds the complete native overlay
+from the original journal and atomically publishes it with the cursor. It does
+not accept client-generated overlay records. Repeating the exact request is
+idempotent even if the response was lost.
+
+This endpoint does **not** navigate archived Commit actions or support unborn
+and multi-network drafts. Those are separate eligibility boundaries; DVMDB's
+storage capability for multiple networks is unchanged. The GUI History dock
+remains read-only until continuous navigation is integrated.
 
 ## Limits and interpretation
 

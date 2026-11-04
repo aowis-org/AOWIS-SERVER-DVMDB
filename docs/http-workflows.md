@@ -85,12 +85,11 @@ branch's committed HEAD. Network summaries are read-only and do not save.
 `GET /working-copies/{id}` exposes a bounded draft event journal. In addition,
 the **permanent local-Commit MODEL action archive** is available through the
 read-only `/action-history` and `/action-history/{revisionId}/events` routes
-below, including real actions across Commit markers. Native code can persist
-a verified historical action cursor in a private V7 draft, but no HTTP Undo,
-Redo or jump mutation endpoint exists yet. The GUI History dock remains
-read-only until continuous active-draft navigation, HTTP execution and
-recovery semantics are implemented. See [History](commit-action-archive.md)
-and [remaining work](history-roadmap.md).
+below, including real actions across Commit markers. For an **existing single
+hydraulic network in a committed base**, HTTP can now select verified active
+draft action positions. This is not yet continuous Undo/Redo across Commit
+markers, and the GUI History dock remains read-only. See
+[History](commit-action-archive.md) and [remaining work](history-roadmap.md).
 
 ## Local Commit and message annotations
 
@@ -158,7 +157,35 @@ have null metadata rather than fabricated operation names. Revisions not on
 the selected branch's first-parent ancestry are rejected. Both endpoints are **read-only** and do not move HEAD or
 provide Undo/Redo.
 
-Both responses are read-only: there is **no HTTP** state navigation,
-Undo or Redo endpoint yet. Restricted native C++ checkpoint and action-boundary
-selection exists and is not an HTTP contract. See [committed action archive](commit-action-archive.md) for
-current limits and the [History roadmap](history-roadmap.md) for future work.
+The two branch-history responses are read-only. The separate draft-scoped
+`POST /working-copies/{draftId}/history/navigate` mutates **only a verified
+active draft journal boundary**, not archived Commit history. See
+[committed action archive](commit-action-archive.md) for current limits and
+the [History roadmap](history-roadmap.md) for future work.
+
+## Single-network draft Undo/Redo over HTTP
+
+Read `GET /working-copies/{draftId}/history/cursor` for `generation`,
+`baseRevision`, `journalCount` and `actionPosition` (decimal strings). If the
+cursor is greater than zero, the adjacent Undo target is `actionPosition - 1`;
+if below `journalCount`, the adjacent Redo target is `actionPosition + 1`.
+The booleans report **adjacent positions**, not verified eligibility; the
+server may reject unsupported/unprovable drafts. A GUI must not advance its
+cursor optimistically.
+
+Submit `POST /working-copies/{draftId}/history/navigate` with the same draft's
+`sessionId`, current `fencingToken`, `expectedGeneration`, `expectedHead`
+(revision UUIDv7 or null), a fresh `operationId` UUIDv7 and the explicit
+decimal-string `actionPosition`. Pin the selected repository using
+`X-AOWIS-Expected-Repository-Id`. No native model bytes are accepted from the
+client. On success, **reload the canonical draft network** and cursor; the
+branch HEAD and permanent Commit archive stay unchanged. If the reply is lost,
+retry the **identical** operation ID, generation and target rather than
+computing another relative Undo. HTTP 409 means no verified publication;
+refresh the cursor and resolve any uncertain previous request first.
+
+This first executable HTTP slice supports one existing hydraulic network in a
+committed base. It intentionally refuses unborn/multi-network drafts, mixed
+native-only edits and archived action navigation. DVMDB retains the ability to
+store multiple networks; multi-network History is not a prerequisite for the
+single-network GUI workflow.

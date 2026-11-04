@@ -42,8 +42,9 @@ are listed only in the [History roadmap](history-roadmap.md).
 | Verify an entire revision | `verifiedRevisionNativeActionWitness` plus `verifyHydraulicRevisionActionCoverage` account for every changed native record across affected networks |
 | Plan archived action boundary | `planVerifiedHydraulicActionNavigation` builds an exact, **HEAD-relative replacement** candidate without mutation |
 | Select archived action boundary | `navigateVerifiedHydraulicAction` atomically publishes verified replacement state and V7 cursor metadata under lease, HEAD and generation fences, idempotent by navigation operation UUID |
-| Navigate an existing network's active draft actions | `planVerifiedHydraulicDraftActionNavigation` verifies all retained MODEL frames against the persisted selected network state; `navigateVerifiedHydraulicDraftAction` publishes the rebuilt HEAD-relative candidate and cursor through the fenced/idempotent native writer. **Currently limited to one existing hydraulic network per committed base snapshot; not exposed through HTTP** |
-| HTTP Undo / GUI Undo/Redo | **Not implemented** |
+| Navigate an existing network's active draft actions | `planVerifiedHydraulicDraftActionNavigation` verifies all retained MODEL frames against the persisted selected network state; `navigateVerifiedHydraulicDraftAction` publishes the rebuilt HEAD-relative candidate and cursor through the fenced/idempotent native writer. **Currently limited to one existing hydraulic network per committed base snapshot** |
+| HTTP active-draft action navigation | `GET /working-copies/{draftId}/history/cursor` reports authoritative journal position; fenced `POST /working-copies/{draftId}/history/navigate` selects an explicit verified active action boundary with an idempotent UUIDv7. No caller-created overlay accepted |
+| Continuous cross-Commit Undo/Redo and GUI navigation | **Not implemented** |
 
 The **archived** action-selection API is restricted to an indexed, complete, first-parent
 local hydraulic Commit and a draft with **no active MODEL journal**. Network
@@ -87,8 +88,9 @@ frames and a durable cursor. On a **new atomic MODEL event Save** below the
 journal tip, the server preserves only the applied prefix and appends the
 new actions, making the former redo tail ineligible without changing any
 immutable Commit. This Save/cursor transition is atomic and crash-safe;
-Commit still rejects an unapplied redo tail. Multi-network drafts,
-unborn-base drafts and HTTP/GUI navigation are not supported by this slice.
+Commit still rejects an unapplied redo tail. Multi-network and unborn-base drafts remain outside this **single-network**
+active-journal slice. HTTP selection exists for eligible existing-network
+drafts, but GUI navigation and crossing Commit markers are not supported yet.
 
 The GUI History dock may show committed action metadata, draft actions and
 checkpoints already, but it must not advertise operational Undo/Redo until

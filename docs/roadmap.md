@@ -45,15 +45,16 @@ paged native/HTTP read-only action history, native full-revision coverage
 verification, checkpoint planning/selection and native atomic selection of a
 verified archived hydraulic action boundary with a V7 draft cursor,
 plus a MODEL-verified active-journal navigator for one existing network.
-An atomic event Save after Undo now invalidates the redo tail safely and
-persists the applied prefix plus new actions. HTTP navigation is not yet
-available.
+An atomic event Save after Undo invalidates the redo tail safely. The HTTP
+server now exposes fenced selection of a verified **active single-network**
+draft action boundary, plus the authoritative cursor read. This is not yet
+continuous cross-Commit Undo/Redo and the GUI dock remains read-only.
 
 **Remaining:** confirm the corrected Qt hydraulic navigation regression;
-extend active-draft verification to multi-network and unborn-base cases,
-connect continuous cross-Commit cursor and navigation-event provenance,
-qualify redo invalidation through HTTP, add recoverable mutation endpoints,
-then wire the GUI History dock. Imported/merge/checkpoint-only revisions
+support navigation of the normal unborn-base draft, connect continuous
+cross-Commit cursor and navigation-event provenance, qualify redo invalidation
+through HTTP and wire the GUI History dock. Multi-network navigation can be
+deferred without restricting what DVMDB stores. Imported/merge/checkpoint-only revisions
 must stay honest; do not synthesize edits from snapshot differences. See the
 [dedicated History roadmap](history-roadmap.md) for exact acceptance gates.
 

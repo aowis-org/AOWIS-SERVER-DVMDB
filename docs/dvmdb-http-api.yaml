@@ -186,10 +186,71 @@ paths:
       - {name: draftId, in: path, required: true, schema: {type: string, format: uuid}}
     get:
       operationId: getWorkingCopy
-      description: Return the draft's pinned base, generation, lease holder and expiry, candidate overlay (`changes`) and MODEL event journal (`events`, `eventCount`); never the fencing token.
+      description: Return the draft's pinned base, generation, lease holder and expiry, candidate overlay (`changes`), MODEL event journal (`events`, `eventCount`) and selected active `draftActionPosition` (decimal string; defaults to tip); never the fencing token.
       responses:
         '200': {description: Working-copy metadata, full candidate overlay and event journal}
         '404': {$ref: '#/components/responses/NotFound'}
+  /working-copies/{draftId}/history/cursor:
+    parameters:
+      - {name: draftId, in: path, required: true, schema: {type: string, format: uuid}}
+    get:
+      operationId: getWorkingCopyHistoryCursor
+      description: |
+        Read the persisted position within the active MODEL journal (0..journalCount)
+        and exact draft generation/base HEAD. Adjacent positions are reported
+        as available, not guaranteed navigable until the MODEL replay proof
+        succeeds. This is NOT a continuous cross-Commit cursor.
+      responses:
+        '200':
+          description: Authoritative active journal coordinate; all counters are decimal strings.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [draftId, generation, baseRevision, journalCount, actionPosition, hasPreviousDraftAction, hasNextDraftAction]
+                properties:
+                  draftId: {type: string, format: uuid}
+                  generation: {type: string, pattern: '^[0-9]{1,20}$'}
+                  baseRevision: {type: [string, 'null'], format: uuid}
+                  journalCount: {type: string, pattern: '^[0-9]{1,20}$'}
+                  actionPosition: {type: string, pattern: '^[0-9]{1,20}$'}
+                  hasPreviousDraftAction: {type: boolean}
+                  hasNextDraftAction: {type: boolean}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /working-copies/{draftId}/history/navigate:
+    parameters:
+      - {name: draftId, in: path, required: true, schema: {type: string, format: uuid}}
+    post:
+      operationId: navigateVerifiedWorkingCopyDraftAction
+      description: |
+        Navigate to an explicit active MODEL journal boundary, using only
+        server-verified hydraulic replay and complete native overlay reconstruction.
+        This first HTTP slice supports one EXISTING NetworkHydraulic in the
+        committed base; unborn/multi-network and cross-Commit navigation are
+        not supported. The complete candidate and cursor are atomically saved
+        without moving immutable HEAD. Retrying the identical operation UUIDv7
+        and original request after an uncertain response is idempotent.
+        Include X-AOWIS-Expected-Repository-Id to pin repository identity.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [operationId, sessionId, fencingToken, expectedGeneration, expectedHead, actionPosition]
+              properties:
+                operationId: {type: string, format: uuid, description: New UUIDv7 for this exact selection; reuse ONLY for identical retries}
+                sessionId: {type: string, format: uuid}
+                fencingToken: {type: string, format: uuid}
+                expectedGeneration: {type: string, pattern: '^[0-9]{1,20}$'}
+                expectedHead: {type: [string, 'null'], format: uuid}
+                actionPosition: {type: string, pattern: '^[0-9]{1,20}$', description: Explicit action boundary, zero to journalCount}
+      responses:
+        '200': {description: Durable updated working copy with generation and draftActionPosition decimal strings; reload canonical network from the saved draft}
+        '400': {description: Malformed operation UUID, field type, action position or expected HEAD}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {description: Stale generation/HEAD/lease, conflicting retry, unsupported model shape or incomplete MODEL action proof; no mutation}
   /working-copies/{draftId}/networks/summary:
     parameters:
       - {name: draftId, in: path, required: true, schema: {type: string, format: uuid}}
