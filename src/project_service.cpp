@@ -2668,6 +2668,115 @@ RevisionActionPage ProjectService::revisionActionPage(
     return page;
 }
 
+RevisionNativeActionWitness ProjectService::verifiedRevisionNativeActionWitness(
+        std::string_view projectId, std::string_view branch,
+        const RevisionId& revision) {
+    const std::optional<ProjectId> project = ProjectId::parse(projectId);
+    if (!project || !validBranchName(branch))
+        throw ProjectError(ProjectErrorKind::InvalidInput,
+                           "invalid project or branch for revision history witness");
+    // The first-parent reachability check must happen before disclosing
+    // archived actions for this revision. Do not use a global ledger scan.
+    (void)history(projectId, branch, 1, revision);
+    std::optional<PersistedLocalCommit> indexed = indexedLocalCommit(
+        this->root_, this->repository_id_, projectId, revision);
+    if (!indexed)
+        throw ProjectError(ProjectErrorKind::Conflict,
+                           "checkpoint has no indexed local action archive");
+    if (indexed->info.state == LocalCommitState::Pending) {
+        const LocalCommitInfo reconciled = localCommitStatus(indexed->info.id);
+        if (reconciled.state != LocalCommitState::Succeeded)
+            throw ProjectError(ProjectErrorKind::Conflict,
+                               "indexed local Commit has not completed");
+        indexed = indexedLocalCommit(this->root_, this->repository_id_,
+                                    projectId, revision);
+    }
+    check(indexed && indexed->info.state == LocalCommitState::Succeeded &&
+          indexed->info.projectId == projectId &&
+          indexed->info.reservedRevisionId == revision.toString(),
+          "published revision does not match its archived local Commit");
+    const PersistedLocalCommit commit = *indexed;
+    const RevisionGraphRevision immutable = this->revision(projectId, revision);
+    check(immutable.modelIndexed && immutable.parents.size() <= 1 &&
+          (immutable.parents.empty() == !commit.info.expectedHead) &&
+          (immutable.parents.empty() ||
+           immutable.parents.front().id == *commit.info.expectedHead),
+          "archived Commit parent does not match published first-parent revision");
+    RevisionNativeActionWitness result;
+    result.revisionId = revision.toString();
+    result.commitOperationId = commit.info.id;
+    result.parentRevision = commit.info.expectedHead;
+    result.actions = commit.actions;
+
+    withRepository(projectId, [&](Repository& repository) {
+        // Only a complete native delta is evidence: unlike the candidate
+        // overlay, a revision's diff excludes no-op records and includes
+        // server-generated chunks and network root records.
+        constexpr std::size_t maxWitnessKeys = 65536;
+        std::map<Key, std::optional<ModelRecord>> claimed;
+        for (const ModelChange& change : commit.changes)
+            check(claimed.emplace(change.key, change.record).second &&
+                  claimed.size() <= maxWitnessKeys,
+                  "duplicate or excessive native keys in archived Commit");
+        std::set<Key> actualKeys;
+        if (commit.info.expectedHead) {
+            const std::vector<Difference> differences =
+                translated<std::vector<Difference>>([&]() {
+                    return repository.diffRevisions(*project, *commit.info.expectedHead,
+                                                    revision, maxWitnessKeys);
+                });
+            for (const Difference& difference : differences)
+                actualKeys.insert(difference.key);
+        } else {
+            const std::vector<std::pair<Key, Bytes>> records =
+                translated<std::vector<std::pair<Key, Bytes>>>([&]() {
+                    return repository.scanAtRevision(*project, revision);
+                });
+            check(records.size() <= maxWitnessKeys,
+                  "initial archived native revision exceeds witness bound");
+            for (const std::pair<Key, Bytes>& record : records)
+                actualKeys.insert(record.first);
+        }
+        check(actualKeys.size() <= maxWitnessKeys,
+              "native revision history delta exceeds witness bound");
+        for (const Key& key : actualKeys) {
+            const std::map<Key, std::optional<ModelRecord>>::const_iterator expected =
+                claimed.find(key);
+            check(expected != claimed.end(),
+                  "archived Commit omits an actual native revision delta key");
+            const std::optional<ModelRecord> published =
+                translated<std::optional<ModelRecord>>([&]() {
+                    return repository.getModelAtRevision(*project, revision, key);
+                });
+            const std::function<bool(const std::optional<ModelRecord>&,
+                                     const std::optional<ModelRecord>&)> same =
+                [](const std::optional<ModelRecord>& first,
+                   const std::optional<ModelRecord>& second) -> bool {
+                    if (first.has_value() != second.has_value()) return false;
+                    return !first || encodeModelRecord(*first) == encodeModelRecord(*second);
+                };
+            check(same(published, expected->second),
+                  "published native revision bytes disagree with archived Commit candidate");
+            result.actualNativeChanges.push_back(ModelChange{key, published});
+        }
+        // No-op candidate keys are legal, but they must really equal their
+        // immutable baseline. A removed candidate that was never present is
+        // not a hidden delta. This also detects forged/superfluous writes.
+        for (const std::pair<const Key, std::optional<ModelRecord>>& candidate : claimed) {
+            if (actualKeys.contains(candidate.first)) continue;
+            const std::optional<ModelRecord> published =
+                translated<std::optional<ModelRecord>>([&]() {
+                    return repository.getModelAtRevision(*project, revision, candidate.first);
+                });
+            check(published.has_value() == candidate.second.has_value() &&
+                  (!published || encodeModelRecord(*published) ==
+                                 encodeModelRecord(*candidate.second)),
+                  "archived no-op candidate does not match immutable revision");
+        }
+    });
+    return result;
+}
+
 BranchActionHistoryPage ProjectService::branchActionHistory(
         std::string_view projectId, std::string_view branch, std::size_t limit,
         std::optional<RevisionId> after,

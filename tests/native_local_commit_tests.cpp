@@ -309,6 +309,130 @@ void testAtomicHistoryCheckpointNavigation() {
     }
 }
 
+// HIST-03c3a: compare the durable local Commit's candidate with the *whole*
+// immutable native revision delta. MODEL events are carried alongside that
+// independently verified witness, but do not become a proof of logical
+// action coverage until the MODEL-aware verifier has checked them all.
+void testVerifiedRevisionNativeWitness() {
+    TempRoot root;
+    const std::string session = UuidV7::generate().toString();
+    std::string projectId;
+    std::string firstId;
+    std::string secondId;
+    const ModelChange one = changeWithValue(11);
+    ModelChange two = changeWithValue(22);
+    two.key[15] = 8;
+    ModelChange three = changeWithValue(33);
+    three.key[15] = 9;
+    const aowis::dvmdb::Bytes eventOne = aowis::dvmdb::test::editEvent(
+        UuidV7::generate(), one.key, {}, {11});
+    const aowis::dvmdb::Bytes eventTwo = aowis::dvmdb::test::editEvent(
+        UuidV7::generate(), two.key, {}, {22});
+    {
+        ProjectService service(root.path);
+        projectId = service.createUnbornProject("HIST-03c3 native revision witness").id;
+        service.configureRepositoryRole(RepositoryRole::Private);
+        const std::string draft =
+            service.createWorkingCopy(projectId, "main", std::nullopt, session).id;
+        const std::string token = service.acquireWorkingCopyLease(draft, session, 120).token;
+        require(service.saveWorkingCopyTransactions(draft, session, token, 0,
+                    {one}, {eventOne}).generation == 1 &&
+                service.saveWorkingCopyTransactions(draft, session, token, 1,
+                    {two}, {eventTwo}).generation == 2,
+                "HIST-03c3 first candidate Save failed");
+        const LocalCommitInfo committed = service.commitWorkingCopy(
+            UuidV7::generate().toString(), draft, session, token, 2,
+            std::nullopt, commitMetadata());
+        require(committed.state == LocalCommitState::Succeeded,
+                "HIST-03c3 first local Commit failed");
+        firstId = committed.reservedRevisionId;
+        const aowis::dvmdb::RevisionNativeActionWitness initial =
+            service.verifiedRevisionNativeActionWitness(
+                projectId, "main", *RevisionId::parse(firstId));
+        require(initial.revisionId == firstId &&
+                initial.commitOperationId == committed.id &&
+                !initial.parentRevision && initial.actions.size() == 2 &&
+                initial.actions[0].encoded == eventOne &&
+                initial.actions[1].encoded == eventTwo &&
+                initial.actualNativeChanges.size() == 2 &&
+                initial.actualNativeChanges[0].key == one.key &&
+                initial.actualNativeChanges[1].key == two.key &&
+                initial.actualNativeChanges[0].record &&
+                initial.actualNativeChanges[0].record->payload == one.record->payload &&
+                initial.actualNativeChanges[1].record &&
+                initial.actualNativeChanges[1].record->payload == two.record->payload,
+                "HIST-03c3 initial immutable delta differs from archived candidate");
+        const std::string newer = service.createWorkingCopy(
+            projectId, "main", *RevisionId::parse(firstId), session).id;
+        const std::string newerToken =
+            service.acquireWorkingCopyLease(newer, session, 120).token;
+        ModelChange modified = changeWithValue(44);
+        const aowis::dvmdb::Bytes update = aowis::dvmdb::test::editEvent(
+            UuidV7::generate(), modified.key, {11}, {44});
+        ModelChange deleted;
+        deleted.key = two.key;
+        // Native-only Save validates frame integrity, but not MODEL entity
+        // images. Deliberately include two unjournaled native changes: this
+        // must remain visible to the higher-level action coverage validator.
+        require(service.saveWorkingCopyTransactions(newer, session, newerToken, 0,
+                    {modified, deleted, three}, {update}).generation == 1,
+                "HIST-03c3 mixed native candidate Save failed");
+        const LocalCommitInfo changed = service.commitWorkingCopy(
+            UuidV7::generate().toString(), newer, session, newerToken, 1,
+            *RevisionId::parse(firstId), commitMetadata());
+        require(changed.state == LocalCommitState::Succeeded,
+                "HIST-03c3 second local Commit failed");
+        secondId = changed.reservedRevisionId;
+        const aowis::dvmdb::RevisionNativeActionWitness delta =
+            service.verifiedRevisionNativeActionWitness(
+                projectId, "main", *RevisionId::parse(secondId));
+        require(delta.parentRevision == RevisionId::parse(firstId) &&
+                delta.actions.size() == 1 && delta.actions[0].encoded == update &&
+                delta.actualNativeChanges.size() == 3 &&
+                delta.actualNativeChanges[0].key == one.key &&
+                delta.actualNativeChanges[0].record &&
+                delta.actualNativeChanges[0].record->payload == modified.record->payload &&
+                delta.actualNativeChanges[1].key == two.key &&
+                !delta.actualNativeChanges[1].record &&
+                delta.actualNativeChanges[2].key == three.key &&
+                delta.actualNativeChanges[2].record &&
+                delta.actualNativeChanges[2].record->payload == three.record->payload,
+                "HIST-03c3 missed native deletion or changes-only addition");
+        // The witness deliberately does NOT mark the second archive complete:
+        // one MODEL action cannot explain all three changed native keys.
+        (void)service.createBranchAtRevision(
+            projectId, "witness-feature", "main", *RevisionId::parse(firstId));
+        bool branchRejected = false;
+        try { (void)service.verifiedRevisionNativeActionWitness(
+            projectId, "witness-feature", *RevisionId::parse(secondId)); }
+        catch (const ProjectError& error) {
+            branchRejected = error.kind() == ProjectErrorKind::InvalidInput;
+        }
+        require(branchRejected, "HIST-03c3 leaked a revision outside first-parent ancestry");
+    }
+    {
+        ProjectService reopened(root.path);
+        const aowis::dvmdb::RevisionNativeActionWitness recovered =
+            reopened.verifiedRevisionNativeActionWitness(
+                projectId, "main", *RevisionId::parse(secondId));
+        require(recovered.parentRevision == RevisionId::parse(firstId) &&
+                recovered.actualNativeChanges.size() == 3 &&
+                recovered.actions.size() == 1,
+                "HIST-03c3 native delta witness did not survive restart");
+        const RevisionId generic = reopened.commitModelAtExpectedHead(
+            projectId, "main", {changeWithValue(55)}, commitMetadata(),
+            *RevisionId::parse(secondId));
+        bool checkpointRejected = false;
+        try { (void)reopened.verifiedRevisionNativeActionWitness(
+            projectId, "main", generic); }
+        catch (const ProjectError& error) {
+            checkpointRejected = error.kind() == ProjectErrorKind::Conflict;
+        }
+        require(checkpointRejected,
+                "HIST-03c3 fabricated archived actions for generic Commit checkpoint");
+    }
+}
+
 void testCommittedActionHistory() {
     TempRoot root;
     const std::string session = UuidV7::generate().toString();
@@ -1459,6 +1583,7 @@ int main() {
         testHistoryCheckpointPlan();
         testAtomicHistoryCheckpointNavigation();
         testCommittedActionHistory();
+        testVerifiedRevisionNativeWitness();
         testBranchDraftHistoryPaging();
         testLocalCommitRecovery();
         testConcurrentFirstCommitIsSerialized();

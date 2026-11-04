@@ -162,6 +162,21 @@ struct RevisionActionPage {
     std::optional<std::size_t> nextOffset;
 };
 
+// HIST-03c3a: an immutable, *native-record-exact* witness for one archived
+// local Commit. These are all actual changed ModelRecords between the
+// first-parent snapshot and the published revision, not just keys mentioned
+// in the Commit request. `actions` are the original, authenticated MODEL
+// frames in oldest-first order. This witness does NOT assert that those
+// frames fully explain the native delta: MODEL-aware multi-network
+// verification must check that separately before enabling navigation.
+struct RevisionNativeActionWitness {
+    std::string revisionId;
+    std::string commitOperationId;
+    std::optional<RevisionId> parentRevision;
+    std::vector<ModelChange> actualNativeChanges;
+    std::vector<WorkingCopyEvent> actions;
+};
+
 struct BranchActionHistoryPage {
     std::vector<BranchActionHistoryEntry> commits;
     std::optional<RevisionId> next;
@@ -440,6 +455,14 @@ public:
         std::string_view projectId, std::string_view branch,
         const RevisionId& revision, std::size_t offset = 0,
         std::size_t limit = 100);
+    // HIST-03c3a: validate an indexed Commit against the ACTUAL complete
+    // native first-parent revision delta. Fail closed if the persisted Commit
+    // candidate and published record bytes disagree, even for an unchanged
+    // or deleted key. Checkpoint-only, merged and foreign revisions are not
+    // proof of a complete MODEL action archive. This is read-only and bounded.
+    RevisionNativeActionWitness verifiedRevisionNativeActionWitness(
+        std::string_view projectId, std::string_view branch,
+        const RevisionId& revision);
     // Read-only checkpoint reconstruction for upcoming cross-Commit Undo/Redo.
     // The result is a replacement overlay relative to the draft's actual
     // immutable HEAD, never a sequence of guessed edits. Only an ancestor on

@@ -7,12 +7,16 @@ HTTP. The rules are in the [version-control contract](version-control-semantics.
 
 The native revision DAG and first-parent history expose **immutable
 checkpoints**, including messages, authors, times and parent relationships.
-They do **not** store a permanent ordered edit-action trail between revisions.
-Working copies have a bounded event journal that is **cleared on successful
-local Commit**. Neither source supports a durable user-facing history cursor,
-Undo/Redo across Commit markers, or arbitrary jump-to-edit today. The proposed
-separate archive and cross-Commit history API are specified in the
-[History roadmap](history-roadmap.md). No existing revision may be rewritten
+Generic/native and imported revisions have no automatically inferred
+action trail. **Local Commits do preserve their original MODEL events** in a
+separate immutable, revision-indexed archive. Working copies have a bounded
+event journal that is **cleared on successful local Commit**, but the archived
+frames remain available through paginated first-parent history reads.
+Neither the archive nor the native revision DAG currently provides a complete
+user-facing undo/redo cursor or arbitrary jump-to-edit. A native revision
+delta witness can compare an archived local Commit with its exact published
+record changes; it does **not** by itself prove MODEL action completeness.
+See the [History roadmap](history-roadmap.md). No revision may be rewritten
 or HEAD ref silently rewound as a substitute.
 
 

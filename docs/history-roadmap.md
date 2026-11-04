@@ -156,6 +156,23 @@ all changed networks and non-network records, and atomically persist the
 result/cursor under lease, generation and HEAD fences. The history dock
 remains read-only.
 
+**HIST-03c3a immutable native-delta witness (implemented, native tests pass):**
+`ProjectService::verifiedRevisionNativeActionWitness(project, branch, revision)`
+now links an indexed local Commit's exact original MODEL frames with an
+independently verified **complete native first-parent revision delta**. It
+compares every changed model key and complete encoded `ModelRecord` against
+both the immutable revision and the persisted Commit candidate. It also
+checks the original first parent, supports unborn initial commits, detects
+omitted/deleted and unexpected native records, rejects foreign checkpoints,
+and survives repository restart. This is read-only and introduces no disk or
+REST format change. The native test intentionally archives one action alongside
+three changed records to demonstrate why **archive authenticity does not prove
+that each changed record has a matching MODEL action**. The next step must
+perform that MODEL-aware attribution for every affected network, including
+server-generated root and chunk records, and explicitly reject unrelated
+native changes. Do not publish an intermediate snapshot or enable Undo/Redo
+based on the native witness alone.
+
 ### HDB-03 — Durable Undo/Redo operation and concurrency
 
 Generate new canonical inverse or forward events with fresh operation IDs,

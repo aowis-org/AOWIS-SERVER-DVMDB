@@ -71,6 +71,26 @@ or an old local Commit without retained actions is represented as a genuine
 editing actions. Forked branches inherit first-parent Commit checkpoints
 without duplicating archived actions.
 
+## Verified native revision delta witness
+
+`ProjectService::verifiedRevisionNativeActionWitness(projectId, branch,
+revision)` associates one indexed local Commit with the **actual complete
+first-parent native revision delta**. The read returns the parent revision,
+original archived MODEL frames and every changed typed record, including
+deletions. It verifies that the persisted candidate matches the published
+record bytes exactly and that the immutable first-parent identity matches the
+original Commit intent. An unborn first Commit is compared with an empty
+initial model; a generic, foreign or unindexed revision is rejected rather
+than inventing actions. A bounded native change list (65,536 keys) protects
+this read; failures return no partial witness.
+
+**This is not action-level coverage verification.** Native DVMDB cannot
+interpret hydraulic MODEL frame images without the MODEL codec. A valid
+archived action can coexist with unrelated changes-only Saves in the same
+local Commit. The hydraulic verifier must account for *all* native keys and
+reconstruct the exact network(s) before using any intermediate action state
+for navigation. No cursor or working-copy data is altered by this read.
+
 ## History checkpoint reconstruction
 
 The native `planHistoryCheckpoint` method can now preview the exact
