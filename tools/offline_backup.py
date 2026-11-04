@@ -149,7 +149,7 @@ def tracking_metadata(root):
 
 
 def working_copy_records(root):
-    """Verify every published private draft (AOWIS-WORKING-COPY-7).
+    """Verify every published private draft (AOWIS-WORKING-COPY-8).
 
     Returns {draft id: (meta, candidate bytes, acknowledged journal prefix)}
     so a copy can be compared with its source. Unreferenced files that a
@@ -220,7 +220,7 @@ def working_copy_records(root):
         require("meta" in names and meta_path.stat().st_size <= 4096,
                 f"missing or oversized draft meta: {meta_path}")
         meta = meta_path.read_bytes()
-        require(meta.startswith(b"AOWIS-WORKING-COPY-7\n") and meta.endswith(b"\n"),
+        require(meta.startswith(b"AOWIS-WORKING-COPY-8\n") and meta.endswith(b"\n"),
                 f"invalid working-copy record format: {meta_path}")
         lines = meta.decode("ascii", errors="replace").split("\n")[1:-1]
         fields = ["project", "branch", "base", "session", "generation", "dirty", "validation",
@@ -253,9 +253,10 @@ def working_copy_records(root):
                 f"invalid last-save hash: {meta_path}")
         revision, operation, source, position, archive, draft_position = values[13:19]
         checkpoint = (uuid(revision) and uuid(operation) and source != "-" and
-                      decimal(source) + 1 == generation and events == 0 and last == "-" and
-                      draft_position == "-" and
-                      ((position == "-" and archive == "-") or
+                      decimal(source) + 1 == generation and
+                      ((events == 0 and last == "-" and draft_position == "-") or
+                       (events > 0 and digest(last) and draft_position == "0")) and
+                      ((position == "-" and archive == "-" and events == 0) or
                        (position != "-" and decimal(position) <= 4096 and uuid(archive))))
         active = (revision == "-" and position == "-" and archive == "-" and
                   uuid(operation) and source != "-" and

@@ -6,10 +6,11 @@ private draft and, following a successful **local Commit**, preserves those
 same frames in a durable archive. The active draft journal is cleared when
 the draft rebases; archived actions are not.
 
-The backend provides read-only HTTP timelines and **restricted native C++
-action-boundary navigation** for archived Commits and the retained active
-journal of one existing hydraulic network. It does **not yet** support
-continuous Undo/Redo across Commit boundaries or an HTTP navigation command. See the
+The backend provides read-only HTTP timelines and fenced HTTP/native
+selection of archived Commit boundaries and retained active journal actions
+for one existing hydraulic network. V8 also supports safe position-zero
+handoff across Commit boundaries while preserving the original Redo journal.
+The GUI is not yet connected and Qt cross-mode acceptance remains pending. See the
 [History contract](history-contract.md) and [remaining History roadmap](history-roadmap.md).
 
 ## Permanent local-Commit archive
@@ -107,7 +108,7 @@ For action-boundary navigation the service verifies the draft's private
 role, leased session/fencing token, generation and current committed HEAD;
 checks the revision's indexed archive/operation and action coordinate
 under locks; then replaces the **whole** candidate overlay and publishes
-the V7 cursor in the same durable metadata update. Repeating the identical
+the V8 cursor in the same durable metadata update. Repeating the identical
 operation UUID/parameters, including after restart, does not increment
 generation twice. New ordinary Save and local Commit clear the one-shot
 selection marker. A selected state equal to committed HEAD must be a clean
@@ -126,11 +127,11 @@ not accept client-generated overlay records. Repeating the exact request is
 idempotent even if the response was lost.
 
 With an archived `revisionId`, the same POST endpoint selects verified
-immutable Commit action boundaries when the draft has no live journal.
+immutable Commit action boundaries when the live journal is empty or is suspended at its verified zero position.
 The cursor GET now resolves `previousAction` and `nextAction` coordinates,
-including across adjacent archived Commits. It does not yet hand off from a
-retained live journal to archived history, or support unborn/multi-network
-draft navigation; DVMDB's multi-network storage capability is unchanged. The GUI History dock
+including across adjacent archived Commits. At a verified live position zero it can enter archived history without
+erasing the Redo journal, and the cursor supplies the return step. It does
+not support unborn/multi-network active draft navigation; DVMDB's multi-network storage capability is unchanged. The GUI History dock
 remains read-only until continuous navigation is integrated.
 
 ## Limits and interpretation
@@ -157,13 +158,12 @@ remains read-only until continuous navigation is integrated.
   and journal metadata together. Commit still refuses a non-tip cursor.
 - The native adapter is **not** complete user-facing History: multi-network
   or unborn-base draft replay, durable navigation-event provenance,
-  continuous cross-Commit movement and GUI wiring remain outstanding. The
+  GUI wiring and HTTP end-to-end handoff acceptance remain outstanding. The
   existing HTTP History navigation route now also accepts an explicit archived
   revision ID to select a verified committed action boundary when no active
-  MODEL journal is present. This is not yet automatic Undo/Redo across a Commit
-  marker. The HTTP Save path needs end-to-end Undo → new Save qualification
+  MODEL journal is present. The server now resolves eligible adjacent actions across a Commit marker. The HTTP Save path needs end-to-end Undo → new Save qualification
   before the feature is considered GUI-ready.
 
-See [working-copy storage](storage-formats.md#private-drafts-aowis-working-copy-7)
+See [working-copy storage](storage-formats.md#private-drafts-aowis-working-copy-8)
 for the persisted cursor fields and [working copies](working-copies.md) for
 the ordinary Save/Commit contract.

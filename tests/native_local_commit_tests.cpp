@@ -1921,12 +1921,118 @@ void testCommitRecordsAuthorMessageAndReservedTime() {
             "replay did not return the recorded outcome");
 }
 
+// HDB-03g: archived browsing must not discard an unfinished active journal.
+// The V8 cursor combines a verified archived coordinate with a suspended
+// position-zero draft journal; returning to draft history restores Redo.
+void testCrossCommitSuspendedDraftHandoff() {
+    TempRoot root;
+    const std::string session = UuidV7::generate().toString();
+    const ModelChange initial = changeWithValue(10);
+    const ModelChange committedValue = changeWithValue(20);
+    const ModelChange liveValue = changeWithValue(30);
+    std::string projectId;
+    std::string draftId;
+    std::string token;
+    std::string archiveId;
+    std::string archiveNavigation;
+    std::optional<RevisionId> committedHead;
+    const aowis::dvmdb::Bytes firstFrame = aowis::dvmdb::test::editEvent(
+        UuidV7::generate(), initial.key, {10}, {20});
+    const aowis::dvmdb::Bytes liveFrame = aowis::dvmdb::test::editEvent(
+        UuidV7::generate(), initial.key, {20}, {30});
+    {
+        ProjectService service(root.path);
+        service.configureRepositoryRole(RepositoryRole::Private);
+        projectId = service.createUnbornProject("cross-Commit suspended journal").id;
+        const RevisionId originalHead = service.commitModelAtExpectedHead(
+            projectId, "main", {initial}, commitMetadata(), std::nullopt);
+        const std::string earlierDraft = service.createWorkingCopy(
+            projectId, "main", originalHead, session).id;
+        const std::string earlierToken = service.acquireWorkingCopyLease(
+            earlierDraft, session, 120).token;
+        require(service.saveWorkingCopyTransactions(earlierDraft, session,
+                    earlierToken, 0, {committedValue}, {firstFrame}).generation == 1,
+                "HDB-03g could not create archived MODEL action");
+        archiveId = UuidV7::generate().toString();
+        const LocalCommitInfo commit = service.commitWorkingCopy(
+            archiveId, earlierDraft, session, earlierToken, 1,
+            originalHead, commitMetadata());
+        require(commit.state == LocalCommitState::Succeeded,
+                "HDB-03g could not commit the archived MODEL action");
+        committedHead = RevisionId::parse(commit.reservedRevisionId);
+        require(committedHead.has_value(), "HDB-03g missing committed HEAD");
+        draftId = service.createWorkingCopy(projectId, "main", committedHead, session).id;
+        token = service.acquireWorkingCopyLease(draftId, session, 120).token;
+        require(service.saveWorkingCopyTransactions(draftId, session,
+                    token, 0, {liveValue}, {liveFrame}).generation == 1,
+                "HDB-03g could not create unfinished draft action");
+        const WorkingCopyInfo atBase = service.publishVerifiedDraftActionNavigation(
+            UuidV7::generate().toString(), draftId, session, token, 1,
+            committedHead, 0, {});
+        require(atBase.generation == 2 && atBase.draftActionPosition == 0 &&
+                !atBase.dirty && atBase.journalCount == 1,
+                "HDB-03g could not Undo to the committed base");
+        archiveNavigation = UuidV7::generate().toString();
+        const WorkingCopyInfo older = service.publishVerifiedHistoryActionNavigation(
+            archiveNavigation, draftId, session, token, 2, *committedHead,
+            *committedHead, archiveId, 0, {initial});
+        require(older.generation == 3 && older.draftActionPosition == 0 &&
+                older.historyCheckpointRevisionId == committedHead->toString() &&
+                older.historyActionPosition == 0 && older.journalCount == 1 &&
+                older.lastSaveFingerprint && older.dirty &&
+                older.candidateChanges.size() == 1 &&
+                older.candidateChanges.front().record &&
+                older.candidateChanges.front().record->payload == initial.record->payload,
+                "HDB-03g archived handoff did not preserve draft Redo or older state");
+        expectConflict([&] { (void)service.saveWorkingCopyTransactions(
+            draftId, session, token, 3, {liveValue}, {aowis::dvmdb::test::editEvent(
+                UuidV7::generate(), initial.key, {30}, {40})}); });
+        expectConflict([&] { (void)service.commitWorkingCopy(
+            UuidV7::generate().toString(), draftId, session, token, 3,
+            committedHead, commitMetadata()); });
+        require(service.publishVerifiedHistoryActionNavigation(
+                    archiveNavigation, draftId, session, token, 2, *committedHead,
+                    *committedHead, archiveId, 0, {}).generation == 3,
+                "HDB-03g archived handoff retry changed generation");
+    }
+    {
+        ProjectService restarted(root.path);
+        const WorkingCopyInfo persisted = restarted.workingCopy(draftId, true);
+        require(persisted.generation == 3 && persisted.draftActionPosition == 0 &&
+                persisted.historyActionPosition == 0 && persisted.journal.size() == 1 &&
+                persisted.journal.front().encoded == liveFrame &&
+                persisted.lastSaveFingerprint &&
+                restarted.optionalHead(projectId, "main") == committedHead,
+                "HDB-03g archived cursor or draft journal did not survive restart");
+        const WorkingCopyInfo resumed = restarted.publishVerifiedDraftActionNavigation(
+            UuidV7::generate().toString(), draftId, session, token, 3,
+            committedHead, 0, {});
+        require(resumed.generation == 4 && resumed.draftActionPosition == 0 &&
+                !resumed.historyCheckpointRevisionId && !resumed.historyActionPosition &&
+                !resumed.dirty && resumed.journalCount == 1 &&
+                restarted.workingCopy(draftId, true).journal.front().encoded == liveFrame,
+                "HDB-03g could not resume clean draft boundary after archived browsing");
+        const WorkingCopyInfo forward = restarted.publishVerifiedDraftActionNavigation(
+            UuidV7::generate().toString(), draftId, session, token, 4,
+            committedHead, 1, {liveValue});
+        require(forward.generation == 5 && forward.draftActionPosition == 1 &&
+                forward.journalCount == 1 && forward.dirty &&
+                forward.candidateChanges.size() == 1 &&
+                forward.candidateChanges.front().record &&
+                forward.candidateChanges.front().record->payload == liveValue.record->payload,
+                "HDB-03g returning to draft journal lost Redo state");
+        require(restarted.optionalHead(projectId, "main") == committedHead,
+                "HDB-03g navigation moved immutable branch HEAD");
+    }
+}
+
 int main() {
     try {
         testHistoryCheckpointPlan();
         testAtomicHistoryCheckpointNavigation();
         testAtomicVerifiedActionNavigationPublication();
         testDurableActiveDraftNavigationPublication();
+        testCrossCommitSuspendedDraftHandoff();
         testBranchDraftActionJournalAfterUndo();
         testCommittedActionHistory();
         testVerifiedRevisionNativeWitness();

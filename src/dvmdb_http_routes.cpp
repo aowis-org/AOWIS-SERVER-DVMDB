@@ -1527,8 +1527,8 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
     // tip; crossing that marker skips the duplicate snapshot. Results are
     // coordinates for the existing fenced navigation endpoint, not a claim
     // that MODEL verification will necessarily accept an unknown archive.
-    // Retained active journals cannot yet hand off into archived history;
-    // never advertise a cross-mode transition that the publisher will reject.
+    // A retained journal at position zero can safely hand off into the
+    // committed history; the original frames remain available for Redo.
     server.Get("/dvmdb/v1/working-copies/:draft/history/cursor",
                [&service](const httplib::Request& request, httplib::Response& response) {
         guarded(response, [&]() {
@@ -1554,7 +1554,24 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 if (position < draft.journalCount)
                     next = target(QStringLiteral("draft"), QString(),
                                   static_cast<std::size_t>(position + 1));
-            } else if (draft.journalCount == 0 && draft.baseRevision &&
+                if (position == 0 && draft.baseRevision && !draft.dirty) {
+                    const std::optional<RevisionGraphHead> branch =
+                        service.branchById(draft.projectId, draft.branchId);
+                    if (branch && branch->revision == draft.baseRevision) {
+                        const BranchActionHistoryPage page = service.branchActionHistory(
+                            draft.projectId, branch->name, 1);
+                        if (!page.commits.empty() &&
+                            page.commits.front().revision.id == *draft.baseRevision &&
+                            page.commits.front().commitOperationId &&
+                            !page.commits.front().actionIds.empty())
+                            previous = target(QStringLiteral("archived"),
+                                QString::fromStdString(draft.baseRevision->toString()),
+                                page.commits.front().actionIds.size() - 1);
+                    }
+                }
+            } else if ((draft.journalCount == 0 ||
+                        (draft.draftActionPosition == 0 && archived)) &&
+                       draft.baseRevision &&
                        (!draft.dirty || draft.historyCheckpointRevisionId) &&
                        (archived || !draft.historyCheckpointRevisionId)) {
                 const std::optional<RevisionGraphHead> branch =
@@ -1603,7 +1620,13 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                                     older->actionIds.size() - 1);
                             }
                             if (archived) {
-                                if (archivedPosition < count) {
+                                if (draft.journalCount > 0 && !newer &&
+                                    wanted == draft.baseRevision->toString() &&
+                                    archivedPosition + 1 == count) {
+                                    // Completing the last archived action
+                                    // returns to active position zero (HEAD).
+                                    next = target(QStringLiteral("draft"), QString(), 0);
+                                } else if (archivedPosition < count) {
                                     next = target(QStringLiteral("archived"),
                                         QString::fromStdString(wanted),
                                         static_cast<std::size_t>(archivedPosition + 1));
@@ -1611,6 +1634,9 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                                            !newer->actionIds.empty()) {
                                     next = target(QStringLiteral("archived"),
                                         QString::fromStdString(newer->revision.id.toString()), 1);
+                                } else if (draft.journalCount > 0 && !newer &&
+                                           wanted == draft.baseRevision->toString()) {
+                                    next = target(QStringLiteral("draft"), QString(), 1);
                                 }
                             }
                         }
@@ -1627,7 +1653,8 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 current.baseRevision != draft.baseRevision ||
                 current.historyCheckpointRevisionId != draft.historyCheckpointRevisionId ||
                 current.historyActionPosition != draft.historyActionPosition ||
-                current.draftActionPosition != draft.draftActionPosition)
+                current.draftActionPosition != draft.draftActionPosition ||
+                current.journalCount != draft.journalCount)
                 throw ProjectError(ProjectErrorKind::Conflict,
                                    "history cursor changed while resolving adjacent actions");
             return Reply{200, QJsonObject{
@@ -1636,8 +1663,8 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 {"baseRevision", optionalRevisionJson(draft.baseRevision)},
                 {"journalCount", QString::number(static_cast<qulonglong>(draft.journalCount))},
                 {"actionPosition", QString::number(static_cast<qulonglong>(position))},
-                {"hasPreviousDraftAction", position > 0},
-                {"hasNextDraftAction", position < draft.journalCount},
+                {"hasPreviousDraftAction", !archived && position > 0},
+                {"hasNextDraftAction", !archived && position < draft.journalCount},
                 {"previousAction", previous},
                 {"nextAction", next},
                 {"selectionKind", draft.historyActionPosition
@@ -1657,8 +1684,8 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
     // Fenced action-boundary selection. With revisionId this selects an
     // archived local Commit's global MODEL action boundary; without it the
     // current single-network draft journal is selected. The client never
-    // supplies a native candidate. Cross-mode movement from a live journal
-    // is intentionally refused until a continuous-history handoff exists.
+    // supplies a native candidate. A zero-position active journal can enter
+    // verified archived history without discarding its original redo frames.
     // Explicit coordinates permit exact retries after a lost response.
     server.Post(routeWorkingCopyHistoryNavigate,
                 [&service](const httplib::Request& request, httplib::Response& response) {

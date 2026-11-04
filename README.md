@@ -50,10 +50,11 @@ DVMDB is **pre-release**. There is no TLS, authentication or authorization;
 keep the server on localhost or a trusted network. HTTP local Commit, saved-draft network summaries/import, permanent local-Commit
 MODEL action archives and read-only first-parent History routes are implemented.
 Native C++ can verify and atomically select certain archived hydraulic action
-boundaries with a durable V7 draft cursor. Native storage also supports
-atomic selection within a retained active draft journal, but no MODEL-aware
-caller exposes it yet. **Continuous Undo/Redo, HTTP mutation routes and GUI
-activation remain unfinished.**
+boundaries with a durable V8 draft cursor. The MODEL-aware server supports
+fenced HTTP selection of active single-network actions and archived Commit
+actions. A zero-position draft journal can enter committed history without
+losing its Redo tail; the UI is still read-only pending Qt end-to-end
+acceptance and GUI wiring. **Unborn-base draft action replay remains unfinished.**
 Hydraulic solver feasibility is not a Save/Commit precondition. Real external
 GUI and embedded Standalone process-restart acceptance, whole-project
 Clone/Fetch and recoverable Publish also remain open. See the

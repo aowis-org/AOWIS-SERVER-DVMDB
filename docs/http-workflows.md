@@ -86,9 +86,10 @@ branch's committed HEAD. Network summaries are read-only and do not save.
 the **permanent local-Commit MODEL action archive** is available through the
 read-only `/action-history` and `/action-history/{revisionId}/events` routes
 below, including real actions across Commit markers. For an **existing single
-hydraulic network in a committed base**, HTTP can now select verified active
-draft action positions. This is not yet continuous Undo/Redo across Commit
-markers, and the GUI History dock remains read-only. See
+hydraulic network in a committed base**, HTTP can select verified active
+journal and archived Commit action positions, including crossing from active
+position zero to the last archived action without discarding Redo. The GUI
+History dock remains read-only pending controller integration. See
 [History](commit-action-archive.md) and [remaining work](history-roadmap.md).
 
 ## Local Commit and message annotations
@@ -174,8 +175,12 @@ Prefer the server's `previousAction` and `nextAction` objects: each supplies
 `selectionKind`, nullable `revisionId` and decimal `actionPosition`. These
 coordinates also navigate between two archived Commit action sequences, and
 skip the duplicate end/start snapshot at their shared Commit boundary.
-When the draft retains an active journal at position zero, no archived
-previous target is advertised yet; that handoff remains unsupported.
+At an active draft journal's verified zero position, `previousAction` can
+select the last archived action of its pinned HEAD. The server then keeps the
+original MODEL journal as a suspended Redo tail while browsing older Commits.
+The newest HEAD archive's last step returns to draft position zero and the
+next draft step restores its first event. New Save/Commit while on the
+archived side is refused until the journal is resumed.
 The booleans report **adjacent draft positions**, not verified eligibility;
 the server may reject unsupported/unprovable drafts. A GUI must not advance its
 cursor optimistically.

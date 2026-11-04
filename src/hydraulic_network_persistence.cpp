@@ -1796,9 +1796,13 @@ std::optional<VerifiedHydraulicActionNavigationPlan> planVerifiedHydraulicAction
         // Never replace a live user journal. A previously selected checkpoint
         // is the only accepted dirty candidate: its provenance was recorded
         // by the atomic HIST-03b operation.
-        if (draft.journalCount != 0 ||
-            (draft.dirty && !draft.historyCheckpointRevisionId))
-            return fail(QStringLiteral("Historical action selection requires a clean or checkpoint-only draft"));
+        const bool suspendedJournal = draft.journalCount > 0 &&
+            draft.draftActionPosition == 0;
+        if ((draft.journalCount != 0 && !suspendedJournal) ||
+            (draft.dirty && !draft.historyCheckpointRevisionId) ||
+            (suspendedJournal && !draft.historyCheckpointRevisionId &&
+             !draft.candidateChanges.empty()))
+            return fail(QStringLiteral("Historical action selection requires a clean suspended draft or checkpoint"));
         const std::optional<RevisionGraphHead> branch =
             service.branchById(draft.projectId, draft.branchId);
         if (!branch || branch->revision != draft.baseRevision)
@@ -2131,8 +2135,9 @@ planVerifiedHydraulicDraftActionNavigation(
         if (draft.generation != expectedGeneration || !draft.baseRevision ||
             draft.journalCount == 0 || draft.journal.size() != draft.journalCount ||
             actionPosition > draft.journalCount ||
-            draft.historyCheckpointRevisionId || draft.historyActionPosition ||
-            draft.historyArchiveCommitOperationId)
+            (draft.historyCheckpointRevisionId &&
+             (!draft.historyActionPosition || !draft.historyArchiveCommitOperationId ||
+              draft.draftActionPosition != 0)))
             return fail(QStringLiteral("Active draft journal, generation or HEAD is not eligible"));
         const std::uint64_t selectedPosition =
             draft.draftActionPosition.value_or(draft.journalCount);
@@ -2234,8 +2239,12 @@ planVerifiedHydraulicDraftActionNavigation(
                 static_cast<std::size_t>(selectedPosition), &terminal, &replayError);
         if (!persistedPosition)
             return fail(QStringLiteral("Active MODEL journal cannot be replayed: ") + replayError);
-        if (ModelCodec<NetworkHydraulic>::encode(*persistedPosition) !=
-            ModelCodec<NetworkHydraulic>::encode(*current))
+        // When browsing archived Commits, the persisted candidate is an
+        // authenticated historical selection, not the active journal view.
+        // The retained journal was checked before crossing the boundary.
+        if (!draft.historyCheckpointRevisionId &&
+            ModelCodec<NetworkHydraulic>::encode(*persistedPosition) !=
+                ModelCodec<NetworkHydraulic>::encode(*current))
             return fail(QStringLiteral("Active MODEL actions do not explain the persisted draft model"));
         const std::optional<NetworkHydraulic> desired =
             replayHydraulicActionBoundary(*parent, &terminal, frames,

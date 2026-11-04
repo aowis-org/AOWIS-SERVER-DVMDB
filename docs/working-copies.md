@@ -7,7 +7,7 @@ journal that produced it. Saving a draft **never creates a revision or moves a
 branch HEAD**; only a local Commit does. The product rules are in the
 [version-control contract](version-control-semantics.md) and
 [private working repositories](private-working-repositories.md); the bytes are
-in [storage formats](storage-formats.md#private-drafts-aowis-working-copy-7).
+in [storage formats](storage-formats.md#private-drafts-aowis-working-copy-8).
 
 Drafts exist only in a catalogue whose repository role is explicitly set to
 `private` ([repository tracking](repository-tracking.md)). The role is
@@ -85,20 +85,21 @@ immutable revision content never change. A subsequent normal Save or Commit
 clears the exact-checkpoint cursor. Native `hydraulic::navigateVerifiedHydraulicAction`
 can also select an **individual archived hydraulic action boundary**, once
 complete original MODEL replay and native-record coverage have been verified.
-It publishes the entire replacement overlay and V7 archived-action coordinate together,
-with lease/generation/HEAD checks and exact-operation retry. The draft must
-have **no active MODEL journal**, and the action's local Commit must be fully
+It publishes the entire replacement overlay and V8 archived-action coordinate together,
+with lease/generation/HEAD checks and exact-operation retry. An active journal may cross into archived
+history from its verified zero position without discarding the retained Redo
+frames. Other active positions are refused, and the local Commit must be fully
 covered by archived events. Returning to the committed HEAD is intended to
-leave an empty (clean) candidate. These selectors are not exposed over HTTP;
-they do not yet implement continuous Undo/Redo.
+leave an empty (clean) candidate. These selectors are exposed by the fenced HTTP History navigation endpoint;
+the GUI History dock is not yet wired to them.
 
 `ProjectService::publishVerifiedDraftActionNavigation` is a separate, native
 **internal** publication primitive for a MODEL-verified position in the active
 journal. It atomically replaces the candidate and persists
 `draft-action-position`, retaining the original journal for Redo and supporting
 exact-operation retries after restart. The MODEL-aware hydraulic wrapper
-verifies the reconstructed candidate for one existing network; there is **no
-HTTP navigation route yet**. Callers may not supply unchecked candidate overlays.
+verifies the reconstructed candidate for one existing network; the same
+HTTP History navigation route selects archived and active positions. Callers may not supply unchecked candidate overlays.
 Below the journal tip, a new **atomic MODEL event Save** makes the old redo
 tail ineligible and appends new events to the retained prefix. This is one
 fsynced draft update, not a separate truncate and Save. Local Commit still

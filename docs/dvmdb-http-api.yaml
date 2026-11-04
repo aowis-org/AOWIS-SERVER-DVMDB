@@ -203,9 +203,10 @@ paths:
         succeeds. `previousAction` and `nextAction` are server-resolved candidate
         coordinates for the existing fenced POST navigate endpoint: they include
         archived Commit steps and skip the duplicate snapshot at a Commit marker.
-        A null target means no currently addressable adjacent step. A retained
-        draft journal at position zero does NOT advertise archived navigation,
-        since safe cross-mode handoff is not yet implemented. These targets are
+        A null target means no currently addressable adjacent step. An active draft at position zero may select the last archived HEAD action;
+        its original journal remains durably suspended for Redo (V8). The
+        latest Commit's final action returns to the draft at position zero;
+        Save/Commit cannot proceed until draft navigation resumes. These targets are
         not executable proof: a POST still verifies the MODEL and repository.
         This is NOT yet a continuous live-journal/Commit cursor.
       responses:
@@ -256,13 +257,13 @@ paths:
         Navigate an explicit MODEL action boundary with complete native overlay
         reconstruction and atomic, durable cursor publication. With revisionId,
         select a boundary (0..actionCount) inside a fully verified, indexed
-        immutable local hydraulic Commit; the draft must have no active MODEL
-        journal and no unrelated dirty changes. Without revisionId, select
+        immutable local hydraulic Commit; the draft must be clean, an archived checkpoint, or an active journal
+        verified at position zero; in the latter case V8 retains Redo frames. Without revisionId, select
         an active draft boundary (0..journalCount) for one EXISTING hydraulic
         network. Multiple NetworkHydraulic roots remain supported in storage,
         but multi-network active draft navigation and unborn base replay are
-        deferred. No automatic crossing from a live draft journal into an
-        archived Commit is implemented yet. Immutable HEAD never moves.
+        deferred. Eligible position-zero active journals can cross into the
+        archived HEAD and return without losing Redo. Immutable HEAD never moves.
         Retrying an identical operation UUIDv7 and original request is
         idempotent. Include X-AOWIS-Expected-Repository-Id for repository pinning.
       requestBody:

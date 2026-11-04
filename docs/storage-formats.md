@@ -236,7 +236,7 @@ Hard ceilings: 64 GiB and 1,000,000 objects per bundle, 64 MiB per object;
 callers set lower `BundleLimits`. Import rules:
 [synchronization](offline-repository-synchronization.md).
 
-## Private drafts (`AOWIS-WORKING-COPY-7`)
+## Private drafts (`AOWIS-WORKING-COPY-8`)
 
 Each draft is a directory `working-copies/<draft-uuidv7>/` (mode 0700):
 
@@ -246,7 +246,7 @@ Each draft is a directory `working-copies/<draft-uuidv7>/` (mode 0700):
 * `journal-<uuidv7>` — the MODEL event journal, append-only binary.
 
 ```text
-AOWIS-WORKING-COPY-7
+AOWIS-WORKING-COPY-8
 project\t<project-uuidv7>
 branch\t<branch-uuidv7>
 base\t<revision-uuidv7|->
@@ -277,11 +277,18 @@ For an **active draft action selection**, `history-revision`,
 `history-action-position` and `history-archive-operation` are absent,
 `draft-action-position` ranges from 0 through the retained `journal` count,
 and the navigation operation UUID/source generation identify its last atomic
-publication. The source generation is exactly one less than the resulting
+publication. **V8 suspended draft history** permits an archived revision and
+archive action position to coexist with a retained journal **only when**
+`draft-action-position` is exactly zero. The journal's acknowledged bytes,
+digest and `last-save` fingerprint remain unchanged while browsing archived
+Commits. Returning to the active journal clears the archived coordinate;
+new Save/Commit are rejected while browsing the archived side. The source generation is exactly one less than the resulting
 generation. At the ordinary journal tip, `draft-action-position` may be absent.
 The journal and its original frames are never discarded by selection.
-Selecting a checkpoint requires a live lease, a pinned HEAD, an empty MODEL
-journal, and a first-parent ancestor of that HEAD. Retrying the same operation
+Snapshot-only checkpoint selection requires an empty MODEL journal.
+A verified archived action may also be selected from an active draft's
+position zero; this leaves its MODEL journal suspended rather than erased.
+Both operations require a live lease, a pinned HEAD and first-parent ancestry. Retrying the same operation
 at its original generation returns the already published result; intervening
 edits, another selection, or a changed HEAD reject the retry. Normal Save or
 Commit clears these fields. Native verified action navigation atomically
@@ -295,7 +302,8 @@ in a fresh journal file together with the resulting candidate and cleared
 cursor. A failed or interrupted publication leaves the original acknowledged
 journal reachable by the old metadata; old, unreferenced files are cleaned
 on restart. No migration from earlier pre-release draft meta records is
-provided: **V6 drafts must be recreated**.
+provided: **V7 drafts must be recreated**. Committed revisions and permanent
+action archives are unchanged.
 
 Candidate file: `AOWC` `0x01`, then per change, sorted by entity key: key (16),
 length (u32, `0xffffffff` = deletion), `AOMD` model record. Journal file: per

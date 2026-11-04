@@ -3169,6 +3169,102 @@ void exerciseHydraulicDraftMembershipHttp() {
           service.optionalHead(project.id, "main") == native::RevisionId::parse(
               secondCommit.reservedRevisionId),
           "HDB-03f forward movement across Commits changed immutable HEAD or model state");
+
+    // HDB-03g: active journal Undo at position zero must cross the latest
+    // Commit marker without dropping the original live MODEL Redo action.
+    HydraulicNodeJunction liveJunction = finalJunction;
+    liveJunction.elevation_m = 88;
+    const QByteArray liveBytes = native::ModelCodec<HydraulicNodeJunction>::encode(liveJunction);
+    const QString liveEvent = eventFrame(newUuid,
+        QStringLiteral("hydraulic.junction.update"), finalBytes, liveBytes);
+    const QJsonObject liveMember{{"uuid", newId}, {"kind", 1},
+                                 {"references", QJsonArray{}},
+                                 {"payloadBase64", QString::fromLatin1(liveBytes.toBase64())}};
+    const Response liveSaved = archiveClient.call("POST", path + "/save-events",
+        QJsonObject{{"sessionId", session}, {"fencingToken", QString::fromStdString(renewed.token)},
+                    {"expectedGeneration", "18"}, {"changes", QJsonArray{liveMember}},
+                    {"events", QJsonArray{liveEvent}}});
+    check(liveSaved.status == 200 && liveSaved.json.value("generation") == "19",
+          "HDB-03g could not record unfinished live action after Commit");
+    const std::function<QJsonObject(const QString&, const QString&, const QString&)>
+        liveNavigation = [&](const QString& operation, const QString& generation,
+                             const QString& position) {
+            return QJsonObject{{"operationId", operation}, {"sessionId", session},
+                {"fencingToken", QString::fromStdString(renewed.token)},
+                {"expectedGeneration", generation}, {"expectedHead", secondRevision},
+                {"actionPosition", position}};
+        };
+    const Response liveUndone = archiveClient.call("POST", archivedPath,
+        liveNavigation(QString::fromStdString(native::UuidV7::generate().toString()), "19", "0"));
+    const Response atLiveBase = archiveClient.call("GET", archivedCursorPath);
+    check(liveUndone.status == 200 && !liveUndone.json.value("dirty").toBool() &&
+          atLiveBase.json.value("previousAction").toObject().value("selectionKind") == "archived" &&
+          atLiveBase.json.value("previousAction").toObject().value("revisionId") == secondRevision &&
+          atLiveBase.json.value("previousAction").toObject().value("actionPosition") == "0" &&
+          atLiveBase.json.value("nextAction").toObject().value("selectionKind") == "draft" &&
+          atLiveBase.json.value("nextAction").toObject().value("actionPosition") == "1",
+          "HDB-03g active position zero did not resolve Commit and draft neighbors");
+    const QString suspendedOperation =
+        QString::fromStdString(native::UuidV7::generate().toString());
+    const QJsonObject suspendedBody = nextArchivedBody(
+        suspendedOperation, "20", secondRevision, "0");
+    const Response suspended = archiveClient.call("POST", archivedPath, suspendedBody);
+    const Response suspendedCursor = archiveClient.call("GET", archivedCursorPath);
+    const Response earlierView = archiveClient.call("GET", path + "/networks/" + networkId);
+    const std::optional<NetworkHydraulic> earlierNetwork =
+        native::ModelCodec<NetworkHydraulic>::decode(QByteArray::fromBase64(
+            earlierView.json.value("payloadBase64").toString().toLatin1()));
+    check(suspended.status == 200 && suspended.json.value("generation") == "21" &&
+          suspended.json.value("eventCount") == "1" &&
+          suspendedCursor.json.value("journalCount") == "1" &&
+          suspended.json.value("draftActionPosition") == "0" &&
+          suspendedCursor.json.value("selectionKind") == "archived" &&
+          suspendedCursor.json.value("nextAction").toObject().value("selectionKind") == "draft" &&
+          suspendedCursor.json.value("nextAction").toObject().value("actionPosition") == "0" &&
+          earlierView.status == 200 && earlierNetwork &&
+          earlierNetwork->nodes_junctions.last().elevation_m == 66 &&
+          service.optionalHead(project.id, "main") ==
+              native::RevisionId::parse(secondCommit.reservedRevisionId),
+          "HDB-03g committed navigation did not retain draft Redo or exact MODEL state");
+    check(archiveClient.call("POST", archivedPath, suspendedBody).status == 200 &&
+          archiveClient.call("GET", archivedCursorPath).json.value("generation") == "21",
+          "HDB-03g suspended cross-mode selection was not idempotent");
+    HydraulicNodeJunction forbiddenJunction = revised;
+    forbiddenJunction.elevation_m = 91;
+    const QByteArray forbiddenBytes = native::ModelCodec<HydraulicNodeJunction>::encode(
+        forbiddenJunction);
+    const QString forbiddenEvent = eventFrame(newUuid,
+        QStringLiteral("hydraulic.junction.update"), revisedBytes, forbiddenBytes);
+    const QJsonObject forbiddenMember{{"uuid", newId}, {"kind", 1},
+                                      {"references", QJsonArray{}},
+                                      {"payloadBase64", QString::fromLatin1(forbiddenBytes.toBase64())}};
+    check(archiveClient.call("POST", path + "/save-events",
+        QJsonObject{{"sessionId", session}, {"fencingToken", QString::fromStdString(renewed.token)},
+                    {"expectedGeneration", "21"}, {"changes", QJsonArray{forbiddenMember}},
+                    {"events", QJsonArray{forbiddenEvent}}}).status == 409,
+          "HDB-03g Save bypassed suspended draft History boundary");
+    const Response returned = archiveClient.call("POST", archivedPath,
+        liveNavigation(QString::fromStdString(native::UuidV7::generate().toString()), "21", "0"));
+    const Response returnedCursor = archiveClient.call("GET", archivedCursorPath);
+    check(returned.status == 200 && returned.json.value("generation") == "22" &&
+          returned.json.value("eventCount") == "1" &&
+          returnedCursor.json.value("journalCount") == "1" &&
+          returnedCursor.json.value("selectionKind") == "draft" &&
+          returnedCursor.json.value("nextAction").toObject().value("actionPosition") == "1",
+          "HDB-03g returning to draft base lost the Redo action");
+    const Response redone = archiveClient.call("POST", archivedPath,
+        liveNavigation(QString::fromStdString(native::UuidV7::generate().toString()), "22", "1"));
+    const Response redoneView = archiveClient.call("GET", path + "/networks/" + networkId);
+    const std::optional<NetworkHydraulic> redoneNetwork =
+        native::ModelCodec<NetworkHydraulic>::decode(QByteArray::fromBase64(
+            redoneView.json.value("payloadBase64").toString().toLatin1()));
+    check(redone.status == 200 && redone.json.value("generation") == "23" &&
+          redoneView.status == 200 && redoneNetwork &&
+          redoneNetwork->nodes_junctions.last().elevation_m == 88 &&
+          service.workingCopy(draftId, true).journal.size() == 1 &&
+          service.optionalHead(project.id, "main") ==
+              native::RevisionId::parse(secondCommit.reservedRevisionId),
+          "HDB-03g Redo across Commit boundary did not restore the live MODEL action");
     archiveServer.stop();
 }
 #endif

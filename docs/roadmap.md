@@ -43,18 +43,20 @@ A test passing against an in-process fake is not sufficient.
 **Already implemented:** durable indexed archives of original MODEL events,
 paged native/HTTP read-only action history, native full-revision coverage
 verification, checkpoint planning/selection and native atomic selection of a
-verified archived hydraulic action boundary with a V7 draft cursor,
+verified archived hydraulic action boundary with a V8 draft cursor,
 plus a MODEL-verified active-journal navigator for one existing network.
 An atomic event Save after Undo invalidates the redo tail safely. The HTTP
 server now exposes fenced selection of verified **active single-network**
 draft action boundaries and explicit **archived Commit** action boundaries,
 plus the authoritative cursor read with adjacent action coordinates for
-eligible archived Commit boundaries. This is not yet a seamless handoff from
-a retained live draft journal into archived Commit actions and the GUI dock remains read-only.
+eligible archived Commit boundaries. At an active position zero the native and
+HTTP selectors can suspend the original MODEL journal, navigate eligible
+archived actions, and resume at the committed HEAD without losing Redo.
+The GUI dock remains read-only pending Qt acceptance and controller wiring.
 
 **Remaining:** confirm the corrected Qt hydraulic navigation regression;
-support navigation of the normal unborn-base draft, connect continuous
-cross-Commit cursor and navigation-event provenance, qualify redo invalidation
+support navigation of the normal unborn-base draft, qualify V8 cross-Commit
+handoff and navigation-event provenance through HTTP/restarts, qualify redo invalidation
 through HTTP and wire the GUI History dock. Multi-network navigation can be
 deferred without restricting what DVMDB stores. Imported/merge/checkpoint-only revisions
 must stay honest; do not synthesize edits from snapshot differences. See the

@@ -34,7 +34,7 @@ Start with the [repository README](../README.md) to build and run the server.
 | Implemented routes and error conventions | [REST guide](rest-api-design.md), [OpenAPI](dvmdb-http-api.yaml) |
 | Native service configuration and startup | [Database service](native-database-service.md) |
 | GUI integration boundaries | [GUI integration](gui-integration-requirements.md) |
-| On-disk and wire markers (including working-copy V7) | [Storage formats](storage-formats.md), [format policy](format-compatibility.md) |
+| On-disk and wire markers (including working-copy V8) | [Storage formats](storage-formats.md), [format policy](format-compatibility.md) |
 | Backup, restore, data-root protection | [Operations](operations.md) |
 | Full integrity verification and compaction | [Repository verification](repository-verification.md) |
 | Test and benchmark procedures | [Durability qualification](durability-qualification.md), [benchmark procedures](benchmark-plan.md) |

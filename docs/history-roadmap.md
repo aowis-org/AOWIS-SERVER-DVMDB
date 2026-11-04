@@ -22,7 +22,7 @@ behavior. This work is part of the [overall DVMDB roadmap](roadmap.md).
 - Native fenced publication of a verified action boundary into a private draft
   with an atomically persisted coordinate, generation CAS, branch-HEAD pin and
   same-operation retry after restart. Draft metadata uses
-  `AOWIS-WORKING-COPY-7`.
+  `AOWIS-WORKING-COPY-8`.
 
 An internal MODEL-aware active-draft adapter now replays and validates all
 retained journal frames for **one existing hydraulic network** from immutable
@@ -36,25 +36,24 @@ Navigation preserves the original journal and future Redo actions. The
 server now exposes a draft-scoped HTTP cursor read and fenced, idempotent
 HTTP selection of an explicit verified active-journal position for this
 single-network case. Providing an archived `revisionId` instead selects an
-explicit verified action boundary within an indexed local Commit, when the
-draft has no active MODEL journal. The HTTP cursor now also supplies server-resolved `previousAction` and
+explicit verified action boundary within an indexed local Commit. From a
+verified active journal selected at position zero, the V8 publisher suspends
+the retained journal and allows navigation into that archive. The HTTP cursor now also supplies server-resolved `previousAction` and
 `nextAction` targets for active journal steps and eligible archived Commit
 boundaries, skipping duplicate states at Commit markers. A client submits
-those coordinates to the existing fenced POST selector. The server does **not**
-yet hand off from a retained live journal into immutable archives, and the
-GUI History dock is not yet active. A new
+those coordinates to the existing fenced POST selector. The server now resolves adjacent targets across the retained-journal/Commit
+boundary, but the Qt HTTP handoff regression and GUI wiring are still pending. A new
 atomic MODEL event Save from a non-tip position retains the selected prefix
 and replaces the redo tail with the new actions in a crash-safe metadata
 publication. Local Commit still **rejects** positions below the journal tip;
-no unapplied redo frames are silently archived. A limited HTTP command now invokes this adapter; continuous cross-Commit
-navigation remains outstanding.
+no unapplied redo frames are silently archived. A limited HTTP command now invokes this adapter; cross-Commit handoff has native regression coverage but Qt HTTP and GUI
+acceptance remain outstanding.
 
-The archived selector is **not** a continuous Undo/Redo command. It accepts
-only fully verified archived hydraulic local Commits and a draft with **no
-active MODEL journal**. It exposes an HTTP mutation via the existing fenced
-History navigation route, but cannot yet safely cross from a live journal
-into archival action positions or maintain redo eligibility across arbitrary
-user edits and Commit markers.
+The archived selector accepts only fully verified archived hydraulic local
+Commits. At an eligible active draft position zero, it suspends the journal,
+retaining Redo frames, and resumes active edits from the newest HEAD archive.
+This is still not GUI Undo/Redo, and unverified/checkpoint-only, unborn-base
+and multi-network active drafts remain outside this implementation.
 
 **Acceptance evidence:** The latest user-reported Qt hydraulic network suite
 passed (2026-11-04), and adjacent native suites previously passed. The HTTP
@@ -78,11 +77,9 @@ navigation test, with immutable revision and branch-ref checks.
 
 ## 2. Make active draft actions navigable
 
-- Complete the server-owned handoff when the **current draft journal is
-  retained** and the cursor reaches its zero boundary. The existing archived
-  selector refuses nonempty journals, so the resolver deliberately advertises
-  no unsupported cross-mode step. Preserve the active redo tail, lease,
-  model-equivalent overlay and operation identity through this handoff.
+- Qualify the implemented V8 handoff through Qt HTTP tests, simulated lost
+  acknowledgements and process restart, and verify Save/Commit remain fenced
+  while the original journal is suspended in archived history.
 - Support the normal unborn first draft without fabricating any base snapshot.
 - Support the normal **unborn first draft** and network initialization/import
   in active history without weakening MODEL/native coverage verification.
@@ -115,8 +112,8 @@ markers, Undo, Redo, new edit and local Commit; survives GUI/service restart.
   over HTTP using draft/session/lease, expected generation and branch HEAD,
   repository pin and UUIDv7 operation ID. An archived selection uses a
   `revisionId` and stores its action position separately from the draft journal.
-- Extend those safe HTTP controls to **continuous cross-Commit navigation**
-  and the normal unborn first draft; never accept unchecked native overlays.
+- Qualify the implemented single-network HTTP cross-Commit handoff and extend
+  navigation to the normal unborn first draft; never accept unchecked overlays.
 - Ensure identical retry after a lost reply returns the persisted outcome;
   a different request reusing the operation UUID is a conflict. Make stale
   results, absent archives and unsupported merges explicit errors.
