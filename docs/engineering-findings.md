@@ -105,6 +105,14 @@ internal native scratch have separate budgets; see [operations](operations.md).
 - **Semantic safety:** model reference integrity, hydraulic domain validation
   and recursive criss-cross merge bases are separate responsibilities. Native
   generic merge correctness does not replace hydraulic-network validation.
+- **Deletion power-cut qualification (November 5, 2026):** the developer's
+  Docker/QEMU KVM runs on disposable ext4 and XFS data disks passed **20/20**
+  deterministic branch-delete/revision-truncation cut rounds across five
+  persistence barriers and **64/64** continuous deletion-stress cut rounds.
+  All **84/84** rounds verified their expected recovered state after reboot.
+  This qualifies the tested guest-cache-loss paths, not failed device flushes,
+  torn sectors or host physical power loss. The workload details and report
+  locations are in [deletion power-cut qualification](vm-deletion-powercut.md).
 - **Physical ENOSPC:** a disposable 32 MiB Linux tmpfs test forces real
   `ENOSPC` during commit, export and incremental import, then verifies recovery
   and retry. It is not an ext4/XFS power-loss test.

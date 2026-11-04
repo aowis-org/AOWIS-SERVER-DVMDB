@@ -37,7 +37,7 @@ Start with the [repository README](../README.md) to build and run the server.
 | On-disk and wire markers (including working-copy V8) | [Storage formats](storage-formats.md), [format policy](format-compatibility.md) |
 | Backup, restore, data-root protection | [Operations](operations.md) |
 | Full integrity verification and compaction | [Repository verification](repository-verification.md) |
-| Test and benchmark procedures | [Durability qualification](durability-qualification.md), [benchmark procedures](benchmark-plan.md) |
+| Test and benchmark procedures | [Durability qualification](durability-qualification.md), [deletion power-cut results](vm-deletion-powercut.md), [benchmark procedures](benchmark-plan.md) |
 | Dated measurements (evidence, not release guarantees) | [Engineering findings](engineering-findings.md) |
 
 ## Remaining work — only future milestones

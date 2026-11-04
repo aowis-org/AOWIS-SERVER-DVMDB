@@ -108,6 +108,21 @@ is checked. Use a throwaway SSH key. `--boot-timeout` helps slow guests.
 The CTest `aowis-dvmdb-vm-powercut-worker-smoke` only checks the worker's
 protocol; it does not run QEMU.
 
+## Branch/revision deletion VM qualification (completed)
+
+Deletion has a separate opt-in VM workload; see
+[deletion power-cut qualification](vm-deletion-powercut.md) for crash boundaries,
+fixtures, recovery checks, commands and evidence limitations. This does not
+replace the commit-acknowledgment drill described above.
+
+The developer's November 5, 2026 Docker/QEMU runs **passed all 84 rounds**:
+20/20 deterministic branch-delete/revision-truncate boundaries (10 ext4,
+10 XFS), and 64/64 continuous deletion-stress rounds (32 per filesystem).
+Each round was verified after reboot. The stress crashes used varied delays
+of 37–229 ms; they are not guaranteed to coincide with a physical write.
+The tests establish recovery from the tested guest-cache-loss interruptions,
+not host-device failure, torn sectors or lost/failed flushes.
+
 ## HTTP soak (opt-in)
 
 One server process under six concurrent clients that import multi-MiB bundles

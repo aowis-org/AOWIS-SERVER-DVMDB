@@ -49,6 +49,38 @@ instrumented workload above covers deterministic application persistence
 boundaries. The continuous workload deliberately tests branch deletion; revision
 truncation is exercised in the deterministic workload.
 
+## Verified qualification result — November 5, 2026
+
+The developer ran both Docker/QEMU workloads on the Linux host with `/dev/kvm`
+available. The Debian 12 guest used the opt-in Release qualification build
+(`AOWIS_DVMDB_VM_DELETION_BARRIERS=ON`). The runs completed successfully:
+
+| Workload | ext4 | XFS | Total |
+|---|---:|---:|---:|
+| Deterministic `deletions` (five barriers × branch/truncate) | 10/10 | 10/10 | **20/20** |
+| Continuous `deletion-stress` (varied crash delays) | 32/32 | 32/32 | **64/64** |
+| **Combined** | **42/42** | **42/42** | **84/84** |
+
+Every recorded round reported `verified_after_reboot: true`, and both
+filesystem reports ended with `result: passed`. The continuous-run crash
+delays ranged from **37 to 229 ms**. These are 84 successful *test rounds*,
+not proof that 84 physical writes were interrupted: deterministic rounds stop
+at application barriers, while stress rounds cut the VM at varying delays.
+
+Console report locations in the Docker environment:
+
+- Deterministic: `/results/run-wmd0py11/report.json`
+- Continuous stress: `/results/run-klcfhkhw/report.json`
+
+The developer-supplied terminal log is the evidence for these outcomes. The
+JSON reports were not attached separately; keep the original reports and
+console output for reproducibility and future independent verification.
+
+**Qualification conclusion:** deletion-intent replay and branch/truncation
+recovery passed the tested guest-cache-loss scenarios on ext4 and XFS. This
+is a recorded engineering result, **not** a guarantee against physical-device
+power loss, torn sectors, failed flushes, or arbitrary untested interleavings.
+
 ## Local smoke tests
 
 The opt-in Docker build configures `AOWIS_DVMDB_VM_DELETION_BARRIERS=ON` and
