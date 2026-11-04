@@ -896,7 +896,9 @@ paths:
         Delete a branch reference, including unborn HEAD. Require an exact
         expected HEAD (JSON null for unborn). Revisions still referenced by
         other branches or merges remain immutable; this operation never prunes
-        their content. Reject branches with active stored working copies.
+        their content. Saved working copies block the operation unless discardWorkingCopies
+        is explicitly true. When true, saved draft state and Undo/Redo journals
+        for this branch are discarded before deleting its reference.
       requestBody:
         required: true
         content:
@@ -907,6 +909,7 @@ paths:
               required: [expectedHead]
               properties:
                 expectedHead: {type: [string, 'null'], format: uuid}
+                discardWorkingCopies: {type: boolean, default: false}
       responses:
         '200': {description: '{"deleted":true}'}
         '409': {$ref: '#/components/responses/Conflict'}
@@ -920,7 +923,9 @@ paths:
         Truncate the selected branch's first-parent history starting with
         firstRemoved, using a strict expected HEAD CAS. A root or first local
         fork commit deletion removes the branch. Other branches and merge
-        ancestries are preserved, and active working copies block the write.
+        ancestries are preserved. Saved working copies block the write unless
+        discardWorkingCopies is true, which explicitly discards those drafts
+        and their Undo/Redo journals.
       requestBody:
         required: true
         content:
@@ -932,6 +937,7 @@ paths:
               properties:
                 expectedHead: {type: string, format: uuid}
                 firstRemoved: {type: string, format: uuid}
+                discardWorkingCopies: {type: boolean, default: false}
       responses:
         '200': {description: '{"branchDeleted":true|false}'}
         '409': {$ref: '#/components/responses/Conflict'}

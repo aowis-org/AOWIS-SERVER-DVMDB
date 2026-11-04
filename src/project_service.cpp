@@ -2204,36 +2204,43 @@ WorkingCopyInfo ProjectService::createWorkingCopyForBranch(
         (draftId && !UuidV7::parse(*draftId).has_value()))
         throw ProjectError(ProjectErrorKind::InvalidInput, "invalid draft, session or branch UUIDv7");
     requirePrivateRepository("working copies require an explicitly private repository");
-    // This first VC-04 slice supports exact HEAD checkout only. A concurrent
-    // commit after this read cannot change the immutable pinned draft base.
-    const std::optional<RevisionGraphHead> branch = branchById(projectId, branchId);
-    if (!branch)
-        throw ProjectError(ProjectErrorKind::NotFound, "branch UUIDv7 not found");
+    // Creating drafts and deleting branch history share the project operation
+    // lock. This prevents another in-process request publishing a new draft
+    // between the deletion's draft scan and its branch-ref mutation.
     WorkingCopyInfo draft;
     draft.id = draftId ? std::string(*draftId) : UuidV7::generate().toString();
     draft.projectId = std::string(projectId);
-    draft.branchId = branch->branchId.toString();
+    draft.branchId = std::string(branchId);
     draft.baseRevision = baseRevision;
     draft.sessionId = std::string(sessionId);
-    const std::shared_ptr<std::mutex> lock = draftLock(draft.id);
-    std::lock_guard<std::mutex> guard(*lock);
-    checkHealthy();
-    const std::filesystem::path existing = workingCopyDirectory(this->root_) / draft.id;
-    if (draftId && (std::filesystem::exists(existing) || std::filesystem::is_symlink(existing))) {
-        // Repeated request (e.g. a transport resent the POST after a lost
-        // response): answer with the draft it created, in its current state.
-        const WorkingCopyInfo stored = readWorkingCopy(existing, DraftLoad::Candidate);
-        if (stored.projectId != draft.projectId || stored.branchId != draft.branchId ||
-            stored.baseRevision != draft.baseRevision || stored.sessionId != draft.sessionId)
+    withRepository(projectId, [&](Repository& repository) {
+        const std::optional<ProjectId> parsedProject = ProjectId::parse(projectId);
+        const std::optional<BranchId> parsedBranch = BranchId::parse(branchId);
+        if (!parsedProject || !parsedBranch)
+            throw ProjectError(ProjectErrorKind::InvalidInput, "invalid project or branch UUIDv7");
+        const std::optional<RevisionGraphHead> branch =
+            repository.branchById(*parsedProject, *parsedBranch);
+        if (!branch)
+            throw ProjectError(ProjectErrorKind::NotFound, "branch UUIDv7 not found");
+        const std::shared_ptr<std::mutex> lock = draftLock(draft.id);
+        std::lock_guard<std::mutex> guard(*lock);
+        checkHealthy();
+        const std::filesystem::path existing = workingCopyDirectory(this->root_) / draft.id;
+        if (draftId && (std::filesystem::exists(existing) || std::filesystem::is_symlink(existing))) {
+            const WorkingCopyInfo stored = readWorkingCopy(existing, DraftLoad::Candidate);
+            if (stored.projectId != draft.projectId || stored.branchId != draft.branchId ||
+                stored.baseRevision != draft.baseRevision || stored.sessionId != draft.sessionId)
+                throw ProjectError(ProjectErrorKind::Conflict,
+                                   "draft UUIDv7 already identifies a different working copy");
+            draft = stored;
+            return;
+        }
+        if (branch->revision != baseRevision)
             throw ProjectError(ProjectErrorKind::Conflict,
-                               "draft UUIDv7 already identifies a different working copy");
-        return stored;
-    }
-    if (branch->revision != baseRevision)
-        throw ProjectError(ProjectErrorKind::Conflict,
-                           "working-copy base must match current local HEAD");
-    try { createDraft(this->root_, draft); }
-    catch (...) { markUncertain(); throw; }
+                               "working-copy base must match current local HEAD");
+        try { createDraft(this->root_, draft); }
+        catch (...) { markUncertain(); throw; }
+    });
     return draft;
 }
 
@@ -3637,34 +3644,78 @@ std::optional<RevisionGraphHead> ProjectService::branchById(std::string_view pro
 }
 
 void ProjectService::deleteBranch(std::string_view projectId, std::string_view branchId,
-                                  std::optional<RevisionId> expectedHead) {
+                                  std::optional<RevisionId> expectedHead,
+                                  bool discardWorkingCopies) {
     const std::optional<ProjectId> project = ProjectId::parse(projectId);
     const std::optional<BranchId> branch = BranchId::parse(branchId);
     if (!project || !branch)
         throw ProjectError(ProjectErrorKind::InvalidInput, "UUIDv7 project and branch required");
-    // Working copies have separate fenced history journals. Never orphan one.
-    for (const WorkingCopyInfo& draft : listWorkingCopies())
-        if (draft.projectId == projectId && draft.branchId == branchId)
-            throw ProjectError(ProjectErrorKind::Conflict,
-                "branch has a working copy; close or discard it before deleting history");
     withRepository(projectId, [&](Repository& repository) {
+        const std::optional<RevisionGraphHead> current = repository.branchById(*project, *branch);
+        if (!current) throw ProjectError(ProjectErrorKind::NotFound, "branch not found");
+        if (current->revision != expectedHead)
+            throw ProjectError(ProjectErrorKind::Conflict, "branch HEAD changed since confirmation");
+        std::vector<std::string> drafts;
+        for (const WorkingCopyInfo& draft : listWorkingCopies())
+            if (draft.projectId == projectId && draft.branchId == branchId)
+                drafts.push_back(draft.id);
+        if (!drafts.empty() && !discardWorkingCopies)
+            throw ProjectError(ProjectErrorKind::Conflict,
+                "branch has a saved working copy; confirm deletion with discardWorkingCopies");
+        // The explicit destructive request includes all saved draft state and its
+        // history journal. Lock each draft before removing it, so an in-flight save
+        // cannot overwrite a discarded draft. Other branches are untouched.
+        for (const std::string& id : drafts) {
+            const std::shared_ptr<std::mutex> lock = draftLock(id);
+            std::lock_guard<std::mutex> guard(*lock);
+            const WorkingCopyInfo draft = loadDraft(this->root_, id, DraftLoad::Meta).info;
+            if (draft.projectId != projectId || draft.branchId != branchId)
+                throw ProjectError(ProjectErrorKind::Conflict, "working copy changed ownership");
+            try { deleteDraft(this->root_, id); }
+            catch (...) { markUncertain(); throw; }
+            forgetLease(id);
+        }
         translated<int>([&]() { repository.deleteBranch(*project, *branch, expectedHead); return 0; });
     });
 }
 
 bool ProjectService::truncateBranch(std::string_view projectId, std::string_view branchId,
                                     std::optional<RevisionId> expectedHead,
-                                    const RevisionId& firstRemoved) {
+                                    const RevisionId& firstRemoved,
+                                    bool discardWorkingCopies) {
     const std::optional<ProjectId> project = ProjectId::parse(projectId);
     const std::optional<BranchId> branch = BranchId::parse(branchId);
     if (!project || !branch)
         throw ProjectError(ProjectErrorKind::InvalidInput, "UUIDv7 project and branch required");
-    for (const WorkingCopyInfo& draft : listWorkingCopies())
-        if (draft.projectId == projectId && draft.branchId == branchId)
-            throw ProjectError(ProjectErrorKind::Conflict,
-                "branch has a working copy; close or discard it before deleting history");
     bool deleted = false;
     withRepository(projectId, [&](Repository& repository) {
+        const std::optional<RevisionGraphHead> current = repository.branchById(*project, *branch);
+        if (!current) throw ProjectError(ProjectErrorKind::NotFound, "branch not found");
+        if (current->revision != expectedHead)
+            throw ProjectError(ProjectErrorKind::Conflict, "branch HEAD changed since confirmation");
+        // Validate the selected revision and CAS before touching any draft.
+        // An invalid first-parent identity must not discard user changes.
+        translated<bool>([&]() {
+            return repository.truncateBranch(*project, *branch, expectedHead,
+                                             firstRemoved, true);
+        });
+        std::vector<std::string> drafts;
+        for (const WorkingCopyInfo& draft : listWorkingCopies())
+            if (draft.projectId == projectId && draft.branchId == branchId)
+                drafts.push_back(draft.id);
+        if (!drafts.empty() && !discardWorkingCopies)
+            throw ProjectError(ProjectErrorKind::Conflict,
+                "branch has a saved working copy; confirm deletion with discardWorkingCopies");
+        for (const std::string& id : drafts) {
+            const std::shared_ptr<std::mutex> lock = draftLock(id);
+            std::lock_guard<std::mutex> guard(*lock);
+            const WorkingCopyInfo draft = loadDraft(this->root_, id, DraftLoad::Meta).info;
+            if (draft.projectId != projectId || draft.branchId != branchId)
+                throw ProjectError(ProjectErrorKind::Conflict, "working copy changed ownership");
+            try { deleteDraft(this->root_, id); }
+            catch (...) { markUncertain(); throw; }
+            forgetLease(id);
+        }
         deleted = translated<bool>([&]() {
             return repository.truncateBranch(*project, *branch, expectedHead, firstRemoved);
         });

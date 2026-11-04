@@ -2545,12 +2545,13 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             if (const std::optional<Reply> pin = repositoryPinFailure(request, service))
                 return *pin;
             const QJsonObject body = parseBody(request, maxJsonSmallBytes);
-            requireKeys(body, {"expectedHead"});
+            requireKeys(body, {"expectedHead", "discardWorkingCopies"});
             requireInput(body.contains("expectedHead"), "expectedHead is required, null for unborn");
             const std::optional<RevisionId> expected = body.value("expectedHead").isNull()
                 ? std::nullopt
                 : std::optional<RevisionId>(parseRevisionId(requiredString(body, "expectedHead")));
-            service.deleteBranch(pathParam(request, "id"), pathParam(request, "branchId"), expected);
+            service.deleteBranch(pathParam(request, "id"), pathParam(request, "branchId"), expected,
+                body.value("discardWorkingCopies").toBool(false));
             return Reply{200, QJsonObject{{"deleted", true}}};
         });
     });
@@ -2560,12 +2561,13 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             if (const std::optional<Reply> pin = repositoryPinFailure(request, service))
                 return *pin;
             const QJsonObject body = parseBody(request, maxJsonSmallBytes);
-            requireKeys(body, {"expectedHead", "firstRemoved"});
+            requireKeys(body, {"expectedHead", "firstRemoved", "discardWorkingCopies"});
             requireInput(body.contains("expectedHead"), "expectedHead is required");
             const RevisionId expected = parseRevisionId(requiredString(body, "expectedHead"));
             const RevisionId firstRemoved = parseRevisionId(requiredString(body, "firstRemoved"));
             const bool deleted = service.truncateBranch(pathParam(request, "id"),
-                pathParam(request, "branchId"), expected, firstRemoved);
+                pathParam(request, "branchId"), expected, firstRemoved,
+                body.value("discardWorkingCopies").toBool(false));
             return Reply{200, QJsonObject{{"branchDeleted", deleted}}};
         });
     });

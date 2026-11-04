@@ -366,7 +366,8 @@ public:
     // branch only. Return true if the branch itself was removed. Shared DAG
     // nodes and merge parents remain immutable and addressable.
     bool truncateBranch(const ProjectId& project, const BranchId& branch,
-                        std::optional<RevisionId> expectedHead, const RevisionId& firstRemoved);
+                        std::optional<RevisionId> expectedHead, const RevisionId& firstRemoved,
+                        bool validateOnly = false);
 
     // Commit message edits are separate mutable annotations. A revision record
     // (and its SHA-256/parents/content) is never rewritten.

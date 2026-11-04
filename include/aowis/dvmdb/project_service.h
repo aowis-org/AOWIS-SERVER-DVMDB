@@ -318,9 +318,10 @@ public:
                                   const BranchMetadata& metadata = {});
     RevisionGraphRevision revision(std::string_view projectId, const RevisionId& id);
     void deleteBranch(std::string_view projectId, std::string_view branchId,
-                      std::optional<RevisionId> expectedHead);
+                      std::optional<RevisionId> expectedHead, bool discardWorkingCopies = false);
     bool truncateBranch(std::string_view projectId, std::string_view branchId,
-                        std::optional<RevisionId> expectedHead, const RevisionId& firstRemoved);
+                        std::optional<RevisionId> expectedHead, const RevisionId& firstRemoved,
+                        bool discardWorkingCopies = false);
     void updateBranchProperties(std::string_view projectId, std::string_view branchId,
                                 std::string_view expectedName, std::string_view name,
                                 const BranchMetadata& metadata);

@@ -330,6 +330,39 @@ void runService() {
     service.deleteBranch(project.id, created.branchId.toString(), root);
     check(!service.branchById(project.id, created.branchId.toString()).has_value(),
           "service deletion did not remove UUID-keyed branch ref");
+    service.configureRepositoryRole(RepositoryRole::Private);
+    const BranchId withDraft = service.createUnbornBranch(project.id, "draft-delete");
+    const WorkingCopyInfo draft = service.createWorkingCopyForBranch(
+        project.id, withDraft.toString(), std::nullopt, UuidV7::generate().toString());
+    bool refused = false;
+    try { service.deleteBranch(project.id, withDraft.toString(), std::nullopt); }
+    catch (const ProjectError& error) { refused = error.kind() == ProjectErrorKind::Conflict; }
+    check(refused, "draft must block branch deletion without explicit consent");
+    check(service.workingCopy(draft.id).id == draft.id,
+          "refused deletion must preserve working copy");
+    service.deleteBranch(project.id, withDraft.toString(), std::nullopt, true);
+    check(!service.branchById(project.id, withDraft.toString()).has_value(),
+          "explicit discard must delete branch");
+    check(service.listWorkingCopies().empty(),
+          "explicit discard must remove saved working copy and journal");
+
+    const BranchCreationResult truncated = service.createBranchWithIdentity(
+        project.id, "draft-truncate", "main");
+    const WorkingCopyInfo draft2 = service.createWorkingCopyForBranch(
+        project.id, truncated.branchId.toString(), root, UuidV7::generate().toString());
+    refused = false;
+    try { (void)service.truncateBranch(project.id, truncated.branchId.toString(),
+                                       root, root); }
+    catch (const ProjectError& error) { refused = error.kind() == ProjectErrorKind::Conflict; }
+    check(refused, "draft must block history truncation without explicit consent");
+    refused = false;
+    try { (void)service.truncateBranch(project.id, truncated.branchId.toString(),
+                root, RevisionId::generate(), true); }
+    catch (const ProjectError& error) { refused = error.kind() == ProjectErrorKind::InvalidInput; }
+    check(refused && service.workingCopy(draft2.id).id == draft2.id,
+          "invalid truncation must not discard working copy");
+    (void)service.truncateBranch(project.id, truncated.branchId.toString(), root, root, true);
+    check(service.listWorkingCopies().empty(), "truncation must discard branch draft");
     const BranchId unborn = service.createUnbornBranch(project.id, "empty");
     service.deleteBranch(project.id, unborn.toString(), std::nullopt);
     check(!service.branchById(project.id, unborn.toString()).has_value(),

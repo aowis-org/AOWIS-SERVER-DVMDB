@@ -4018,7 +4018,7 @@ void Repository::deleteBranch(const ProjectId& project, const BranchId& branch,
 
 bool Repository::truncateBranch(const ProjectId& project, const BranchId& branch,
                                 std::optional<RevisionId> expectedHead,
-                                const RevisionId& firstRemoved) {
+                                const RevisionId& firstRemoved, bool validateOnly) {
     std::lock_guard<std::mutex> guarded(this->mutex_);
     ScopedFileLock locked(this->lockFd_);
     refreshIndex();
@@ -4051,6 +4051,7 @@ bool Repository::truncateBranch(const ProjectId& project, const BranchId& branch
         || (selected->forkRevisionId &&
             (removed->record.parents.front().id == *selected->forkRevisionId
              || firstRemoved == *selected->forkRevisionId));
+    if (validateOnly) return deleteEntireBranch;
     if (deleteEntireBranch) {
         const std::filesystem::path heads = this->directory_ / "refs" / "heads";
         const std::filesystem::path target = heads / branch.toString();
