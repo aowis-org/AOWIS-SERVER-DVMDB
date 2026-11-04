@@ -2866,6 +2866,194 @@ void exerciseUnbornFirstTankHistory() {
     std::filesystem::remove_all(folder, ignored);
 }
 
+
+// History editing must remain possible after Undo crosses immutable Commits.
+// New MODEL actions begin at the verified archived coordinate, not at the
+// native first parent of the eventual Commit. Old Commits remain immutable,
+// while their abandoned actions leave the *active* Undo/Redo timeline.
+void exerciseArchivedHistoryForkedHydraulicEdit() {
+    const std::filesystem::path folder = tempDir();
+    try {
+        std::unique_ptr<native::ProjectService> service =
+            std::make_unique<native::ProjectService>(folder);
+        service->configureRepositoryRole(native::RepositoryRole::Private);
+        const std::string projectId = service->createUnbornProject(
+            "Hydraulic editor forks after crossing Commit markers").id;
+        const std::string session = native::UuidV7::generate().toString();
+        const NetworkHydraulic original = completeNetwork();
+        require(!original.map_labels.isEmpty(), "History fork fixture needs a map label");
+        const native::RevisionId baseline = service->commitModelAtExpectedHead(
+            projectId, "main", hydraulic::fullDraftHydraulicNetworkChanges(original),
+            commitMetadata(), std::nullopt);
+
+        const std::function<aowis::model::ModelEditTransaction(
+            const HydraulicMapLabel&, const HydraulicMapLabel&)> encodeEdit =
+            [](const HydraulicMapLabel& before, const HydraulicMapLabel& after)
+                    -> aowis::model::ModelEditTransaction {
+                aowis::model::ModelEditTransaction event;
+                event.transactionId = QUuid(QString::fromStdString(
+                    native::UuidV7::generate().toString()));
+                event.operation = QStringLiteral("hydraulic.map-label.update");
+                event.edits.append(aowis::model::ModelEntityEdit{
+                    before.uuid, QStringLiteral("HydraulicMapLabel"),
+                    native::ModelCodec<HydraulicMapLabel>::encode(before),
+                    native::ModelCodec<HydraulicMapLabel>::encode(after)});
+                return event;
+            };
+        const std::function<native::ModelChange(const HydraulicMapLabel&,
+            const native::RevisionId&)> nativeLabelChange =
+            [&service, &projectId](const HydraulicMapLabel& label,
+                const native::RevisionId& source) -> native::ModelChange {
+                native::ModelChange change;
+                change.key = hydraulic::keyFromUuid(label.uuid);
+                change.record = service->getModelAtRevision(projectId, source, change.key);
+                require(change.record && change.record->kind == 18,
+                        "History fork fixture has no stored label record");
+                change.record->payload = hydraulic::bytesFromQByteArray(
+                    native::ModelCodec<HydraulicMapLabel>::encode(label));
+                return change;
+            };
+
+        NetworkHydraulic firstNetwork = original;
+        firstNetwork.map_labels[0].text = QStringLiteral("Committed action one");
+        const aowis::model::ModelEditTransaction firstAction =
+            encodeEdit(original.map_labels[0], firstNetwork.map_labels[0]);
+        const QByteArray firstFrame =
+            aowis::model::ModelEditTransactionCodec::encode(firstAction);
+        const std::string firstDraft = service->createWorkingCopy(
+            projectId, "main", baseline, session).id;
+        const std::string firstToken = service->acquireWorkingCopyLease(
+            firstDraft, session, 120).token;
+        require(!firstFrame.isEmpty() &&
+                service->saveWorkingCopyTransactions(firstDraft, session, firstToken, 0,
+                    {nativeLabelChange(firstNetwork.map_labels[0], baseline)},
+                    {hydraulic::bytesFromQByteArray(firstFrame)}).generation == 1,
+                "Cannot Save first MODEL map-label action");
+        const std::string firstOperation = native::UuidV7::generate().toString();
+        const native::LocalCommitInfo firstCommit = service->commitWorkingCopy(
+            firstOperation, firstDraft, session, firstToken, 1, baseline,
+            commitMetadata());
+        require(firstCommit.state == native::LocalCommitState::Succeeded,
+                "Cannot Commit first MODEL action");
+        const std::optional<native::RevisionId> firstRevision =
+            native::RevisionId::parse(firstCommit.reservedRevisionId);
+        require(firstRevision.has_value(), "First MODEL revision was not created");
+
+        NetworkHydraulic secondNetwork = firstNetwork;
+        secondNetwork.map_labels[0].text = QStringLiteral("Abandoned committed action");
+        const aowis::model::ModelEditTransaction secondAction =
+            encodeEdit(firstNetwork.map_labels[0], secondNetwork.map_labels[0]);
+        const QByteArray secondFrame =
+            aowis::model::ModelEditTransactionCodec::encode(secondAction);
+        const std::string secondDraft = service->createWorkingCopy(
+            projectId, "main", *firstRevision, session).id;
+        const std::string secondToken = service->acquireWorkingCopyLease(
+            secondDraft, session, 120).token;
+        require(!secondFrame.isEmpty() &&
+                service->saveWorkingCopyTransactions(secondDraft, session, secondToken, 0,
+                    {nativeLabelChange(secondNetwork.map_labels[0], *firstRevision)},
+                    {hydraulic::bytesFromQByteArray(secondFrame)}).generation == 1,
+                "Cannot Save second MODEL map-label action");
+        const native::LocalCommitInfo secondCommit = service->commitWorkingCopy(
+            native::UuidV7::generate().toString(), secondDraft, session,
+            secondToken, 1, *firstRevision, commitMetadata());
+        require(secondCommit.state == native::LocalCommitState::Succeeded,
+                "Cannot Commit second MODEL action");
+        const std::optional<native::RevisionId> secondRevision =
+            native::RevisionId::parse(secondCommit.reservedRevisionId);
+        require(secondRevision.has_value(), "Second MODEL revision was not created");
+
+        const std::string forkDraft = service->createWorkingCopy(
+            projectId, "main", *secondRevision, session).id;
+        const std::string forkToken = service->acquireWorkingCopyLease(
+            forkDraft, session, 120).token;
+        QString error;
+        const std::optional<native::WorkingCopyInfo> selected =
+            hydraulic::navigateVerifiedHydraulicAction(*service,
+                native::UuidV7::generate().toString(), forkDraft, session,
+                forkToken, *secondRevision, *firstRevision, 0, 0, &error);
+        require(selected && selected->generation == 1 &&
+                selected->historyActionPosition == 0,
+                ("Cannot Undo across Commit marker: " + error.toStdString()).c_str());
+
+        NetworkHydraulic alternativeNetwork = original;
+        alternativeNetwork.map_labels[0].text = QStringLiteral("New edit from old History");
+        const aowis::model::ModelEditTransaction alternativeAction =
+            encodeEdit(original.map_labels[0], alternativeNetwork.map_labels[0]);
+        const QByteArray alternativeFrame =
+            aowis::model::ModelEditTransactionCodec::encode(alternativeAction);
+        require(!alternativeFrame.isEmpty(), "Cannot encode alternative MODEL action");
+        const native::WorkingCopyInfo saved = service->saveWorkingCopyTransactions(
+            forkDraft, session, forkToken, 1,
+            {nativeLabelChange(alternativeNetwork.map_labels[0], *secondRevision)},
+            {hydraulic::bytesFromQByteArray(alternativeFrame)});
+        require(saved.generation == 2 && saved.journalCount == 1 &&
+                saved.historyForkRevisionId == firstRevision->toString() &&
+                saved.historyForkActionPosition == 0 &&
+                service->optionalHead(projectId, "main") == secondRevision,
+                "Forked MODEL Save discarded origin or changed immutable HEAD");
+        const std::optional<hydraulic::VerifiedHydraulicDraftActionNavigationPlan> undoPlan =
+            hydraulic::planVerifiedHydraulicDraftActionNavigation(
+                *service, forkDraft, 0, 2, &error);
+        const std::optional<hydraulic::VerifiedHydraulicDraftActionNavigationPlan> redoPlan =
+            hydraulic::planVerifiedHydraulicDraftActionNavigation(
+                *service, forkDraft, 1, 2, &error);
+        require(undoPlan && redoPlan,
+                ("Cannot replay new forked MODEL action: " + error.toStdString()).c_str());
+        const std::optional<native::WorkingCopyInfo> undone =
+            hydraulic::navigateVerifiedHydraulicDraftAction(*service,
+                native::UuidV7::generate().toString(), forkDraft, session, forkToken,
+                *secondRevision, 0, 2, &error);
+        require(undone && undone->generation == 3 && undone->draftActionPosition == 0,
+                ("Cannot Undo newly forked MODEL action: " + error.toStdString()).c_str());
+        const std::optional<native::WorkingCopyInfo> redone =
+            hydraulic::navigateVerifiedHydraulicDraftAction(*service,
+                native::UuidV7::generate().toString(), forkDraft, session, forkToken,
+                *secondRevision, 1, 3, &error);
+        require(redone && redone->generation == 4 && redone->draftActionPosition == 1,
+                ("Cannot Redo newly forked MODEL action: " + error.toStdString()).c_str());
+        const native::LocalCommitInfo forkCommit = service->commitWorkingCopy(
+            native::UuidV7::generate().toString(), forkDraft, session,
+            forkToken, 4, *secondRevision, commitMetadata());
+        require(forkCommit.state == native::LocalCommitState::Succeeded,
+                "Cannot Commit MODEL edit made after archived Undo");
+        const std::optional<native::RevisionId> forkRevision =
+            native::RevisionId::parse(forkCommit.reservedRevisionId);
+        require(forkRevision.has_value(), "Fork Commit lacks immutable revision");
+        const std::optional<hydraulic::VerifiedHydraulicRevisionCoverage> verified =
+            hydraulic::verifyHydraulicRevisionActionCoverage(
+                *service, projectId, "main", *forkRevision, &error);
+        require(verified && verified->actionCount == 1 && verified->tracks.size() == 1,
+                ("Cannot replay forked Commit actions: " + error.toStdString()).c_str());
+        const native::BranchActionHistoryPage history =
+            service->branchActionHistory(projectId, "main", 10);
+        require(history.commits.size() >= 2 &&
+                history.commits.front().revision.id == *forkRevision &&
+                history.commits.front().logicalParentRevisionId == firstRevision->toString(),
+                "New logical editing History still includes abandoned Commit actions");
+        const std::optional<native::ModelRecord> immutableSecond =
+            service->getModelAtRevision(projectId, *secondRevision,
+                hydraulic::keyFromUuid(original.map_labels[0].uuid));
+        require(immutableSecond && immutableSecond->payload ==
+                hydraulic::bytesFromQByteArray(
+                    native::ModelCodec<HydraulicMapLabel>::encode(secondNetwork.map_labels[0])),
+                "New editing History modified the abandoned immutable Commit");
+        service.reset();
+        native::ProjectService recovered(folder);
+        const std::optional<hydraulic::VerifiedHydraulicRevisionCoverage> afterRestart =
+            hydraulic::verifyHydraulicRevisionActionCoverage(
+                recovered, projectId, "main", *forkRevision, &error);
+        require(afterRestart && afterRestart->actionCount == 1,
+                "Forked MODEL archive cannot be verified after DVMDB restart");
+    } catch (...) {
+        std::error_code ignored;
+        std::filesystem::remove_all(folder, ignored);
+        throw;
+    }
+    std::error_code ignored;
+    std::filesystem::remove_all(folder, ignored);
+}
+
 int main(int argc, char** argv) {
     QCoreApplication application(argc, argv);
     try {
@@ -2874,6 +3062,7 @@ int main(int argc, char** argv) {
         exerciseVerifiedRevisionHydraulicCoverage();
         exerciseVerifiedActiveDraftActionNavigation();
         exerciseUnbornFirstTankHistory();
+        exerciseArchivedHistoryForkedHydraulicEdit();
         exerciseAtomicRootMetadataEdit();
         exerciseInt00IncompleteNetworkRoundTrip();
         exerciseUuidV7Hydraulic();

@@ -3045,6 +3045,14 @@ void exerciseHydraulicDraftMembershipHttp() {
     check(archiveClient.call("POST", archivedPath, zeroBody).status == 200 &&
           archiveClient.call("GET", archivedCursorPath).json.value("generation") == "10",
           "HDB-03e archived action retry advanced generation twice");
+    // A plain Save must not erase the verified archive coordinate or
+    // circumvent the reversible MODEL event requirement, even without a
+    // suspended journal (immediately after a Commit).
+    check(archiveClient.call("POST", path + "/save",
+        QJsonObject{{"sessionId", session}, {"fencingToken", QString::fromStdString(renewed.token)},
+                    {"expectedGeneration", "10"}, {"changes", QJsonArray{addition}}}).status == 409 &&
+          archiveClient.call("GET", archivedCursorPath).json.value("generation") == "10",
+          "HDB-03e plain Save discarded a verified archived cursor");
     check(archiveClient.call("POST", archivedPath,
               archivedBody(zeroOperation, "9", "1")).status == 409,
           "HDB-03e accepted conflicting reuse of navigation UUID");
@@ -3229,20 +3237,8 @@ void exerciseHydraulicDraftMembershipHttp() {
     check(archiveClient.call("POST", archivedPath, suspendedBody).status == 200 &&
           archiveClient.call("GET", archivedCursorPath).json.value("generation") == "21",
           "HDB-03g suspended cross-mode selection was not idempotent");
-    HydraulicNodeJunction forbiddenJunction = revised;
-    forbiddenJunction.elevation_m = 91;
-    const QByteArray forbiddenBytes = native::ModelCodec<HydraulicNodeJunction>::encode(
-        forbiddenJunction);
-    const QString forbiddenEvent = eventFrame(newUuid,
-        QStringLiteral("hydraulic.junction.update"), revisedBytes, forbiddenBytes);
-    const QJsonObject forbiddenMember{{"uuid", newId}, {"kind", 1},
-                                      {"references", QJsonArray{}},
-                                      {"payloadBase64", QString::fromLatin1(forbiddenBytes.toBase64())}};
-    check(archiveClient.call("POST", path + "/save-events",
-        QJsonObject{{"sessionId", session}, {"fencingToken", QString::fromStdString(renewed.token)},
-                    {"expectedGeneration", "21"}, {"changes", QJsonArray{forbiddenMember}},
-                    {"events", QJsonArray{forbiddenEvent}}}).status == 409,
-          "HDB-03g Save bypassed suspended draft History boundary");
+    // Browsing alone must leave Redo intact. Test the untouched route first;
+    // a NEW edit from the archived position is tested below as a real fork.
     const Response returned = archiveClient.call("POST", archivedPath,
         liveNavigation(QString::fromStdString(native::UuidV7::generate().toString()), "21", "0"));
     const Response returnedCursor = archiveClient.call("GET", archivedCursorPath);
@@ -3265,6 +3261,133 @@ void exerciseHydraulicDraftMembershipHttp() {
           service.optionalHead(project.id, "main") ==
               native::RevisionId::parse(secondCommit.reservedRevisionId),
           "HDB-03g Redo across Commit boundary did not restore the live MODEL action");
+
+    // HDB-03h: after validating ordinary Undo/Redo through the Commit marker,
+    // return to the same archived action and START a new edit. That must fork
+    // the logical action path, not fail because the old draft has a Redo tail.
+    const Response rewindFork = archiveClient.call("POST", archivedPath,
+        liveNavigation(QString::fromStdString(native::UuidV7::generate().toString()), "23", "0"));
+    const Response selectForkOrigin = archiveClient.call("POST", archivedPath,
+        nextArchivedBody(QString::fromStdString(native::UuidV7::generate().toString()),
+                         "24", secondRevision, "0"));
+    const Response forkOriginCursor = archiveClient.call("GET", archivedCursorPath);
+    check(rewindFork.status == 200 && rewindFork.json.value("generation") == "24" &&
+          selectForkOrigin.status == 200 && selectForkOrigin.json.value("generation") == "25" &&
+          forkOriginCursor.json.value("selectionKind") == "archived" &&
+          forkOriginCursor.json.value("archivedRevisionId") == secondRevision &&
+          forkOriginCursor.json.value("archivedActionPosition") == "0" &&
+          forkOriginCursor.json.value("canBranchFromHistory").toBool() &&
+          forkOriginCursor.json.value("journalCount") == "1",
+          "HDB-03h could not restore the verified fork origin with suspended Redo");
+    HydraulicNodeJunction forkJunction = revised;
+    forkJunction.elevation_m = 91;
+    const QByteArray forkBytes = native::ModelCodec<HydraulicNodeJunction>::encode(forkJunction);
+    const QJsonObject forkMember{{"uuid", newId}, {"kind", 1},
+                                 {"references", QJsonArray{}},
+                                 {"payloadBase64", QString::fromLatin1(forkBytes.toBase64())}};
+    // This deliberately stale before-image belongs to the abandoned 77-metre
+    // Commit, not the actual selected 66-metre state. A rejected Save must not
+    // fork, drop Redo, or advance the generation.
+    const QString staleForkEvent = eventFrame(newUuid,
+        QStringLiteral("hydraulic.junction.update"), finalBytes, forkBytes);
+    const QJsonObject staleForkBody{{"sessionId", session},
+        {"fencingToken", QString::fromStdString(renewed.token)},
+        {"expectedGeneration", "25"}, {"changes", QJsonArray{forkMember}},
+        {"events", QJsonArray{staleForkEvent}}};
+    check(archiveClient.call("POST", path + "/save-events", staleForkBody).status == 400 &&
+          archiveClient.call("GET", archivedCursorPath).json.value("generation") == "25" &&
+          service.workingCopy(draftId, true).journal.size() == 1,
+          "HDB-03h stale MODEL before-image was accepted or damaged suspended Redo");
+    const QString forkEvent = eventFrame(newUuid,
+        QStringLiteral("hydraulic.junction.update"), revisedBytes, forkBytes);
+    const QJsonObject forkBody{{"sessionId", session},
+        {"fencingToken", QString::fromStdString(renewed.token)},
+        {"expectedGeneration", "25"}, {"changes", QJsonArray{forkMember}},
+        {"events", QJsonArray{forkEvent}}};
+    const Response forkSaved = archiveClient.call("POST", path + "/save-events", forkBody);
+    const Response forkCursor = archiveClient.call("GET", archivedCursorPath);
+    const Response forkView = archiveClient.call("GET", path + "/networks/" + networkId);
+    const std::optional<NetworkHydraulic> forkNetwork =
+        native::ModelCodec<NetworkHydraulic>::decode(QByteArray::fromBase64(
+            forkView.json.value("payloadBase64").toString().toLatin1()));
+    const native::WorkingCopyInfo forkDraft = service.workingCopy(draftId, true);
+    check(forkSaved.status == 200 && forkSaved.json.value("generation") == "26" &&
+          forkSaved.json.value("eventCount") == "1" &&
+          forkCursor.status == 200 && forkCursor.json.value("generation") == "26" &&
+          forkCursor.json.value("selectionKind") == "draft" &&
+          forkCursor.json.value("journalCount") == "1" &&
+          forkCursor.json.value("forkRevisionId") == secondRevision &&
+          forkCursor.json.value("forkActionPosition") == "0" &&
+          forkCursor.json.value("nextAction").isNull() &&
+          forkView.status == 200 && forkNetwork &&
+          forkNetwork->nodes_junctions.last().elevation_m == 91 &&
+          forkDraft.journal.size() == 1 &&
+          forkDraft.journal.front().encoded == native::hydraulic::bytesFromQByteArray(
+              QByteArray::fromBase64(forkEvent.toLatin1())) &&
+          forkDraft.historyForkRevisionId == secondRevision.toStdString() &&
+          forkDraft.historyForkActionPosition == 0 &&
+          forkDraft.historyForkArchiveCommitOperationId == secondCommit.id &&
+          service.optionalHead(project.id, "main") ==
+              native::RevisionId::parse(secondCommit.reservedRevisionId),
+          "HDB-03h valid archived MODEL Save did not atomically fork History");
+    check(archiveClient.call("POST", path + "/save-events", forkBody).status == 200 &&
+          archiveClient.call("GET", archivedCursorPath).json.value("generation") == "26",
+          "HDB-03h lost-acknowledgement replay duplicated the fork");
+    QJsonObject staleGeneration = forkBody;
+    staleGeneration.insert("expectedGeneration", QStringLiteral("24"));
+    check(archiveClient.call("POST", path + "/save-events", staleGeneration).status == 409,
+          "HDB-03h stale generation accepted a second fork");
+    const QString timelinePath = QStringLiteral("/dvmdb/v1/projects/") +
+        QString::fromStdString(project.id) + QStringLiteral("/branches/main/action-history");
+    const QString draftTimelinePath = timelinePath + "?draftId=" +
+        QString::fromStdString(draftId) + "&expectedDraftGeneration=26";
+    const Response forkTimeline = archiveClient.call("GET", draftTimelinePath);
+    const QJsonArray forkCommits = forkTimeline.json.value("commits").toArray();
+    check(forkTimeline.status == 200 && forkCommits.size() >= 2 &&
+          forkCommits.at(0).toObject().value("revision").toObject().value("id") == secondRevision &&
+          forkCommits.at(0).toObject().value("actionCount") == 0 &&
+          forkCommits.at(1).toObject().value("revision").toObject().value("id") == archivedRevision &&
+          forkCommits.at(1).toObject().value("actionCount") == 2 &&
+          forkTimeline.json.value("draft").toObject().value("journalCount") == "1",
+          "HDB-03h draft History resurrected the abandoned committed action suffix");
+    const Response forkUndone = archiveClient.call("POST", archivedPath,
+        liveNavigation(QString::fromStdString(native::UuidV7::generate().toString()), "26", "0"));
+    const Response forkAtBase = archiveClient.call("GET", archivedCursorPath);
+    const Response forkRedone = archiveClient.call("POST", archivedPath,
+        liveNavigation(QString::fromStdString(native::UuidV7::generate().toString()), "27", "1"));
+    const Response forkRedoView = archiveClient.call("GET", path + "/networks/" + networkId);
+    const std::optional<NetworkHydraulic> forkRedoneNetwork =
+        native::ModelCodec<NetworkHydraulic>::decode(QByteArray::fromBase64(
+            forkRedoView.json.value("payloadBase64").toString().toLatin1()));
+    check(forkUndone.status == 200 && forkUndone.json.value("generation") == "27" &&
+          forkAtBase.json.value("selectionKind") == "draft" &&
+          forkAtBase.json.value("nextAction").toObject().value("actionPosition") == "1" &&
+          forkAtBase.json.value("previousAction").toObject().value("revisionId") == archivedRevision &&
+          forkRedone.status == 200 && forkRedone.json.value("generation") == "28" &&
+          forkRedoView.status == 200 && forkRedoneNetwork &&
+          forkRedoneNetwork->nodes_junctions.last().elevation_m == 91,
+          "HDB-03h Undo/Redo of forked MODEL action lost its archived parent");
+    const native::LocalCommitInfo forkCommit = service.commitWorkingCopy(
+        native::UuidV7::generate().toString(), draftId, sessionId, renewed.token,
+        28, native::RevisionId::parse(secondCommit.reservedRevisionId), commitMetadata());
+    const std::optional<native::RevisionId> forkRevision =
+        native::RevisionId::parse(forkCommit.reservedRevisionId);
+    const Response committedForkTimeline = archiveClient.call("GET", timelinePath);
+    const QJsonArray committedForks = committedForkTimeline.json.value("commits").toArray();
+    check(forkCommit.state == native::LocalCommitState::Succeeded && forkRevision &&
+          service.optionalHead(project.id, "main") == forkRevision &&
+          service.revision(project.id, *forkRevision).parents.front().id ==
+              *native::RevisionId::parse(secondCommit.reservedRevisionId) &&
+          committedForkTimeline.status == 200 && committedForks.size() >= 3 &&
+          committedForks.at(0).toObject().value("revision").toObject().value("id") ==
+              QString::fromStdString(forkCommit.reservedRevisionId) &&
+          committedForks.at(0).toObject().value("logicalParentRevisionId") == secondRevision &&
+          committedForks.at(0).toObject().value("actionCount") == 1 &&
+          committedForks.at(1).toObject().value("revision").toObject().value("id") == secondRevision &&
+          committedForks.at(1).toObject().value("actionCount") == 0 &&
+          committedForks.at(2).toObject().value("revision").toObject().value("id") == archivedRevision &&
+          service.localCommitActionHistory(secondCommit.id).actions.size() == 1,
+          "HDB-03h Commit rewrote the DAG or lost the forked logical action lineage");
     archiveServer.stop();
 }
 #endif

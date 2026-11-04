@@ -357,6 +357,17 @@ public:
     void updateBranchProperties(const ProjectId& project, const BranchId& branch,
                                 std::string_view expectedName, std::string_view name,
                                 const BranchMetadata& metadata);
+    // Remove a branch ref (including an unborn branch). Immutable shared ancestry
+    // and pack objects are retained. The expected HEAD is a strict CAS, including
+    // nullopt for an unborn branch.
+    void deleteBranch(const ProjectId& project, const BranchId& branch,
+                      std::optional<RevisionId> expectedHead);
+    // Delete the selected revision and its first-parent descendants on this
+    // branch only. Return true if the branch itself was removed. Shared DAG
+    // nodes and merge parents remain immutable and addressable.
+    bool truncateBranch(const ProjectId& project, const BranchId& branch,
+                        std::optional<RevisionId> expectedHead, const RevisionId& firstRemoved);
+
     // Commit message edits are separate mutable annotations. A revision record
     // (and its SHA-256/parents/content) is never rewritten.
     void updateRevisionDisplayMessage(const ProjectId& project, const RevisionId& revision,

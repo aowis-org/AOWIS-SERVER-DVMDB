@@ -3995,6 +3995,81 @@ BranchCreationResult Repository::createBranchFromId(
     return createBranchLocked(project, name, sourceBranch->name, created);
 }
 
+void Repository::deleteBranch(const ProjectId& project, const BranchId& branch,
+                              std::optional<RevisionId> expectedHead) {
+    std::lock_guard<std::mutex> guarded(this->mutex_);
+    ScopedFileLock locked(this->lockFd_);
+    refreshIndex();
+    std::optional<StoredBranch> selected;
+    for (const StoredBranch& candidate : readStoredBranches(this->directory_))
+        if (candidate.id == branch) selected = candidate;
+    require(Err::NotFound, selected.has_value(), "branch UUID not found");
+    require(Err::Conflict, selected->revision == expectedHead,
+            "branch HEAD changed since deletion confirmation");
+    if (selected->revision) (void)branchRevisionLocked(project, selected->name);
+    const std::filesystem::path heads = this->directory_ / "refs" / "heads";
+    const std::filesystem::path target = heads / branch.toString();
+    struct stat st{};
+    systemCall(::lstat(target.c_str(), &st) == 0 && S_ISREG(st.st_mode),
+               "validate branch ref before removal");
+    systemCall(::unlink(target.c_str()) == 0, "delete branch ref");
+    syncDirectory(heads);
+}
+
+bool Repository::truncateBranch(const ProjectId& project, const BranchId& branch,
+                                std::optional<RevisionId> expectedHead,
+                                const RevisionId& firstRemoved) {
+    std::lock_guard<std::mutex> guarded(this->mutex_);
+    ScopedFileLock locked(this->lockFd_);
+    refreshIndex();
+    std::optional<StoredBranch> selected;
+    for (const StoredBranch& candidate : readStoredBranches(this->directory_))
+        if (candidate.id == branch) selected = candidate;
+    require(Err::NotFound, selected.has_value(), "branch UUID not found");
+    require(Err::Conflict, selected->revision == expectedHead,
+            "branch HEAD changed since deletion confirmation");
+    require(Err::InvalidInput, selected->revision.has_value(),
+            "unborn branch has no revision to truncate");
+    (void)branchRevisionLocked(project, selected->name);
+    RevisionResolver resolver(this->directory_, project);
+    const RevisionObjectReader reader = [this](const Hash& digest) -> std::optional<Bytes> {
+        if (!containsIndex(digest)) return std::nullopt;
+        return load(digest);
+    };
+    RevisionId current = *selected->revision;
+    std::optional<ResolvedRevision> removed;
+    for (std::size_t count = 0; count < 250000; ++count) {
+        const std::optional<ResolvedRevision> node = resolver.resolve(current, reader);
+        require(Err::Corruption, node.has_value(), "branch first-parent ancestry missing");
+        if (current == firstRemoved) { removed = node; break; }
+        if (node->record.parents.empty()) break;
+        current = node->record.parents.front().id;
+    }
+    require(Err::InvalidInput, removed.has_value(),
+            "selected revision is not on branch first-parent history");
+    const bool deleteEntireBranch = removed->record.parents.empty()
+        || (selected->forkRevisionId &&
+            (removed->record.parents.front().id == *selected->forkRevisionId
+             || firstRemoved == *selected->forkRevisionId));
+    if (deleteEntireBranch) {
+        const std::filesystem::path heads = this->directory_ / "refs" / "heads";
+        const std::filesystem::path target = heads / branch.toString();
+        struct stat st{};
+        systemCall(::lstat(target.c_str(), &st) == 0 && S_ISREG(st.st_mode),
+                   "validate branch ref before removal");
+        systemCall(::unlink(target.c_str()) == 0, "delete branch ref");
+        syncDirectory(heads);
+        return true;
+    }
+    const RevisionId survivor = removed->record.parents.front().id;
+    const std::optional<ResolvedRevision> previous = resolver.resolve(survivor, reader);
+    require(Err::Corruption, previous.has_value(), "remaining revision missing");
+    selected->revision = survivor;
+    selected->head = previous->recordHash;
+    publishStoredBranch(this->directory_, *selected, false);
+    return false;
+}
+
 bool Repository::hasBranch(std::string_view branch) {
     std::lock_guard<std::mutex> guarded(this->mutex_);
     ScopedFileLock locked(this->lockFd_);

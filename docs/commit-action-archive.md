@@ -8,9 +8,11 @@ the draft rebases; archived actions are not.
 
 The backend provides read-only HTTP timelines and fenced HTTP/native
 selection of archived Commit boundaries and retained active journal actions
-for one existing hydraulic network. V8 also supports safe position-zero
+for one existing hydraulic network. V9 also supports safe position-zero
 handoff across Commit boundaries while preserving the original Redo journal.
-The GUI is not yet connected and Qt cross-mode acceptance remains pending. See the
+The GUI dock uses these HTTP operations. A MODEL Save from a verified archived
+coordinate starts a fresh logical action lane; Qt end-to-end acceptance
+remains pending. See the
 [History contract](history-contract.md) and [remaining History roadmap](history-roadmap.md).
 
 ## Permanent local-Commit archive
@@ -50,7 +52,9 @@ GET /dvmdb/v1/projects/{projectId}/branches/{branch}/action-history
 
 Parameters after `limit` are optional as appropriate. The JSON response
 contains `commits`, `nextCursor` and optional `draft`. A Commit records its
-immutable revision, nullable `operationId`, real `actions`, `actionCount`
+immutable revision, optional `logicalParentRevisionId` (which can differ from
+the immutable DAG parent following a historical fork), nullable
+`operationId`, real `actions`, `actionCount`
 and `checkpointOnly` flag. The draft reports its generation, total journal
 count and up to **100** accepted action UUIDs plus display-ready decoded
 metadata. The draft's `nextDraftOffset` pages independently from the
@@ -108,10 +112,11 @@ For action-boundary navigation the service verifies the draft's private
 role, leased session/fencing token, generation and current committed HEAD;
 checks the revision's indexed archive/operation and action coordinate
 under locks; then replaces the **whole** candidate overlay and publishes
-the V8 cursor in the same durable metadata update. Repeating the identical
+the V9 cursor in the same durable metadata update. Repeating the identical
 operation UUID/parameters, including after restart, does not increment
-generation twice. New ordinary Save and local Commit clear the one-shot
-selection marker. A selected state equal to committed HEAD must be a clean
+generation twice. A new MODEL Save at a verified archived selection atomically records its
+logical fork source and invalidates abandoned Redo; local Commit preserves
+that source in the indexed action archive. No immutable Commit is deleted. A selected state equal to committed HEAD must be a clean
 overlay; the Qt forward-navigation acceptance test still requires a
 confirmed passing run against the current correction.
 
@@ -168,3 +173,15 @@ DVMDB's multi-network storage capability is unchanged.
 See [working-copy storage](storage-formats.md#private-drafts-aowis-working-copy-8)
 for the persisted cursor fields and [working copies](working-copies.md) for
 the ordinary Save/Commit contract.
+
+## Historical action forks
+
+V9 private drafts persist an exact `fork-revision`, `fork-action-position`
+and `fork-archive-operation` when the first new MODEL edit follows an Undo
+into an archived Commit. The old draft journal's abandoned redo tail is
+atomically replaced; old committed revisions and action archives stay
+immutable. A future local Commit retains the fork fields as optional
+sidecar metadata, so the active action reader skips abandoned immutable
+Commit action suffixes while the revision graph still has its original
+first-parent edges. This is a logical editing fork, not a Git-like branch
+operation.

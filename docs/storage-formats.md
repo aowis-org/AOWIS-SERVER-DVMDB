@@ -236,7 +236,7 @@ Hard ceilings: 64 GiB and 1,000,000 objects per bundle, 64 MiB per object;
 callers set lower `BundleLimits`. Import rules:
 [synchronization](offline-repository-synchronization.md).
 
-## Private drafts (`AOWIS-WORKING-COPY-8`)
+## Private drafts (`AOWIS-WORKING-COPY-9`)
 
 Each draft is a directory `working-copies/<draft-uuidv7>/` (mode 0700):
 
@@ -246,7 +246,7 @@ Each draft is a directory `working-copies/<draft-uuidv7>/` (mode 0700):
 * `journal-<uuidv7>` — the MODEL event journal, append-only binary.
 
 ```text
-AOWIS-WORKING-COPY-8
+AOWIS-WORKING-COPY-9
 project\t<project-uuidv7>
 branch\t<branch-uuidv7>
 base\t<revision-uuidv7|->
@@ -266,6 +266,9 @@ history-source-generation\t<generation before last checkpoint selection|->
 history-action-position\t<global action boundary within archived Commit|->
 history-archive-operation\t<archived local Commit operation UUIDv7|->
 draft-action-position\t<selected position in retained active MODEL journal|->
+fork-revision\t<archive revision where new editing path starts|->
+fork-action-position\t<archived source action boundary|->
+fork-archive-operation\t<source local Commit operation UUIDv7|->
 ```
 
 Native checkpoint selection uses the existing atomic meta publication to persist
@@ -277,12 +280,14 @@ For an **active draft action selection**, `history-revision`,
 `history-action-position` and `history-archive-operation` are absent,
 `draft-action-position` ranges from 0 through the retained `journal` count,
 and the navigation operation UUID/source generation identify its last atomic
-publication. **V8 suspended draft history** permits an archived revision and
+publication. **V9 suspended draft history** permits an archived revision and
 archive action position to coexist with a retained journal **only when**
 `draft-action-position` is exactly zero. The journal's acknowledged bytes,
 digest and `last-save` fingerprint remain unchanged while browsing archived
 Commits. Returning to the active journal clears the archived coordinate;
-new Save/Commit are rejected while browsing the archived side. The source generation is exactly one less than the resulting
+a new MODEL event Save from a verified archived selection atomically starts
+a forked journal and invalidates the abandoned Redo tail. Commit and
+non-MODEL Save while browsing remain rejected. The source generation is exactly one less than the resulting
 generation. At the ordinary journal tip, `draft-action-position` may be absent.
 The journal and its original frames are never discarded by selection.
 Snapshot-only checkpoint selection requires an empty MODEL journal.
@@ -371,3 +376,10 @@ failure before intent publication is harmless; first-parent history never
 visits unpublished revisions. Index entries are not repaired by guessing.
 
 Behaviour: [working copies](working-copies.md#local-commit).
+
+A forked active journal persists its source coordinate in the three
+`fork-*` fields even after leaving archived selection. Successful local
+Commit archives that provenance alongside its original MODEL actions in
+the existing indexed local-Commit sidecar (optional appended fork fields).
+Older immutable Commit archives are unchanged. First-parent immutable
+revision ancestry is independent of the logical editing history.

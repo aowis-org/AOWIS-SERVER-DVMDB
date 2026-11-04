@@ -1592,6 +1592,48 @@ std::optional<VerifiedHydraulicRevisionCoverage> verifyHydraulicRevisionActionCo
             return fail(QStringLiteral("Historical revision has no first-parent network snapshot"));
         if (witness.hydraulicRootKeys.size() > 65536)
             return fail(QStringLiteral("Historical revision contains too many network roots"));
+        // Forking the action timeline does not rewrite the revision DAG. The
+        // newly archived actions start at the verified fork coordinate,
+        // whereas their native immutable parent remains the previous HEAD.
+        // Reconstruct and authenticate that alternate MODEL starting state.
+        std::optional<NetworkHydraulic> forkBase;
+        if (witness.historyForkRevision) {
+            // A fork must point backward through this immutable revision's
+            // first-parent ancestry. Otherwise an invalid sidecar could
+            // create cycles in recursive MODEL replay.
+            std::optional<RevisionId> ancestor = witness.parentRevision;
+            bool validAncestry = false;
+            for (std::size_t depth = 0; ancestor && depth < 65536; ++depth) {
+                if (*ancestor == *witness.historyForkRevision) {
+                    validAncestry = true;
+                    break;
+                }
+                const RevisionGraphRevision prior = service.revision(projectId, *ancestor);
+                if (prior.parents.size() > 1) break;
+                ancestor = prior.parents.empty()
+                    ? std::nullopt : std::optional<RevisionId>(prior.parents.front().id);
+            }
+            if (!validAncestry)
+                return fail(QStringLiteral("Archived fork does not follow immutable ancestry"));
+            const std::optional<VerifiedHydraulicRevisionCoverage> source =
+                verifyHydraulicRevisionActionCoverage(service, projectId, branch,
+                    *witness.historyForkRevision, error);
+            if (!source || !witness.historyForkActionPosition ||
+                !witness.historyForkArchiveCommitOperationId ||
+                source->commitOperationId != *witness.historyForkArchiveCommitOperationId ||
+                *witness.historyForkActionPosition > source->actionCount ||
+                source->tracks.size() != 1 || witness.hydraulicRootKeys.size() != 1)
+                return fail(QStringLiteral("Archived fork source is incomplete or ambiguous"));
+            const VerifiedHydraulicNetworkActionTrack& sourceTrack = source->tracks.front();
+            std::size_t localBoundary = 0;
+            for (const std::size_t global : sourceTrack.globalPositions)
+                if (global < *witness.historyForkActionPosition) ++localBoundary;
+            QString replayError;
+            forkBase = previewVerifiedHydraulicActionBoundary(sourceTrack.parent,
+                sourceTrack.committed, sourceTrack.frames, localBoundary, &replayError);
+            if (!forkBase)
+                return fail(QStringLiteral("Cannot verify archived History fork: ") + replayError);
+        }
         struct NetworkState final {
             QUuid id;
             NetworkHydraulic before;
@@ -1666,11 +1708,29 @@ std::optional<VerifiedHydraulicRevisionCoverage> verifyHydraulicRevisionActionCo
                 loadDraftHydraulicNetwork(readAfter, state.id);
             if (!before || !after)
                 return fail(QStringLiteral("Network creation/removal is checkpoint-only until history support exists"));
-            state.before = *before;
+            state.before = forkBase ? *forkBase : *before;
             state.after = *after;
+            if (forkBase && state.before.uuid != state.after.uuid)
+                return fail(QStringLiteral("Archived fork belongs to a different network"));
             const std::size_t index = networks.size();
             gather(parent, state, index);
             gather(std::optional<RevisionId>(revision), state, index);
+            if (forkBase) {
+                // A member can exist only at the old fork coordinate: it
+                // may have been deleted in HEAD and deleted again by the new
+                // actions. Attribute it without guessing its network owner.
+                for (const ModelChange& owned : fullDraftHydraulicNetworkChanges(*forkBase)) {
+                    if (!owned.record) continue;
+                    if (owned.record->kind == hydraulicNetworkKind)
+                        own(owned.key, index, state.rootKeys);
+                    else if (owned.record->kind == 101)
+                        own(owned.key, index, state.chunkKeys);
+                    else {
+                        own(owned.key, index, state.memberKeys);
+                        entityOwners.insert(uuidFromKey(owned.key), index);
+                    }
+                }
+            }
             networks.push_back(std::move(state));
         }
         QSet<QUuid> seenActions;
@@ -1752,13 +1812,13 @@ std::optional<VerifiedHydraulicRevisionCoverage> verifyHydraulicRevisionActionCo
             if (state.frames.empty())
                 return fail(QStringLiteral("Native revision modified a network without any MODEL actions"));
             if (state.rootKeys.contains(change.key)) {
-                if (!state.rootEdited && !state.membershipEdited)
+                if (!forkBase && !state.rootEdited && !state.membershipEdited)
                     return fail(QStringLiteral("Native root change lacks a metadata or membership action"));
             } else if (state.chunkKeys.contains(change.key)) {
-                if (!state.membershipEdited)
+                if (!forkBase && !state.membershipEdited)
                     return fail(QStringLiteral("Native chunk change lacks a membership action"));
             } else if (state.memberKeys.contains(change.key)) {
-                if (!state.typedEdits.contains(uuidFromKey(change.key)))
+                if (!forkBase && !state.typedEdits.contains(uuidFromKey(change.key)))
                     return fail(QStringLiteral("Native entity delta lacks a matching MODEL edit"));
             } else {
                 return fail(QStringLiteral("Native revision delta has unknown ownership"));
@@ -2200,6 +2260,34 @@ planVerifiedHydraulicDraftActionNavigation(
             parent = loadDraftHydraulicNetwork(readBase, networkId);
             if (!parent)
                 return fail(QStringLiteral("Active draft committed network base cannot be loaded"));
+            if (draft.historyForkRevisionId) {
+                if (!draft.historyForkActionPosition ||
+                    !draft.historyForkArchiveCommitOperationId)
+                    return fail(QStringLiteral("Active journal has an incomplete History fork origin"));
+                const std::optional<RevisionId> sourceRevision =
+                    RevisionId::parse(*draft.historyForkRevisionId);
+                if (!sourceRevision)
+                    return fail(QStringLiteral("Active journal fork revision is invalid"));
+                QString sourceError;
+                const std::optional<VerifiedHydraulicRevisionCoverage> source =
+                    verifyHydraulicRevisionActionCoverage(service, draft.projectId,
+                        branch->name, *sourceRevision, &sourceError);
+                if (!source || source->commitOperationId !=
+                        *draft.historyForkArchiveCommitOperationId ||
+                    source->tracks.size() != 1 ||
+                    *draft.historyForkActionPosition > source->actionCount ||
+                    source->tracks.front().parent.uuid != networkId)
+                    return fail(QStringLiteral("Cannot verify the journal's archived fork source: ") + sourceError);
+                const VerifiedHydraulicNetworkActionTrack& track = source->tracks.front();
+                std::size_t localPosition = 0;
+                for (const std::size_t globalPosition : track.globalPositions)
+                    if (globalPosition < *draft.historyForkActionPosition)
+                        ++localPosition;
+                parent = previewVerifiedHydraulicActionBoundary(track.parent,
+                    track.committed, track.frames, localPosition, &sourceError);
+                if (!parent)
+                    return fail(QStringLiteral("Cannot reconstruct the journal's archived fork state: ") + sourceError);
+            }
         }
 
         // Root/chunk/member ownership must cover every material candidate

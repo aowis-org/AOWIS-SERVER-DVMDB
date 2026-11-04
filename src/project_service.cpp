@@ -468,7 +468,7 @@ ProjectService::Project::Project(ProjectInfo value) : info(std::move(value)) {}
 namespace {
 // Private draft format (see docs/storage-formats.md). Earlier
 // pre-release formats are rejected, never migrated.
-constexpr std::string_view workingCopyMarker = "AOWIS-WORKING-COPY-8\n";
+constexpr std::string_view workingCopyMarker = "AOWIS-WORKING-COPY-9\n";
 constexpr std::size_t workingCopyMaxBytes = 8 * 1024 * 1024;
 constexpr std::size_t workingCopyMaxChanges = 20000;
 constexpr std::size_t workingCopyMaxEvents = 4096;
@@ -605,7 +605,7 @@ std::string saveBatchFingerprint(const std::vector<ModelChange>& changes,
 }
 
 // ---------------------------------------------------------------------------
-// Draft storage (AOWIS-WORKING-COPY-8). One directory per draft:
+// Draft storage (AOWIS-WORKING-COPY-9). One directory per draft:
 //   meta                  small text record, atomically replaced; authoritative
 //   candidate-<uuidv7>    immutable binary candidate overlay (sorted changes)
 //   journal-<uuidv7>      append-only binary MODEL event journal
@@ -685,7 +685,11 @@ std::string metaBody(const WorkingCopyInfo& draft, const DraftFiles& files) {
             ? std::to_string(*draft.historyActionPosition) : "-") + "\n"
         + "history-archive-operation\t" + draft.historyArchiveCommitOperationId.value_or("-") + "\n"
         + "draft-action-position\t" + (draft.draftActionPosition
-            ? std::to_string(*draft.draftActionPosition) : "-") + "\n";
+            ? std::to_string(*draft.draftActionPosition) : "-") + "\n"
+        + "fork-revision\t" + draft.historyForkRevisionId.value_or("-") + "\n"
+        + "fork-action-position\t" + (draft.historyForkActionPosition
+            ? std::to_string(*draft.historyForkActionPosition) : "-") + "\n"
+        + "fork-archive-operation\t" + draft.historyForkArchiveCommitOperationId.value_or("-") + "\n";
 }
 
 Bytes encodeCandidate(const std::vector<ModelChange>& changes) {
@@ -904,6 +908,20 @@ std::optional<StoredDraft> readDraftMeta(const std::filesystem::path& directory)
     const std::string historyPosition = nextField("history-action-position");
     const std::string historyArchive = nextField("history-archive-operation");
     const std::string draftPosition = nextField("draft-action-position");
+    const std::string forkRevision = nextField("fork-revision");
+    const std::string forkPosition = nextField("fork-action-position");
+    const std::string forkArchive = nextField("fork-archive-operation");
+    check((forkRevision == "-" && forkPosition == "-" && forkArchive == "-") ||
+          (RevisionId::parse(forkRevision).has_value() && forkPosition != "-" &&
+           UuidV7::parse(forkArchive).has_value() &&
+           decimalField(forkPosition) <= workingCopyMaxEvents &&
+           draft.journalCount > 0),
+          "invalid archived source of forked draft journal");
+    if (forkRevision != "-") {
+        draft.historyForkRevisionId = forkRevision;
+        draft.historyForkActionPosition = decimalField(forkPosition);
+        draft.historyForkArchiveCommitOperationId = forkArchive;
+    }
     if (draftPosition != "-") {
         draft.draftActionPosition = decimalField(draftPosition);
         check(draft.journalCount > 0 &&
@@ -1368,6 +1386,13 @@ std::string localCommitBody(const PersistedLocalCommit& operation) {
         check(body.size() <= localCommitMaxBytes, "local commit record exceeds size limit",
               StorageErrorKind::InvalidInput);
     }
+    if (info.historyForkRevisionId) {
+        check(info.historyForkActionPosition && info.historyForkArchiveCommitOperationId,
+              "incomplete archived fork provenance", StorageErrorKind::InvalidInput);
+        body += "fork-revision\t" + *info.historyForkRevisionId + "\n"
+            + "fork-position\t" + std::to_string(*info.historyForkActionPosition) + "\n"
+            + "fork-operation\t" + *info.historyForkArchiveCommitOperationId + "\n";
+    }
     return body;
 }
 
@@ -1471,7 +1496,19 @@ PersistedLocalCommit readLocalCommit(const std::filesystem::path& path) {
     const Hash archiveHash = chainJournal(Hash{}, result.actions);
     check(actionChain == hexBytes(archiveHash.data(), archiveHash.size()),
           "archived Commit action chain integrity failure");
+    // Only forked Commits have these optional current-format sidecar fields.
+    // Existing immutable archives need no rewrite or migration.
     std::string extra;
+    if (std::getline(lines, extra)) {
+        check(extra.starts_with("fork-revision\t"), "invalid archived fork revision field");
+        info.historyForkRevisionId = extra.substr(sizeof("fork-revision\t") - 1);
+        info.historyForkActionPosition = decimalField(nextField("fork-position"));
+        info.historyForkArchiveCommitOperationId = nextField("fork-operation");
+        check(RevisionId::parse(*info.historyForkRevisionId).has_value() &&
+              *info.historyForkActionPosition <= workingCopyMaxEvents &&
+              UuidV7::parse(*info.historyForkArchiveCommitOperationId).has_value(),
+              "invalid archived fork source");
+    }
     check(!std::getline(lines, extra) && lines.eof(), "trailing local commit fields");
     check(UuidV7::parse(info.repositoryId).has_value() &&
           ProjectId::parse(info.projectId).has_value() &&
@@ -2299,6 +2336,12 @@ WorkingCopyInfo ProjectService::saveWorkingCopyChanges(
     if (draft.journalCount != 0)
         throw ProjectError(ProjectErrorKind::Conflict,
                            "journalled draft requires atomic event saves");
+    // A selected archived action is a verified, immutable starting point.
+    // Plain saves would erase that provenance and silently bypass the
+    // history-fork contract; only a reversible MODEL event Save may fork it.
+    if (draft.historyCheckpointRevisionId)
+        throw ProjectError(ProjectErrorKind::Conflict,
+                           "archived history edits require atomic MODEL event saves");
     if (!draft.leaseSessionId || *draft.leaseSessionId != sessionId ||
         !draft.leaseToken || *draft.leaseToken != fencingToken ||
         !workingCopyLeaseLive(draft) || draft.generation != expectedGeneration)
@@ -2315,6 +2358,9 @@ WorkingCopyInfo ProjectService::saveWorkingCopyChanges(
     draft.historyActionPosition.reset();
     draft.historyArchiveCommitOperationId.reset();
     draft.draftActionPosition.reset();
+    draft.historyForkRevisionId.reset();
+    draft.historyForkActionPosition.reset();
+    draft.historyForkArchiveCommitOperationId.reset();
     draft.lastHistoryNavigationOperationId.reset();
     draft.lastHistoryNavigationSourceGeneration.reset();
     ++draft.generation;
@@ -2380,9 +2426,16 @@ WorkingCopyInfo ProjectService::saveWorkingCopyTransactions(
     if (draft.generation != expectedGeneration ||
         draft.generation == std::numeric_limits<std::uint64_t>::max())
         throw ProjectError(ProjectErrorKind::Conflict, "draft generation changed");
-    if (draft.historyCheckpointRevisionId && draft.journalCount > 0)
+    // Starting an edit from an archived boundary intentionally abandons the
+    // active draft's forward Redo tail, even if that tail crosses Commits.
+    // The selected immutable boundary becomes the base of a NEW journal;
+    // the original archived Commit data is never modified.
+    const bool forkFromArchive = draft.historyCheckpointRevisionId.has_value();
+    if (forkFromArchive &&
+        (!draft.historyActionPosition || !draft.historyArchiveCommitOperationId ||
+         (draft.journalCount > 0 && draft.draftActionPosition != 0)))
         throw ProjectError(ProjectErrorKind::Conflict,
-                           "return to active draft history before saving new MODEL actions");
+                           "new edit requires a verified archived action boundary");
     const std::set<std::string> applied(journalIds.begin(), journalIds.end());
     for (const WorkingCopyEvent& event : events)
         if (applied.contains(event.id))
@@ -2393,10 +2446,10 @@ WorkingCopyInfo ProjectService::saveWorkingCopyTransactions(
     // journal is fsynced into a separate file, then published with the new
     // candidate and cursor in one atomic meta replacement. A crash before
     // that replacement leaves the original Redo tail intact.
-    const bool invalidateRedo = draft.draftActionPosition &&
-        *draft.draftActionPosition < draft.journalCount;
-    const std::uint64_t retainedCount = invalidateRedo
-        ? *draft.draftActionPosition : draft.journalCount;
+    const bool invalidateRedo = forkFromArchive ||
+        (draft.draftActionPosition && *draft.draftActionPosition < draft.journalCount);
+    const std::uint64_t retainedCount = forkFromArchive ? 0 :
+        (invalidateRedo ? *draft.draftActionPosition : draft.journalCount);
     if (retainedCount + events.size() > workingCopyMaxEvents)
         throw StorageError(StorageErrorKind::LimitExceeded,
                            "draft event journal is full; commit or discard the draft");
@@ -2415,6 +2468,11 @@ WorkingCopyInfo ProjectService::saveWorkingCopyTransactions(
     draft.journalCount = retainedCount + events.size();
     draft.dirty = !draft.candidateChanges.empty();
     draft.lastSaveFingerprint = fingerprint;
+    if (forkFromArchive) {
+        draft.historyForkRevisionId = draft.historyCheckpointRevisionId;
+        draft.historyForkActionPosition = draft.historyActionPosition;
+        draft.historyForkArchiveCommitOperationId = draft.historyArchiveCommitOperationId;
+    }
     draft.historyCheckpointRevisionId.reset();
     draft.historyActionPosition.reset();
     draft.historyArchiveCommitOperationId.reset();
@@ -2462,6 +2520,9 @@ void rebaseCommittedDraft(const std::filesystem::path& root, const PersistedLoca
     draft.historyActionPosition.reset();
     draft.historyArchiveCommitOperationId.reset();
     draft.draftActionPosition.reset();
+    draft.historyForkRevisionId.reset();
+    draft.historyForkActionPosition.reset();
+    draft.historyForkArchiveCommitOperationId.reset();
     draft.lastHistoryNavigationOperationId.reset();
     draft.lastHistoryNavigationSourceGeneration.reset();
     draft.dirty = false;
@@ -2589,6 +2650,10 @@ LocalCommitInfo ProjectService::commitWorkingCopy(
             operation.info.expectedHead = expectedLocalHead;
             operation.info.expectedGeneration = expectedGeneration;
             operation.info.reservedRevisionId = RevisionId::generate().toString();
+            operation.info.historyForkRevisionId = draft.historyForkRevisionId;
+            operation.info.historyForkActionPosition = draft.historyForkActionPosition;
+            operation.info.historyForkArchiveCommitOperationId =
+                draft.historyForkArchiveCommitOperationId;
             operation.requestDigest = requestDigest;
             operation.metadata = metadata;
             operation.committedAtMs = wallClockMs();
@@ -2699,7 +2764,8 @@ LocalCommitActionHistory ProjectService::localCommitActionHistory(
 
 RevisionActionPage ProjectService::revisionActionPage(
         std::string_view projectId, std::string_view branch,
-        const RevisionId& revision, std::size_t offset, std::size_t limit) {
+        const RevisionId& revision, std::size_t offset, std::size_t limit,
+        std::optional<std::string_view> draftId) {
     if (limit < 1 || limit > 100 || offset > workingCopyMaxEvents)
         throw ProjectError(ProjectErrorKind::InvalidInput,
                            "invalid archived action page size or offset");
@@ -2723,11 +2789,31 @@ RevisionActionPage ProjectService::revisionActionPage(
     }
     check(operation.info.state == LocalCommitState::Succeeded,
           "indexed published revision has no succeeded Commit");
-    if (offset > operation.actions.size())
+    // Only MODEL steps on the current logical action path are navigable.
+    // The original immutable archive is preserved, but abandoned Redo steps
+    // cannot reappear merely because someone expands a Commit in the GUI.
+    std::optional<std::size_t> visible;
+    std::optional<RevisionId> cursor;
+    for (std::size_t pageIndex = 0; pageIndex < 6554 && !visible; ++pageIndex) {
+        const BranchActionHistoryPage lineage = branchActionHistory(
+            projectId, branch, 10, cursor, draftId);
+        for (const BranchActionHistoryEntry& entry : lineage.commits) {
+            if (entry.revision.id == revision) {
+                visible = entry.actionIds.size();
+                break;
+            }
+        }
+        if (!lineage.next) break;
+        cursor = lineage.next;
+    }
+    if (!visible)
+        throw ProjectError(ProjectErrorKind::Conflict,
+                           "revision is outside the active History action path");
+    if (offset > *visible)
         throw ProjectError(ProjectErrorKind::InvalidInput,
-                           "archive offset exceeds action count");
+                           "archive offset exceeds active History action count");
     page.commitOperationId = operation.info.id;
-    page.total = operation.actions.size();
+    page.total = *visible;
     const std::size_t end = offset + std::min(limit, page.total - offset);
     page.actions.assign(operation.actions.begin() + static_cast<std::ptrdiff_t>(offset),
                         operation.actions.begin() + static_cast<std::ptrdiff_t>(end));
@@ -2773,6 +2859,11 @@ RevisionNativeActionWitness ProjectService::verifiedRevisionNativeActionWitness(
     result.revisionId = revision.toString();
     result.commitOperationId = commit.info.id;
     result.parentRevision = commit.info.expectedHead;
+    if (commit.info.historyForkRevisionId)
+        result.historyForkRevision = RevisionId::parse(*commit.info.historyForkRevisionId);
+    result.historyForkActionPosition = commit.info.historyForkActionPosition;
+    result.historyForkArchiveCommitOperationId =
+        commit.info.historyForkArchiveCommitOperationId;
     result.actions = commit.actions;
 
     withRepository(projectId, [&](Repository& repository) {
@@ -2881,38 +2972,106 @@ BranchActionHistoryPage ProjectService::branchActionHistory(
                            "invalid history page size, draft or draft offset");
     checkHealthy();
     BranchActionHistoryPage page;
-    const std::vector<RevisionGraphRevision> revisions =
-        history(projectId, branch, limit + 1, after);
-    const std::size_t included = std::min(revisions.size(), limit);
-    if (revisions.size() > limit && included > 0)
-        page.next = revisions[included - 1].id;
-    page.commits.reserve(included);
-    std::set<std::string> wanted;
-    for (std::size_t index = 0; index < included; ++index) {
-        page.commits.push_back(BranchActionHistoryEntry{revisions[index], std::nullopt, {}});
-        wanted.insert(revisions[index].id.toString());
+    // The immutable DAG remains first-parent, but the active MODEL action
+    // lineage may fork at an earlier archived boundary. Follow that explicit
+    // provenance for History instead of resurrecting abandoned Redo actions.
+    const std::optional<BranchId> id = branchId(projectId, branch);
+    const std::optional<RevisionGraphHead> head = id
+        ? branchById(projectId, id->toString()) : std::nullopt;
+    if (!head)
+        throw ProjectError(ProjectErrorKind::NotFound, "history branch not found");
+    std::optional<RevisionId> current = head->revision;
+    std::optional<std::uint64_t> inheritedActionLimit;
+    if (draftId) {
+        const WorkingCopyInfo selectedDraft = workingCopy(*draftId, false);
+        if (selectedDraft.projectId != projectId ||
+            selectedDraft.branchId != head->branchId.toString() ||
+            selectedDraft.baseRevision != head->revision)
+            throw ProjectError(ProjectErrorKind::Conflict,
+                               "History fork draft belongs to a different HEAD or branch");
+        if (selectedDraft.historyForkRevisionId) {
+            current = RevisionId::parse(*selectedDraft.historyForkRevisionId);
+            inheritedActionLimit = selectedDraft.historyForkActionPosition;
+            if (!current || !inheritedActionLimit)
+                throw ProjectError(ProjectErrorKind::Conflict,
+                                   "History fork has an invalid source coordinate");
+        }
     }
-
-    // Each reserved revision has a fsynced immutable sidecar published BEFORE
-    // its Commit intent and before its immutable HEAD can be advanced. Look
-    // up only the revisions in this page; unrelated Commit count is unbounded.
-    for (BranchActionHistoryEntry& entry : page.commits) {
+    bool afterReached = !after;
+    std::set<std::string> visited;
+    for (std::size_t steps = 0; current && steps < 65536; ++steps) {
+        if (!visited.insert(current->toString()).second)
+            throw ProjectError(ProjectErrorKind::Conflict, "history fork origin cycle");
+        const RevisionGraphRevision revisionInfo = revision(projectId, *current);
         std::optional<PersistedLocalCommit> operation = indexedLocalCommit(
-            this->root_, this->repository_id_, projectId, entry.revision.id);
-        if (!operation) continue; // Generic/imported/merge checkpoint.
-        if (operation->info.state == LocalCommitState::Pending) {
+            this->root_, this->repository_id_, projectId, *current);
+        if (operation && operation->info.state == LocalCommitState::Pending) {
             const LocalCommitInfo outcome = localCommitStatus(operation->info.id);
             check(outcome.state == LocalCommitState::Succeeded,
                   "indexed published revision has no succeeded Commit");
             operation = indexedLocalCommit(this->root_, this->repository_id_,
-                                           projectId, entry.revision.id);
+                                           projectId, *current);
         }
-        check(operation && operation->info.state == LocalCommitState::Succeeded,
-              "indexed published revision has no succeeded Commit");
-        entry.commitOperationId = operation->info.id;
-        for (const WorkingCopyEvent& event : operation->actions)
-            entry.actionIds.push_back(event.id);
+        if (operation)
+            check(operation->info.state == LocalCommitState::Succeeded,
+                  "indexed published revision has no succeeded Commit");
+        if (!afterReached) {
+            if (*current == *after) afterReached = true;
+        } else if (page.commits.size() == limit) {
+            page.next = page.commits.back().revision.id;
+            break;
+        } else {
+            BranchActionHistoryEntry entry{revisionInfo, std::nullopt, {}, std::nullopt};
+            if (operation) {
+                entry.commitOperationId = operation->info.id;
+                const std::size_t available = operation->actions.size();
+                const std::size_t visible = inheritedActionLimit
+                    ? std::min<std::size_t>(available, *inheritedActionLimit) : available;
+                for (std::size_t index = 0; index < visible; ++index)
+                    entry.actionIds.push_back(operation->actions[index].id);
+            }
+            page.commits.push_back(std::move(entry));
+        }
+        std::optional<RevisionId> next = revisionInfo.parents.empty()
+            ? std::nullopt : std::optional<RevisionId>(revisionInfo.parents.front().id);
+        if (revisionInfo.parents.size() > 1)
+            throw ProjectError(ProjectErrorKind::Conflict,
+                               "merge revision is a checkpoint-only History boundary");
+        const std::optional<std::uint64_t> nextLimit = operation
+            ? operation->info.historyForkActionPosition : std::nullopt;
+        if (operation && operation->info.historyForkRevisionId) {
+            const std::optional<RevisionId> source =
+                RevisionId::parse(*operation->info.historyForkRevisionId);
+            if (!source || !operation->info.historyForkArchiveCommitOperationId ||
+                !nextLimit || *source == *current)
+                throw ProjectError(ProjectErrorKind::Conflict,
+                                   "incomplete archived fork source");
+            // A fork may jump over immutable Commits, never across branches
+            // or forward through time. Check actual first-parent ancestry.
+            std::optional<RevisionId> ancestor = next;
+            bool ancestorFound = false;
+            for (std::size_t depth = 0; ancestor && depth < 65536; ++depth) {
+                if (*ancestor == *source) { ancestorFound = true; break; }
+                const RevisionGraphRevision record = revision(projectId, *ancestor);
+                if (record.parents.size() > 1)
+                    break;
+                ancestor = record.parents.empty()
+                    ? std::nullopt : std::optional<RevisionId>(record.parents.front().id);
+            }
+            if (!ancestorFound)
+                throw ProjectError(ProjectErrorKind::Conflict,
+                                   "archived fork source is not an ancestor");
+            next = source;
+        }
+        if (!page.commits.empty() && page.commits.back().revision.id == *current)
+            page.commits.back().logicalParentRevisionId = next
+                ? std::optional<std::string>(next->toString()) : std::nullopt;
+        inheritedActionLimit = nextLimit;
+        current = next;
     }
+    if (!afterReached)
+        throw ProjectError(ProjectErrorKind::InvalidInput,
+                           "history cursor is not on the active action path");
 
     if (draftId) {
         const WorkingCopyInfo draft = workingCopy(*draftId, true);
@@ -3220,10 +3379,12 @@ WorkingCopyInfo ProjectService::publishVerifiedHistoryActionNavigation(
                                "history action draft generation changed");
         const bool suspendedJournal = draft.journalCount > 0 &&
             draft.draftActionPosition == 0;
+        const bool forkSuspended = suspendedJournal && draft.historyForkRevisionId &&
+            draft.historyForkActionPosition && draft.historyForkArchiveCommitOperationId;
         if ((draft.journalCount != 0 && !suspendedJournal) ||
-            (draft.dirty && !draft.historyCheckpointRevisionId) ||
+            (draft.dirty && !draft.historyCheckpointRevisionId && !forkSuspended) ||
             (suspendedJournal && !draft.historyCheckpointRevisionId &&
-             !draft.candidateChanges.empty()))
+             !forkSuspended && !draft.candidateChanges.empty()))
             throw ProjectError(ProjectErrorKind::Conflict,
                                "history action navigation requires a clean suspended draft boundary");
         // Verify the immutable indexed archive and this action coordinate,
@@ -3249,7 +3410,7 @@ WorkingCopyInfo ProjectService::publishVerifiedHistoryActionNavigation(
         draft.candidateChanges = verifiedCandidate; // COMPLETE replacement.
         draft.dirty = !draft.candidateChanges.empty();
         // Retained live MODEL actions must remain fsync-pinned for Redo.
-        // A V8 archived cursor can coexist only with live position zero.
+        // An archived cursor can coexist only with live position zero.
         if (!suspendedJournal) draft.lastSaveFingerprint.reset();
         draft.historyCheckpointRevisionId = revision.toString();
         draft.historyActionPosition = static_cast<std::uint64_t>(actionPosition);
@@ -3323,21 +3484,29 @@ WorkingCopyInfo ProjectService::publishVerifiedDraftActionNavigation(
             throw ProjectError(ProjectErrorKind::Conflict,
                                "draft action navigation requires a retained MODEL journal");
         if (draft.historyCheckpointRevisionId) {
-            // Resume only from the newest Commit's last actionable state:
-            // returning to draft position zero replays the final Commit edit.
             if (!draft.draftActionPosition || *draft.draftActionPosition != 0 ||
-                !draft.historyActionPosition || !expectedHead ||
-                *draft.historyCheckpointRevisionId != expectedHead->toString())
+                !draft.historyActionPosition || !expectedHead)
                 throw ProjectError(ProjectErrorKind::Conflict,
-                                   "draft journal cannot resume from an unrelated archived checkpoint");
-            const std::optional<PersistedLocalCommit> source = indexedLocalCommit(
-                this->root_, this->repository_id_, draft.projectId, *expectedHead);
-            if (!source || source->info.state != LocalCommitState::Succeeded ||
-                source->info.id != draft.historyArchiveCommitOperationId ||
-                source->actions.empty() ||
-                *draft.historyActionPosition + 1 < source->actions.size())
-                throw ProjectError(ProjectErrorKind::Conflict,
-                                   "draft journal can resume only adjacent to its committed HEAD");
+                                   "draft journal must be suspended before resuming");
+            const bool forkResume = draft.historyForkRevisionId &&
+                draft.historyForkActionPosition &&
+                *draft.historyCheckpointRevisionId == *draft.historyForkRevisionId &&
+                *draft.historyActionPosition == *draft.historyForkActionPosition &&
+                draft.historyArchiveCommitOperationId ==
+                    draft.historyForkArchiveCommitOperationId;
+            if (!forkResume) {
+                if (*draft.historyCheckpointRevisionId != expectedHead->toString())
+                    throw ProjectError(ProjectErrorKind::Conflict,
+                                       "draft journal cannot resume from an unrelated archived checkpoint");
+                const std::optional<PersistedLocalCommit> source = indexedLocalCommit(
+                    this->root_, this->repository_id_, draft.projectId, *expectedHead);
+                if (!source || source->info.state != LocalCommitState::Succeeded ||
+                    source->info.id != draft.historyArchiveCommitOperationId ||
+                    source->actions.empty() ||
+                    *draft.historyActionPosition + 1 < source->actions.size())
+                    throw ProjectError(ProjectErrorKind::Conflict,
+                                       "draft journal can resume only adjacent to its committed HEAD");
+            }
         }
         std::set<Key> seen;
         for (const ModelChange& change : verifiedCandidate)
@@ -3465,6 +3634,42 @@ std::optional<RevisionGraphHead> ProjectService::branchById(std::string_view pro
         });
     });
     return found;
+}
+
+void ProjectService::deleteBranch(std::string_view projectId, std::string_view branchId,
+                                  std::optional<RevisionId> expectedHead) {
+    const std::optional<ProjectId> project = ProjectId::parse(projectId);
+    const std::optional<BranchId> branch = BranchId::parse(branchId);
+    if (!project || !branch)
+        throw ProjectError(ProjectErrorKind::InvalidInput, "UUIDv7 project and branch required");
+    // Working copies have separate fenced history journals. Never orphan one.
+    for (const WorkingCopyInfo& draft : listWorkingCopies())
+        if (draft.projectId == projectId && draft.branchId == branchId)
+            throw ProjectError(ProjectErrorKind::Conflict,
+                "branch has a working copy; close or discard it before deleting history");
+    withRepository(projectId, [&](Repository& repository) {
+        translated<int>([&]() { repository.deleteBranch(*project, *branch, expectedHead); return 0; });
+    });
+}
+
+bool ProjectService::truncateBranch(std::string_view projectId, std::string_view branchId,
+                                    std::optional<RevisionId> expectedHead,
+                                    const RevisionId& firstRemoved) {
+    const std::optional<ProjectId> project = ProjectId::parse(projectId);
+    const std::optional<BranchId> branch = BranchId::parse(branchId);
+    if (!project || !branch)
+        throw ProjectError(ProjectErrorKind::InvalidInput, "UUIDv7 project and branch required");
+    for (const WorkingCopyInfo& draft : listWorkingCopies())
+        if (draft.projectId == projectId && draft.branchId == branchId)
+            throw ProjectError(ProjectErrorKind::Conflict,
+                "branch has a working copy; close or discard it before deleting history");
+    bool deleted = false;
+    withRepository(projectId, [&](Repository& repository) {
+        deleted = translated<bool>([&]() {
+            return repository.truncateBranch(*project, *branch, expectedHead, firstRemoved);
+        });
+    });
+    return deleted;
 }
 
 BranchCreationResult ProjectService::createBranchFromId(

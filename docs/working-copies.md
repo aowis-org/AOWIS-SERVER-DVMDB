@@ -85,13 +85,16 @@ immutable revision content never change. A subsequent normal Save or Commit
 clears the exact-checkpoint cursor. Native `hydraulic::navigateVerifiedHydraulicAction`
 can also select an **individual archived hydraulic action boundary**, once
 complete original MODEL replay and native-record coverage have been verified.
-It publishes the entire replacement overlay and V8 archived-action coordinate together,
+It publishes the entire replacement overlay and V9 archived-action coordinate together,
 with lease/generation/HEAD checks and exact-operation retry. An active journal may cross into archived
 history from its verified zero position without discarding the retained Redo
 frames. Other active positions are refused, and the local Commit must be fully
 covered by archived events. Returning to the committed HEAD is intended to
 leave an empty (clean) candidate. These selectors are exposed by the fenced HTTP History navigation endpoint;
-the GUI History dock is not yet wired to them.
+the GUI History dock uses those endpoints. A verified MODEL Save made at
+an archived action coordinate atomically forks the active action history,
+invalidates the abandoned Redo steps and retains the exact fork source for
+future Undo/Redo and local Commit archives. Immutable revisions remain intact.
 
 `ProjectService::publishVerifiedDraftActionNavigation` is a separate, native
 **internal** publication primitive for a MODEL-verified position in the active

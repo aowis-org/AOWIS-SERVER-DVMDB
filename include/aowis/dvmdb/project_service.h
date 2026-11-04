@@ -98,6 +98,13 @@ struct WorkingCopyInfo {
     // atomic event Save at a non-tip position replaces that redo tail with
     // the new events, keeping only the selected acknowledged prefix.
     std::optional<std::uint64_t> draftActionPosition;
+    // Logical History fork: an active journal begun from an immutable MODEL
+    // action boundary, not from the current immutable branch HEAD. The old
+    // forward actions remain in immutable Commit archives, never in Redo.
+    // These three values are published atomically with the replacement journal.
+    std::optional<std::string> historyForkRevisionId;
+    std::optional<std::uint64_t> historyForkActionPosition;
+    std::optional<std::string> historyForkArchiveCommitOperationId;
     std::optional<std::string> lastHistoryNavigationOperationId;
     std::optional<std::uint64_t> lastHistoryNavigationSourceGeneration;
     std::optional<std::string> leaseSessionId;
@@ -135,6 +142,11 @@ struct LocalCommitInfo {
     std::optional<RevisionId> expectedHead;
     std::string reservedRevisionId;
     std::uint64_t expectedGeneration = 0;
+    // Logical parent of MODEL actions after a new edit following archived Undo.
+    // The immutable revision still uses expectedHead as its DAG parent.
+    std::optional<std::string> historyForkRevisionId;
+    std::optional<std::uint64_t> historyForkActionPosition;
+    std::optional<std::string> historyForkArchiveCommitOperationId;
     std::string payloadDigest;
     LocalCommitState state = LocalCommitState::Pending;
     std::string rejection;
@@ -158,6 +170,9 @@ struct BranchActionHistoryEntry {
     RevisionGraphRevision revision;
     std::optional<std::string> commitOperationId;
     std::vector<std::string> actionIds;
+    // Logical action predecessor. Can skip immutable revisions whose newer
+    // actions were abandoned by a fork. The revision DAG itself is unchanged.
+    std::optional<std::string> logicalParentRevisionId;
 };
 
 // Immutable original MODEL frames for one first-parent Commit checkpoint.
@@ -182,6 +197,9 @@ struct RevisionNativeActionWitness {
     std::string revisionId;
     std::string commitOperationId;
     std::optional<RevisionId> parentRevision;
+    std::optional<RevisionId> historyForkRevision;
+    std::optional<std::uint64_t> historyForkActionPosition;
+    std::optional<std::string> historyForkArchiveCommitOperationId;
     std::vector<ModelChange> actualNativeChanges;
     std::vector<WorkingCopyEvent> actions;
     // HIST-03c3b: *all* root manifests in the two immutable snapshots, not
@@ -299,6 +317,10 @@ public:
                                   std::optional<std::string_view> branchId = std::nullopt,
                                   const BranchMetadata& metadata = {});
     RevisionGraphRevision revision(std::string_view projectId, const RevisionId& id);
+    void deleteBranch(std::string_view projectId, std::string_view branchId,
+                      std::optional<RevisionId> expectedHead);
+    bool truncateBranch(std::string_view projectId, std::string_view branchId,
+                        std::optional<RevisionId> expectedHead, const RevisionId& firstRemoved);
     void updateBranchProperties(std::string_view projectId, std::string_view branchId,
                                 std::string_view expectedName, std::string_view name,
                                 const BranchMetadata& metadata);
@@ -468,7 +490,8 @@ public:
     RevisionActionPage revisionActionPage(
         std::string_view projectId, std::string_view branch,
         const RevisionId& revision, std::size_t offset = 0,
-        std::size_t limit = 100);
+        std::size_t limit = 100,
+        std::optional<std::string_view> draftId = std::nullopt);
     // HIST-03c3a: validate an indexed Commit against the ACTUAL complete
     // native first-parent revision delta. Fail closed if the persisted Commit
     // candidate and published record bytes disagree, even for an unchanged

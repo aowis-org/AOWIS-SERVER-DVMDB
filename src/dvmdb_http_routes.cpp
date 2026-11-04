@@ -1554,7 +1554,49 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 if (position < draft.journalCount)
                     next = target(QStringLiteral("draft"), QString(),
                                   static_cast<std::size_t>(position + 1));
-                if (position == 0 && draft.baseRevision && !draft.dirty) {
+                // An edit after an archived Undo branches the active timeline.
+                // Reaching position zero returns to the chosen immutable
+                // source, never to the abandoned newer Commit actions.
+                if (position == 0 && draft.historyForkRevisionId &&
+                    draft.historyForkActionPosition) {
+                    if (*draft.historyForkActionPosition > 0) {
+                        previous = target(QStringLiteral("archived"),
+                            QString::fromStdString(*draft.historyForkRevisionId),
+                            static_cast<std::size_t>(*draft.historyForkActionPosition - 1));
+                    } else {
+                        // A fork at action zero starts at the preceding
+                        // Commit's final state. Do not mistakenly revive the
+                        // abandoned suffix of the fork-source revision.
+                        const std::optional<RevisionGraphHead> branch =
+                            service.branchById(draft.projectId, draft.branchId);
+                        if (branch && branch->revision == draft.baseRevision) {
+                            std::optional<RevisionId> after;
+                            bool passedSource = false;
+                            for (std::size_t pageIndex = 0; pageIndex < 256 &&
+                                 previous.isNull(); ++pageIndex) {
+                                const BranchActionHistoryPage page =
+                                    service.branchActionHistory(draft.projectId,
+                                        branch->name, 10, after, draft.id);
+                                for (const BranchActionHistoryEntry& entry : page.commits) {
+                                    if (!passedSource) {
+                                        passedSource = entry.revision.id.toString() ==
+                                            *draft.historyForkRevisionId;
+                                    } else if (entry.commitOperationId &&
+                                               !entry.actionIds.empty()) {
+                                        previous = target(QStringLiteral("archived"),
+                                            QString::fromStdString(entry.revision.id.toString()),
+                                            entry.actionIds.size() - 1);
+                                        break;
+                                    }
+                                }
+                                if (!page.next) break;
+                                after = page.next;
+                            }
+                        }
+                    }
+                }
+                if (position == 0 && draft.baseRevision && !draft.dirty &&
+                    !draft.historyForkRevisionId) {
                     const std::optional<RevisionGraphHead> branch =
                         service.branchById(draft.projectId, draft.branchId);
                     if (branch && branch->revision == draft.baseRevision) {
@@ -1604,7 +1646,8 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                         after = page.next;
                     }
                     if (selected && selected->commitOperationId &&
-                        !selected->actionIds.empty()) {
+                        (!selected->actionIds.empty() ||
+                         (archived && *draft.historyActionPosition == 0))) {
                         const std::size_t count = selected->actionIds.size();
                         const std::uint64_t archivedPosition = archived
                             ? *draft.historyActionPosition : count;
@@ -1620,7 +1663,15 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                                     older->actionIds.size() - 1);
                             }
                             if (archived) {
-                                if (draft.journalCount > 0 && !newer &&
+                                if (draft.journalCount > 0 && draft.historyForkRevisionId &&
+                                    draft.historyForkActionPosition &&
+                                    wanted == *draft.historyForkRevisionId &&
+                                    archivedPosition == *draft.historyForkActionPosition) {
+                                    // This is the parent of our new editing
+                                    // lane. The superseded Commit suffix must
+                                    // not become Redo after the fork.
+                                    next = target(QStringLiteral("draft"), QString(), 1);
+                                } else if (draft.journalCount > 0 && !newer &&
                                     wanted == draft.baseRevision->toString() &&
                                     archivedPosition + 1 == count) {
                                     // Completing the last archived action
@@ -1687,6 +1738,14 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 {"actionPosition", QString::number(static_cast<qulonglong>(position))},
                 {"hasPreviousDraftAction", !archived && position > 0},
                 {"hasNextDraftAction", !archived && position < draft.journalCount},
+                {"canBranchFromHistory", archived &&
+                    draft.historyArchiveCommitOperationId.has_value()},
+                {"forkRevisionId", draft.historyForkRevisionId
+                    ? QJsonValue(QString::fromStdString(*draft.historyForkRevisionId))
+                    : QJsonValue(QJsonValue::Null)},
+                {"forkActionPosition", draft.historyForkActionPosition
+                    ? QJsonValue(QString::number(static_cast<qulonglong>(*draft.historyForkActionPosition)))
+                    : QJsonValue(QJsonValue::Null)},
                 {"previousAction", previous},
                 {"nextAction", next},
                 {"selectionKind", draft.historyActionPosition
@@ -2478,6 +2537,38 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                                            {"head", revisionIdString(expected)}}};
         });
     });
+    // Destructive branch operations use an explicit expected HEAD. They only
+    // rewrite or remove a branch reference, never shared immutable merge nodes.
+    server.Post("/dvmdb/v1/projects/:id/branch-ids/:branchId/delete",
+                [&service](const httplib::Request& request, httplib::Response& response) {
+        guarded(response, [&]() {
+            if (const std::optional<Reply> pin = repositoryPinFailure(request, service))
+                return *pin;
+            const QJsonObject body = parseBody(request, maxJsonSmallBytes);
+            requireKeys(body, {"expectedHead"});
+            requireInput(body.contains("expectedHead"), "expectedHead is required, null for unborn");
+            const std::optional<RevisionId> expected = body.value("expectedHead").isNull()
+                ? std::nullopt
+                : std::optional<RevisionId>(parseRevisionId(requiredString(body, "expectedHead")));
+            service.deleteBranch(pathParam(request, "id"), pathParam(request, "branchId"), expected);
+            return Reply{200, QJsonObject{{"deleted", true}}};
+        });
+    });
+    server.Post("/dvmdb/v1/projects/:id/branch-ids/:branchId/truncate",
+                [&service](const httplib::Request& request, httplib::Response& response) {
+        guarded(response, [&]() {
+            if (const std::optional<Reply> pin = repositoryPinFailure(request, service))
+                return *pin;
+            const QJsonObject body = parseBody(request, maxJsonSmallBytes);
+            requireKeys(body, {"expectedHead", "firstRemoved"});
+            requireInput(body.contains("expectedHead"), "expectedHead is required");
+            const RevisionId expected = parseRevisionId(requiredString(body, "expectedHead"));
+            const RevisionId firstRemoved = parseRevisionId(requiredString(body, "firstRemoved"));
+            const bool deleted = service.truncateBranch(pathParam(request, "id"),
+                pathParam(request, "branchId"), expected, firstRemoved);
+            return Reply{200, QJsonObject{{"branchDeleted", deleted}}};
+        });
+    });
     // Identity-addressed metadata update also supports unborn branches.
     server.Patch("/dvmdb/v1/projects/:id/branch-ids/:branchId",
                  [&service](const httplib::Request& request, httplib::Response& response) {
@@ -2580,6 +2671,9 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                         : QJsonValue(QJsonValue::Null)},
                     {"actions", actions},
                     {"actionCount", static_cast<int>(entry.actionIds.size())},
+                    {"logicalParentRevisionId", entry.logicalParentRevisionId
+                        ? QJsonValue(QString::fromStdString(*entry.logicalParentRevisionId))
+                        : QJsonValue(QJsonValue::Null)},
                     {"checkpointOnly", entry.actionIds.empty()}});
             }
             QJsonValue draftValue = QJsonValue(QJsonValue::Null);
@@ -2630,9 +2724,11 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 limit = parseCount(*value, 100);
                 requireInput(limit > 0, "invalid action frame page limit");
             }
+            const std::optional<std::string> draftId = queryValue(request, "draftId");
             const RevisionActionPage page = service.revisionActionPage(
                 pathParam(request, "id"), pathParam(request, "branch"),
-                parseRevisionId(pathParam(request, "revisionId")), offset, limit);
+                parseRevisionId(pathParam(request, "revisionId")), offset, limit,
+                draftId ? std::optional<std::string_view>(*draftId) : std::nullopt);
             QJsonArray actions;
             for (const WorkingCopyEvent& event : page.actions)
                 actions.append(historyActionJson(event, true));

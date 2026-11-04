@@ -260,6 +260,50 @@ void runImmutableForkProvenance() {
     }
 }
 
+void runDestructiveBranchHistory() {
+    Temporary tmp;
+    const ProjectId project = ProjectId::generate();
+    const fs::path folder = tmp.path / "delete";
+    {
+        Repository repo(folder);
+        const BranchId unborn = repo.createUnbornBranch(project, "unborn");
+        invalid([&] { repo.deleteBranch(project, unborn, RevisionId::generate()); },
+                StorageErrorKind::Conflict, "stale unborn deletion must fail");
+        repo.deleteBranch(project, unborn, std::nullopt);
+        check(!repo.hasBranch("unborn"), "unborn branch not removed");
+        const RevisionId root = repo.createRootBranch(project, "main", commitMetadata());
+        const RevisionId a = repo.commit(project, "main", {{key(1), Bytes{1}}}, commitMetadata(), root);
+        const BranchId mainBranch = *repo.branchId("main");
+        const BranchId forkBranch = repo.createBranchWithIdentity(project, "feature", "main").branchId;
+        const RevisionId b = repo.commit(project, "main", {{key(2), Bytes{2}}}, commitMetadata(), a);
+        const RevisionId feature = repo.commit(project, "feature", {{key(3), Bytes{3}}}, commitMetadata(), a);
+        const MergeResult merged = repo.mergeBranches(project, "feature", "main",
+            commitMetadata(), feature, b);
+        check(merged.resultHead.has_value(), "merge for branch deletion failed");
+        invalid([&] { (void)repo.truncateBranch(project, mainBranch, a, b); },
+                StorageErrorKind::Conflict, "stale deletion CAS accepted");
+        invalid([&] { (void)repo.truncateBranch(project, mainBranch, b, feature); },
+                StorageErrorKind::InvalidInput, "second-parent merge ancestry was truncated");
+        check(!repo.truncateBranch(project, mainBranch, b, b),
+              "removing latest commit unexpectedly deleted main");
+        check(repo.head(project, "main") == a, "branch did not rewind to surviving parent");
+        check(repo.head(project, "feature") == *merged.resultHead,
+              "other branch merge HEAD was changed");
+        check(repo.revisionGraph(project).revisions.size() >= 4,
+              "retained merge ancestry lost its referenced deleted commit");
+        check(repo.truncateBranch(project, mainBranch, a, root),
+              "removing root revision should delete entire branch");
+        check(!repo.hasBranch("main") && repo.hasBranch("feature"),
+              "root deletion damaged surviving feature");
+        repo.deleteBranch(project, forkBranch, *merged.resultHead);
+        check(repo.listBranches().empty(), "explicit deletion left a ref");
+    }
+    {
+        Repository reopened(folder);
+        check(reopened.listBranches().empty(), "deleted branch resurrected on restart");
+    }
+}
+
 void runService() {
     Temporary tmp;
     ProjectService service(tmp.path);
@@ -283,6 +327,13 @@ void runService() {
     check(root != otherRoot, "two empty projects received same UUIDv7 revision");
     check(service.revisionGraph(other.id).revisions.front().id == otherRoot,
           "project graph scoped to incorrect project");
+    service.deleteBranch(project.id, created.branchId.toString(), root);
+    check(!service.branchById(project.id, created.branchId.toString()).has_value(),
+          "service deletion did not remove UUID-keyed branch ref");
+    const BranchId unborn = service.createUnbornBranch(project.id, "empty");
+    service.deleteBranch(project.id, unborn.toString(), std::nullopt);
+    check(!service.branchById(project.id, unborn.toString()).has_value(),
+          "service deletion did not remove unborn HEAD");
 }
 }
 
@@ -293,6 +344,7 @@ int main() {
         runBranchOriginsAndNames();
         runImmutableForkProvenance();
         runService();
+        runDestructiveBranchHistory();
         std::cout << "UUIDv7 first-parent history and pinned all-parent graph passed\n";
         return 0;
     } catch (const std::exception& error) {

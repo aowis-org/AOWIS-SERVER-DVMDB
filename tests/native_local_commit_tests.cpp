@@ -1984,8 +1984,10 @@ void testCrossCommitSuspendedDraftHandoff() {
                 older.candidateChanges.front().record &&
                 older.candidateChanges.front().record->payload == initial.record->payload,
                 "HDB-03g archived handoff did not preserve draft Redo or older state");
+        // An invalid generation must not overwrite the suspended journal.
+        // A genuine new edit at generation 3 is now allowed to fork it.
         expectConflict([&] { (void)service.saveWorkingCopyTransactions(
-            draftId, session, token, 3, {liveValue}, {aowis::dvmdb::test::editEvent(
+            draftId, session, token, 2, {liveValue}, {aowis::dvmdb::test::editEvent(
                 UuidV7::generate(), initial.key, {30}, {40})}); });
         expectConflict([&] { (void)service.commitWorkingCopy(
             UuidV7::generate().toString(), draftId, session, token, 3,
@@ -2026,6 +2028,140 @@ void testCrossCommitSuspendedDraftHandoff() {
     }
 }
 
+// New editing after Undo across multiple immutable Commits must abandon the
+// live Redo tail and fork the LOGICAL action lineage, never delete old DAG
+// revisions or their authenticated action archives.
+void testArchivedUndoStartsNewDurableActionLineage() {
+    TempRoot root;
+    const std::string session = UuidV7::generate().toString();
+    const ModelChange initial = changeWithValue(10);
+    const ModelChange second = changeWithValue(20);
+    const ModelChange third = changeWithValue(30);
+    const ModelChange alternative = changeWithValue(15);
+    std::string projectId;
+    std::string draftId;
+    std::string token;
+    std::string firstOperation;
+    std::string secondOperation;
+    std::optional<RevisionId> first;
+    std::optional<RevisionId> secondRevision;
+    std::optional<RevisionId> thirdRevision;
+    const aowis::dvmdb::Bytes firstFrame = aowis::dvmdb::test::editEvent(
+        UuidV7::generate(), initial.key, {10}, {20});
+    const aowis::dvmdb::Bytes secondFrame = aowis::dvmdb::test::editEvent(
+        UuidV7::generate(), initial.key, {20}, {30});
+    const aowis::dvmdb::Bytes alternativeFrame = aowis::dvmdb::test::editEvent(
+        UuidV7::generate(), initial.key, {10}, {15});
+    {
+        ProjectService service(root.path);
+        service.configureRepositoryRole(RepositoryRole::Private);
+        projectId = service.createUnbornProject("fork action history past Commits").id;
+        const RevisionId original = service.commitModelAtExpectedHead(
+            projectId, "main", {initial}, commitMetadata(), std::nullopt);
+        const std::string firstDraft = service.createWorkingCopy(
+            projectId, "main", original, session).id;
+        const std::string firstToken = service.acquireWorkingCopyLease(
+            firstDraft, session, 120).token;
+        (void)service.saveWorkingCopyTransactions(firstDraft, session,
+            firstToken, 0, {second}, {firstFrame});
+        firstOperation = UuidV7::generate().toString();
+        const LocalCommitInfo committedFirst = service.commitWorkingCopy(
+            firstOperation, firstDraft, session, firstToken, 1, original, commitMetadata());
+        require(committedFirst.state == LocalCommitState::Succeeded,
+                "fork fixture did not publish first MODEL Commit");
+        first = RevisionId::parse(committedFirst.reservedRevisionId);
+        require(first.has_value(), "fork fixture has no first revision");
+        const std::string secondDraft = service.createWorkingCopy(
+            projectId, "main", first, session).id;
+        const std::string secondToken = service.acquireWorkingCopyLease(
+            secondDraft, session, 120).token;
+        (void)service.saveWorkingCopyTransactions(secondDraft, session,
+            secondToken, 0, {third}, {secondFrame});
+        secondOperation = UuidV7::generate().toString();
+        const LocalCommitInfo committedSecond = service.commitWorkingCopy(
+            secondOperation, secondDraft, session, secondToken, 1, first, commitMetadata());
+        require(committedSecond.state == LocalCommitState::Succeeded,
+                "fork fixture did not publish second MODEL Commit");
+        secondRevision = RevisionId::parse(committedSecond.reservedRevisionId);
+        require(secondRevision.has_value(), "fork fixture has no second revision");
+        draftId = service.createWorkingCopy(projectId, "main", secondRevision, session).id;
+        token = service.acquireWorkingCopyLease(draftId, session, 120).token;
+        const WorkingCopyInfo selected = service.publishVerifiedHistoryActionNavigation(
+            UuidV7::generate().toString(), draftId, session, token, 0,
+            *secondRevision, *first, firstOperation, 0, {initial});
+        require(selected.generation == 1 && selected.historyActionPosition == 0 &&
+                selected.historyCheckpointRevisionId == first->toString(),
+                "fork fixture could not select archived first action boundary");
+        const WorkingCopyInfo forked = service.saveWorkingCopyTransactions(
+            draftId, session, token, 1, {alternative}, {alternativeFrame});
+        require(forked.generation == 2 && forked.journalCount == 1 &&
+                forked.journal.size() == 1 && forked.journal.front().encoded == alternativeFrame &&
+                forked.historyForkRevisionId == first->toString() &&
+                forked.historyForkActionPosition == 0 &&
+                forked.historyForkArchiveCommitOperationId == firstOperation &&
+                !forked.historyCheckpointRevisionId && !forked.draftActionPosition &&
+                service.optionalHead(projectId, "main") == secondRevision,
+                "forked Save lost its archived source or touched immutable HEAD");
+        const WorkingCopyInfo retry = service.saveWorkingCopyTransactions(
+            draftId, session, token, 1, {alternative}, {alternativeFrame});
+        require(retry.generation == 2 && retry.journalCount == 1,
+                "duplicate forked Save was not idempotent");
+        const WorkingCopyInfo undone = service.publishVerifiedDraftActionNavigation(
+            UuidV7::generate().toString(), draftId, session, token, 2,
+            secondRevision, 0, {initial});
+        require(undone.generation == 3 && undone.draftActionPosition == 0 &&
+                undone.historyForkRevisionId == first->toString(),
+                "Undo of forked journal did not restore its historical parent");
+        const WorkingCopyInfo redone = service.publishVerifiedDraftActionNavigation(
+            UuidV7::generate().toString(), draftId, session, token, 3,
+            secondRevision, 1, {alternative});
+        require(redone.generation == 4 && redone.draftActionPosition == 1 &&
+                redone.journalCount == 1,
+                "Redo of forked journal lost original new edit");
+    }
+    {
+        ProjectService reopened(root.path);
+        const WorkingCopyInfo recovered = reopened.workingCopy(draftId, true);
+        require(recovered.generation == 4 && recovered.journalCount == 1 &&
+                recovered.historyForkRevisionId == first->toString() &&
+                recovered.journal.front().encoded == alternativeFrame &&
+                reopened.optionalHead(projectId, "main") == secondRevision,
+                "fork origin or journal was not recovered after process restart");
+        const LocalCommitInfo committed = reopened.commitWorkingCopy(
+            UuidV7::generate().toString(), draftId, session, token, 4,
+            secondRevision, commitMetadata());
+        require(committed.state == LocalCommitState::Succeeded,
+                "forked draft could not become a new immutable Commit");
+        thirdRevision = RevisionId::parse(committed.reservedRevisionId);
+        require(thirdRevision.has_value(), "forked Commit has no revision");
+        const aowis::dvmdb::RevisionNativeActionWitness witness =
+            reopened.verifiedRevisionNativeActionWitness(projectId, "main", *thirdRevision);
+        require(witness.parentRevision == secondRevision &&
+                witness.historyForkRevision == first &&
+                witness.historyForkActionPosition == 0 &&
+                witness.historyForkArchiveCommitOperationId == firstOperation &&
+                witness.actions.size() == 1 && witness.actions.front().encoded == alternativeFrame,
+                "forked immutable Commit lost its verified logical source");
+        const aowis::dvmdb::BranchActionHistoryPage path =
+            reopened.branchActionHistory(projectId, "main", 10);
+        require(path.commits.size() == 3 &&
+                path.commits[0].revision.id == *thirdRevision &&
+                path.commits[0].logicalParentRevisionId == first->toString() &&
+                path.commits[0].actionIds.size() == 1 &&
+                path.commits[1].revision.id == *first &&
+                path.commits[1].actionIds.empty() &&
+                path.commits[2].revision.id != *secondRevision &&
+                !path.next,
+                "abandoned committed action suffix leaked into the new logical History");
+        const aowis::dvmdb::LocalCommitActionHistory original =
+            reopened.localCommitActionHistory(secondOperation);
+        require(original.actions.size() == 1 &&
+                original.actions.front().encoded == secondFrame &&
+                reopened.revision(projectId, *secondRevision).id == *secondRevision,
+                "fork destroyed an immutable Commit or its permanent action archive");
+    }
+}
+
 int main() {
     try {
         testHistoryCheckpointPlan();
@@ -2033,6 +2169,7 @@ int main() {
         testAtomicVerifiedActionNavigationPublication();
         testDurableActiveDraftNavigationPublication();
         testCrossCommitSuspendedDraftHandoff();
+        testArchivedUndoStartsNewDurableActionLineage();
         testBranchDraftActionJournalAfterUndo();
         testCommittedActionHistory();
         testVerifiedRevisionNativeWitness();

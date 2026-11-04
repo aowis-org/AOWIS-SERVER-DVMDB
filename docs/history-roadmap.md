@@ -22,7 +22,7 @@ behavior. This work is part of the [overall DVMDB roadmap](roadmap.md).
 - Native fenced publication of a verified action boundary into a private draft
   with an atomically persisted coordinate, generation CAS, branch-HEAD pin and
   same-operation retry after restart. Draft metadata uses
-  `AOWIS-WORKING-COPY-8`.
+  `AOWIS-WORKING-COPY-9`.
 
 An internal MODEL-aware active-draft adapter now replays and validates all
 retained journal frames for **one existing hydraulic network** from immutable
@@ -38,8 +38,11 @@ server now exposes a draft-scoped HTTP cursor read and fenced, idempotent
 HTTP selection of an explicit verified active-journal position for this
 single-network case. Providing an archived `revisionId` instead selects an
 explicit verified action boundary within an indexed local Commit. From a
-verified active journal selected at position zero, the V8 publisher suspends
-the retained journal and allows navigation into that archive. The HTTP cursor now also supplies server-resolved `previousAction` and
+verified active journal selected at position zero, the V9 publisher suspends
+the retained journal and allows navigation into that archive. An accepted
+MODEL edit at any verified archived coordinate now discards the abandoned
+Redo suffix and creates a durable forked journal, while committed revision
+ancestors and their permanent archives remain immutable. The HTTP cursor now also supplies server-resolved `previousAction` and
 `nextAction` targets for active journal steps and eligible archived Commit
 boundaries, skipping duplicate states at Commit markers. A client submits
 those coordinates to the existing fenced POST selector. The server now resolves adjacent targets across the retained-journal/Commit
@@ -52,9 +55,12 @@ acceptance remain outstanding.
 
 The archived selector accepts only fully verified archived hydraulic local
 Commits. At an eligible active draft position zero, it suspends the journal,
-retaining Redo frames, and resumes active edits from the newest HEAD archive.
-This is still not GUI Undo/Redo, and unverified/checkpoint-only, unborn-base
-and multi-network active drafts remain outside this implementation.
+retaining Redo frames. A fresh edit at an older archived coordinate replaces
+the abandoned forward path instead of demanding a return to HEAD.
+GUI Undo/Redo and direct jumps are wired; the remaining gate is live
+editor/HTTP acceptance, including historical-fork Save, Commit and recovery.
+Checkpoint-only and multi-network navigation remain outside the supported
+action-level boundary.
 
 **Acceptance evidence:** The latest user-reported Qt hydraulic network suite
 passed (2026-11-04), and adjacent native suites previously passed. The HTTP
@@ -78,9 +84,10 @@ navigation test, with immutable revision and branch-ref checks.
 
 ## 2. Make active draft actions navigable
 
-- Qualify the implemented V8 handoff through Qt HTTP tests, simulated lost
-  acknowledgements and process restart, and verify Save/Commit remain fenced
-  while the original journal is suspended in archived history.
+- Qualify the implemented V9 handoff through Qt HTTP tests, simulated lost
+  acknowledgements and process restart, and verify new MODEL Saves at a verified archived position create a forked
+  active path with a pinned source coordinate; unverified or non-MODEL Saves
+  and Commit while browsing remain fenced.
 - Qualify the implemented first/unborn draft workflow (tank creation,
   Undo/Redo, restart, imported seed). The initial network seed is not a
   synthetic Commit. Preserve fail-closed rejection of deletion order that

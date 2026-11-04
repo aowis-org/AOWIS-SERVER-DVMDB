@@ -204,11 +204,14 @@ paths:
         coordinates for the existing fenced POST navigate endpoint: they include
         archived Commit steps and skip the duplicate snapshot at a Commit marker.
         A null target means no currently addressable adjacent step. An active draft at position zero may select the last archived HEAD action;
-        its original journal remains durably suspended for Redo (V8). The
+        its original journal remains durably suspended for Redo (V9). The
         latest Commit's final action returns to the draft at position zero;
-        Save/Commit cannot proceed until draft navigation resumes. These targets are
-        not executable proof: a POST still verifies the MODEL and repository.
-        This is NOT yet a continuous live-journal/Commit cursor.
+        A new MODEL Save at a verified archived coordinate starts a new active
+        action path, invalidating forward Redo without changing immutable Commits.
+        The `canBranchFromHistory` field signals that the archived cursor may
+        be used as the origin of the next MODEL Save. Plain native Save and
+        Commit remain rejected while browsing archived History. These targets
+        are not executable proof: a POST still verifies MODEL and repository.
       responses:
         '200':
           description: Authoritative active journal coordinate; all counters are decimal strings.
@@ -247,6 +250,9 @@ paths:
                   archivedRevisionId: {type: [string, 'null'], format: uuid}
                   archivedActionPosition: {type: [string, 'null'], pattern: '^[0-9]{1,20}$'}
                   archiveCommitOperationId: {type: [string, 'null'], format: uuid}
+                  canBranchFromHistory: {type: boolean}
+                  forkRevisionId: {type: [string, 'null'], format: uuid}
+                  forkActionPosition: {type: [string, 'null'], pattern: '^[0-9]{1,20}$'}
         '404': {$ref: '#/components/responses/NotFound'}
   /working-copies/{draftId}/history/navigate:
     parameters:
@@ -258,7 +264,7 @@ paths:
         reconstruction and atomic, durable cursor publication. With revisionId,
         select a boundary (0..actionCount) inside a fully verified, indexed
         immutable local hydraulic Commit; the draft must be clean, an archived checkpoint, or an active journal
-        verified at position zero; in the latter case V8 retains Redo frames. Without revisionId, select
+        verified at position zero; in the latter case V9 retains Redo frames. Without revisionId, select
         an active draft boundary (0..journalCount) for one EXISTING hydraulic
         network. Multiple NetworkHydraulic roots remain supported in storage,
         but multi-network active draft navigation and unborn base replay are
@@ -880,6 +886,55 @@ paths:
                   originBranchId: {type: [string, 'null'], format: uuid}
                   forkRevisionId: {type: [string, 'null'], format: uuid}
         '404': {$ref: '#/components/responses/NotFound'}
+  /projects/{projectId}/branch-ids/{branchId}/delete:
+    parameters:
+      - {$ref: '#/components/parameters/ProjectId'}
+      - {name: branchId, in: path, required: true, schema: {type: string, format: uuid}}
+    post:
+      operationId: deleteBranchById
+      description: |
+        Delete a branch reference, including unborn HEAD. Require an exact
+        expected HEAD (JSON null for unborn). Revisions still referenced by
+        other branches or merges remain immutable; this operation never prunes
+        their content. Reject branches with active stored working copies.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedHead]
+              properties:
+                expectedHead: {type: [string, 'null'], format: uuid}
+      responses:
+        '200': {description: '{"deleted":true}'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /projects/{projectId}/branch-ids/{branchId}/truncate:
+    parameters:
+      - {$ref: '#/components/parameters/ProjectId'}
+      - {name: branchId, in: path, required: true, schema: {type: string, format: uuid}}
+    post:
+      operationId: truncateBranchById
+      description: |
+        Truncate the selected branch's first-parent history starting with
+        firstRemoved, using a strict expected HEAD CAS. A root or first local
+        fork commit deletion removes the branch. Other branches and merge
+        ancestries are preserved, and active working copies block the write.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedHead, firstRemoved]
+              properties:
+                expectedHead: {type: string, format: uuid}
+                firstRemoved: {type: string, format: uuid}
+      responses:
+        '200': {description: '{"branchDeleted":true|false}'}
+        '409': {$ref: '#/components/responses/Conflict'}
   /projects/{projectId}/branches/{branch}/head:
     parameters:
       - {$ref: '#/components/parameters/ProjectId'}
@@ -910,8 +965,10 @@ paths:
     get:
       operationId: getBranchActionHistory
       description: |
-        Read-only newest-first first-parent Commit checkpoints with exact archived
-        MODEL action UUIDs. A checkpoint with no retained events has actions=[];
+        Read-only newest-first active editing lineage with original immutable
+        Commit identities and exact archived MODEL action UUIDs. The logical
+        action predecessor may skip newer immutable first parents after a
+        historical edit fork; the underlying revision DAG is never rewritten. A checkpoint with no retained events has actions=[];
         no intermediate actions are invented. The optional draft section is
         separately paged; continue with expectedDraftGeneration from the first
         page to prevent mixing journal generations during concurrent edits.
@@ -937,6 +994,7 @@ paths:
                       properties:
                         revision: {$ref: '#/components/schemas/Revision'}
                         operationId: {type: [string, 'null'], format: uuid}
+                        logicalParentRevisionId: {type: [string, 'null'], format: uuid}
                         actions: {type: array, items: {type: string, format: uuid}}
                         actionCount: {type: integer, minimum: 0}
                         checkpointOnly: {type: boolean}
@@ -972,6 +1030,7 @@ paths:
       - {name: revisionId, in: path, required: true, schema: {type: string, format: uuid}}
       - {name: offset, in: query, schema: {type: integer, minimum: 0, maximum: 4096, default: 0}}
       - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 100}}
+      - {name: draftId, in: query, description: Optional active-draft logical History fork scope, schema: {type: string, format: uuid}}
     get:
       operationId: getArchivedRevisionActions
       description: |

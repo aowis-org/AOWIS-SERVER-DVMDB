@@ -149,7 +149,7 @@ def tracking_metadata(root):
 
 
 def working_copy_records(root):
-    """Verify every published private draft (AOWIS-WORKING-COPY-8).
+    """Verify every published private draft (AOWIS-WORKING-COPY-9).
 
     Returns {draft id: (meta, candidate bytes, acknowledged journal prefix)}
     so a copy can be compared with its source. Unreferenced files that a
@@ -220,14 +220,15 @@ def working_copy_records(root):
         require("meta" in names and meta_path.stat().st_size <= 4096,
                 f"missing or oversized draft meta: {meta_path}")
         meta = meta_path.read_bytes()
-        require(meta.startswith(b"AOWIS-WORKING-COPY-8\n") and meta.endswith(b"\n"),
+        require(meta.startswith(b"AOWIS-WORKING-COPY-9\n") and meta.endswith(b"\n"),
                 f"invalid working-copy record format: {meta_path}")
         lines = meta.decode("ascii", errors="replace").split("\n")[1:-1]
         fields = ["project", "branch", "base", "session", "generation", "dirty", "validation",
                   "lease-session", "lease-token", "lease-expires", "candidate", "journal",
                   "last-save", "history-revision", "history-operation",
                   "history-source-generation", "history-action-position",
-                  "history-archive-operation", "draft-action-position"]
+                  "history-archive-operation", "draft-action-position",
+                  "fork-revision", "fork-action-position", "fork-archive-operation"]
         require(len(lines) == len(fields), f"invalid working-copy field count: {meta_path}")
         values = []
         for line, field in zip(lines, fields):
@@ -252,6 +253,11 @@ def working_copy_records(root):
         require((events == 0 and last == "-") or (events > 0 and generation > 0 and digest(last)),
                 f"invalid last-save hash: {meta_path}")
         revision, operation, source, position, archive, draft_position = values[13:19]
+        fork_revision, fork_position, fork_archive = values[19:22]
+        fork = ((fork_revision == "-" and fork_position == "-" and fork_archive == "-") or
+                (uuid(fork_revision) and fork_position != "-" and
+                 decimal(fork_position) <= 4096 and uuid(fork_archive) and events > 0))
+        require(fork, f"invalid forked draft origin: {meta_path}")
         checkpoint = (uuid(revision) and uuid(operation) and source != "-" and
                       decimal(source) + 1 == generation and
                       ((events == 0 and last == "-" and draft_position == "-") or
