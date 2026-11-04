@@ -130,9 +130,9 @@ With an archived `revisionId`, the same POST endpoint selects verified
 immutable Commit action boundaries when the live journal is empty or is suspended at its verified zero position.
 The cursor GET now resolves `previousAction` and `nextAction` coordinates,
 including across adjacent archived Commits. At a verified live position zero it can enter archived history without
-erasing the Redo journal, and the cursor supplies the return step. It does
-not support unborn/multi-network active draft navigation; DVMDB's multi-network storage capability is unchanged. The GUI History dock
-remains read-only until continuous navigation is integrated.
+erasing the Redo journal, and the cursor supplies the return step. An unborn initialized single-network draft supports verified journaled creations/updates;
+ambiguous member deletions remain ineligible. Multi-network navigation is deferred;
+DVMDB's multi-network storage capability is unchanged.
 
 ## Limits and interpretation
 
@@ -150,15 +150,16 @@ remains read-only until continuous navigation is integrated.
 - The MODEL-aware active-draft adapter validates original frames against the
   present canonical network before publishing any cursor change. The native
   publisher retains the journal and records `draft-action-position` across
-  restart. Only **one existing network** in a committed base is currently
-  supported; unjournaled native changes and ambiguous ownership fail closed.
+  restart. One unambiguous existing network in a committed base or initialized unborn
+  draft is supported (unborn deletions require additional ordering proof); unjournaled native changes and ambiguous ownership fail closed.
   Navigation preserves future Redo frames. A **new** atomic MODEL event
   Save behind the tip branches the journal: retains the selected prefix,
   replaces the redo tail with new actions, and publishes the model candidate
   and journal metadata together. Commit still refuses a non-tip cursor.
-- The native adapter is **not** complete user-facing History: multi-network
-  or unborn-base draft replay, durable navigation-event provenance,
-  GUI wiring and HTTP end-to-end handoff acceptance remain outstanding. The
+- Remaining scope: multi-network action navigation is deferred, and unborn
+  member deletions without exact original membership-order provenance are
+  refused. Durable navigation-event provenance and full GUI/HTTP restart
+  acceptance remain outstanding. The
   existing HTTP History navigation route now also accepts an explicit archived
   revision ID to select a verified committed action boundary when no active
   MODEL journal is present. The server now resolves eligible adjacent actions across a Commit marker. The HTTP Save path needs end-to-end Undo → new Save qualification

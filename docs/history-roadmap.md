@@ -30,8 +30,9 @@ HEAD, checks that its current selected boundary is byte-equal to the actual
 working-copy network, rejects unrelated/unjournaled native edits and
 constructs a complete HEAD-relative candidate. Its native operation publishes
 that candidate and the cursor atomically, retaining all original journal frames
-and the existing lease/generation/HEAD/idempotency protections. It currently
-refuses multi-root and unborn-base drafts rather than guessing ownership.
+and the existing lease/generation/HEAD/idempotency protections. It refuses multi-root drafts; the initialized unborn single-network path
+reconstructs the network seed from verified reversible MODEL images, and
+refuses deletions whose original membership order is ambiguous.
 Navigation preserves the original journal and future Redo actions. The
 server now exposes a draft-scoped HTTP cursor read and fenced, idempotent
 HTTP selection of an explicit verified active-journal position for this
@@ -80,9 +81,10 @@ navigation test, with immutable revision and branch-ref checks.
 - Qualify the implemented V8 handoff through Qt HTTP tests, simulated lost
   acknowledgements and process restart, and verify Save/Commit remain fenced
   while the original journal is suspended in archived history.
-- Support the normal unborn first draft without fabricating any base snapshot.
-- Support the normal **unborn first draft** and network initialization/import
-  in active history without weakening MODEL/native coverage verification.
+- Qualify the implemented first/unborn draft workflow (tank creation,
+  Undo/Redo, restart, imported seed). The initial network seed is not a
+  synthetic Commit. Preserve fail-closed rejection of deletion order that
+  cannot be reconstructed, and extend ordering proof separately.
   Multiple hydraulic networks in one revision remain legal in storage, but
   multi-network *navigation* is explicitly deferred and is not a gate for
   a usable single-network History dock.

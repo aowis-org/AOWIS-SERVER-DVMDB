@@ -42,10 +42,11 @@ are listed only in the [History roadmap](history-roadmap.md).
 | Verify an entire revision | `verifiedRevisionNativeActionWitness` plus `verifyHydraulicRevisionActionCoverage` account for every changed native record across affected networks |
 | Plan archived action boundary | `planVerifiedHydraulicActionNavigation` builds an exact, **HEAD-relative replacement** candidate without mutation |
 | Select archived action boundary | `navigateVerifiedHydraulicAction` atomically publishes verified replacement state and V8 cursor metadata under lease, HEAD and generation fences, idempotent by navigation operation UUID |
-| Navigate an existing network's active draft actions | `planVerifiedHydraulicDraftActionNavigation` verifies all retained MODEL frames against the persisted selected network state; `navigateVerifiedHydraulicDraftAction` publishes the rebuilt HEAD-relative candidate and cursor through the fenced/idempotent native writer. **Currently limited to one existing hydraulic network per committed base snapshot** |
+| Navigate an existing network's active draft actions | `planVerifiedHydraulicDraftActionNavigation` verifies all retained MODEL frames against the persisted selected network state; `navigateVerifiedHydraulicDraftAction` publishes the rebuilt HEAD-relative candidate and cursor through the fenced/idempotent native writer. **Limited to one unambiguous hydraulic network**; an unborn network initialized/imported before the first MODEL event can replay journaled creations/updates, but ambiguous unborn deletions are refused |
 | HTTP action navigation | `GET /working-copies/{draftId}/history/cursor` distinguishes an active journal cursor from an archived Commit coordinate and supplies bounded, server-resolved `previousAction`/`nextAction` coordinates (including adjacent Commit archives); fenced `POST /working-copies/{draftId}/history/navigate` selects a verified active boundary, or an indexed archived boundary when `revisionId` is supplied. Both use a UUIDv7 operation identity and server-built overlays |
 | Suspended draft / archived handoff | At active position zero, `previousAction` can address the last archived Commit action; the published V8 cursor preserves original draft frames for Redo. From the newest Commit's final action, `nextAction` returns to the retained draft at zero, then continues to its first action. Cross-mode Save/Commit are refused until the draft selection is restored |
-| GUI Undo/Redo, unborn first draft navigation, end-to-end recovery | **Not implemented / pending acceptance** |
+| Unborn first-draft creation/update Undo/Redo | **Implemented for one verified initialized network; Qt/HTTP acceptance pending; ambiguous member deletions fail closed** |
+| GUI Undo/Redo and end-to-end recovery | **Implemented GUI integration; full live-session/restart acceptance pending** |
 
 The **archived** HTTP/native action selector requires an indexed, complete,
 first-parent local hydraulic Commit. It can navigate from an active journal
@@ -92,14 +93,17 @@ frames and a durable cursor. On a **new atomic MODEL event Save** below the
 journal tip, the server preserves only the applied prefix and appends the
 new actions, making the former redo tail ineligible without changing any
 immutable Commit. This Save/cursor transition is atomic and crash-safe;
-Commit still rejects an unapplied redo tail. Multi-network and unborn-base drafts remain outside this **single-network**
-active-journal slice. HTTP selection exists for eligible existing-network
-drafts, and HTTP adjacent navigation crosses eligible Commit markers, but the GUI
-is not wired and the complete Qt end-to-end acceptance is still pending.
+Commit still rejects an unapplied redo tail. Navigation is currently
+limited to one unambiguous hydraulic network. For an unborn private draft,
+its initialized/imported network is the unjournaled seed: journaled creations
+and updates may be undone/redone without fabricating a Commit. Deletions whose
+original membership order cannot be proved fail closed. Multi-network
+navigation remains deferred. HTTP adjacent navigation crosses eligible Commit
+markers; end-to-end editor/restart acceptance is still outstanding.
 
-The GUI History dock may show committed action metadata, draft actions and
-checkpoints already, but it must not advertise operational Undo/Redo until
-the continuous cursor, HTTP commands, redo rules and recovery tests exist.
+The GUI History dock is wired to the HTTP cursor and action navigation. It
+must only enable actions that DVMDB offers as verified adjacent coordinates,
+and must reload the authoritative network after successful navigation.
 Imported, old and merge checkpoints must be labelled honestly rather than
 shown as sequences of invented edits.
 

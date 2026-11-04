@@ -2745,6 +2745,127 @@ void exerciseVerifiedActiveDraftActionNavigation() {
     std::filesystem::remove_all(folder, ignored);
 }
 
+
+// The first hydraulic network is initialized in an unborn private working
+// copy without inventing a Commit. Its subsequent MODEL actions must still
+// support Undo/Redo, including atomic membership removal/restoration.
+void exerciseUnbornFirstTankHistory() {
+    const std::filesystem::path folder = tempDir();
+    try {
+        std::unique_ptr<native::ProjectService> service =
+            std::make_unique<native::ProjectService>(folder);
+        service->configureRepositoryRole(native::RepositoryRole::Private);
+        const std::string projectId = service->createUnbornProject("Unborn tank history").id;
+        const std::string session = native::UuidV7::generate().toString();
+        const std::string draftId = service->createWorkingCopy(
+            projectId, "main", std::nullopt, session).id;
+        const std::string token = service->acquireWorkingCopyLease(
+            draftId, session, 120).token;
+        const QUuid networkId = uuid(990301);
+        const native::ModelChange root = hydraulic::emptyDraftHydraulicNetworkRoot(
+            networkId, QStringLiteral("New network"));
+        require(service->saveWorkingCopyChanges(draftId, session, token, 0,
+                    {root}).generation == 1,
+                "Unborn History could not initialize its first network");
+        const HydraulicNodeTank tank = item<HydraulicNodeTank>(990302);
+        aowis::model::ModelEditTransaction action;
+        action.transactionId = QUuid(QString::fromStdString(
+            native::UuidV7::generate().toString()));
+        action.operation = QStringLiteral("hydraulic.tank.create");
+        action.edits.append(aowis::model::ModelEntityEdit{
+            tank.uuid, QStringLiteral("HydraulicNodeTank"), std::nullopt,
+            native::ModelCodec<HydraulicNodeTank>::encode(tank)});
+        const QByteArray frame = aowis::model::ModelEditTransactionCodec::encode(action);
+        require(!frame.isEmpty(), "Unborn History tank action cannot be encoded");
+        const std::function<std::optional<native::ModelRecord>(const native::Key&)> initial =
+            [&root](const native::Key& key) -> std::optional<native::ModelRecord> {
+                return key == root.key ? root.record : std::nullopt;
+            };
+        // The small changeFor() convenience overloads cover junctions and
+        // pipes only. Build the tank's canonical native record with its
+        // declared kind and outbound reference index explicitly.
+        native::ModelRecord tankRecord;
+        tankRecord.kind = 3;
+        tankRecord.payload = hydraulic::bytesFromQByteArray(
+            native::ModelCodec<HydraulicNodeTank>::encode(tank));
+        require(!tankRecord.payload.empty(),
+                "Unborn History cannot encode the canonical tank record");
+        if (!tank.volume_curve_uuid.isNull())
+            tankRecord.references.push_back(hydraulic::keyFromUuid(tank.volume_curve_uuid));
+        if (!tank.quality_source.pattern_uuid.isNull())
+            tankRecord.references.push_back(hydraulic::keyFromUuid(tank.quality_source.pattern_uuid));
+        std::sort(tankRecord.references.begin(), tankRecord.references.end());
+        tankRecord.references.erase(
+            std::unique(tankRecord.references.begin(), tankRecord.references.end()),
+            tankRecord.references.end());
+        std::vector<native::ModelChange> additions{
+            native::ModelChange{hydraulic::keyFromUuid(tank.uuid), std::move(tankRecord)}};
+        hydraulic::materializeDraftMembership(initial,
+            {hydraulic::DraftMembershipIntent{
+                hydraulic::keyFromUuid(networkId), hydraulic::keyFromUuid(tank.uuid),
+                3, 10, true}}, additions);
+        require(service->saveWorkingCopyTransactions(draftId, session, token, 1,
+                    additions, {hydraulic::bytesFromQByteArray(frame)}).generation == 2,
+                "Unborn History could not save tank creation");
+        const std::function<NetworkHydraulic()> readDraft =
+            [&service, &draftId, &networkId]() -> NetworkHydraulic {
+                std::map<native::Key, std::optional<native::ModelRecord>> changes;
+                const native::WorkingCopyInfo draft = service->workingCopy(draftId, false);
+                for (const native::ModelChange& change : draft.candidateChanges)
+                    require(changes.emplace(change.key, change.record).second,
+                            "Unborn History candidate has duplicate keys");
+                const std::function<std::optional<native::ModelRecord>(const native::Key&)> read =
+                    [&changes](const native::Key& key) -> std::optional<native::ModelRecord> {
+                        const std::map<native::Key, std::optional<native::ModelRecord>>::const_iterator
+                            found = changes.find(key);
+                        return found == changes.end() ? std::nullopt : found->second;
+                    };
+                const std::optional<NetworkHydraulic> network =
+                    hydraulic::loadDraftHydraulicNetwork(read, networkId);
+                require(network.has_value(), "Unborn History network could not be loaded");
+                return *network;
+            };
+        require(readDraft().nodes_tanks.size() == 1,
+                "Unborn History tank was not persisted");
+        QString error;
+        const std::optional<hydraulic::VerifiedHydraulicDraftActionNavigationPlan> plan =
+            hydraulic::planVerifiedHydraulicDraftActionNavigation(
+                *service, draftId, 0, 2, &error);
+        require(plan && !plan->candidateChanges.empty() && !plan->expectedHead,
+                "Unborn History could not verify the first Undo");
+        const std::optional<native::WorkingCopyInfo> undo =
+            hydraulic::navigateVerifiedHydraulicDraftAction(
+                *service, native::UuidV7::generate().toString(), draftId,
+                session, token, std::nullopt, 0, 2, &error);
+        require(undo && undo->generation == 3 && undo->draftActionPosition == 0 &&
+                undo->journalCount == 1 && !undo->baseRevision,
+                "Unborn History failed to publish first Undo");
+        require(readDraft().nodes_tanks.isEmpty(),
+                "Unborn History Undo did not remove the tank");
+        const std::optional<native::WorkingCopyInfo> redo =
+            hydraulic::navigateVerifiedHydraulicDraftAction(
+                *service, native::UuidV7::generate().toString(), draftId,
+                session, token, std::nullopt, 1, 3, &error);
+        require(redo && redo->generation == 4 && redo->draftActionPosition == 1,
+                "Unborn History failed to publish first Redo");
+        require(readDraft().nodes_tanks.size() == 1 &&
+                readDraft().nodes_tanks.first().uuid == tank.uuid,
+                "Unborn History Redo did not restore the original tank");
+        service.reset();
+        native::ProjectService recovered(folder);
+        const native::WorkingCopyInfo after = recovered.workingCopy(draftId, true);
+        require(!after.baseRevision && after.journalCount == 1 &&
+                after.draftActionPosition == 1 && after.generation == 4,
+                "Unborn History position was not recovered after restart");
+    } catch (...) {
+        std::error_code ignored;
+        std::filesystem::remove_all(folder, ignored);
+        throw;
+    }
+    std::error_code ignored;
+    std::filesystem::remove_all(folder, ignored);
+}
+
 int main(int argc, char** argv) {
     QCoreApplication application(argc, argv);
     try {
@@ -2752,6 +2873,7 @@ int main(int argc, char** argv) {
         exerciseVerifiedHydraulicActionBoundary();
         exerciseVerifiedRevisionHydraulicCoverage();
         exerciseVerifiedActiveDraftActionNavigation();
+        exerciseUnbornFirstTankHistory();
         exerciseAtomicRootMetadataEdit();
         exerciseInt00IncompleteNetworkRoundTrip();
         exerciseUuidV7Hydraulic();

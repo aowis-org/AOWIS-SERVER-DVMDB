@@ -1643,6 +1643,28 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                     }
                 }
             }
+            // An unborn draft has no immutable parent to supply membership
+            // ordering. Offer a target only when the same strict MODEL replay
+            // planner can actually verify its destination. A failed proof
+            // must disable the button rather than offer a misleading Undo.
+            if (!draft.baseRevision && !draft.historyCheckpointRevisionId) {
+                const std::function<bool(const QJsonValue&)> eligible =
+                    [&service, &draft](const QJsonValue& coordinate) -> bool {
+                        if (!coordinate.isObject()) return false;
+                        const QJsonObject object = coordinate.toObject();
+                        bool valid = false;
+                        const std::size_t wanted = static_cast<std::size_t>(
+                            object.value("actionPosition").toString().toULongLong(&valid));
+                        if (!valid) return false;
+                        QString reason;
+                        return hydraulic::planVerifiedHydraulicDraftActionNavigation(
+                            service, draft.id, wanted, draft.generation, &reason).has_value();
+                    };
+                if (!previous.isNull() && !eligible(previous))
+                    previous = QJsonValue(QJsonValue::Null);
+                if (!next.isNull() && !eligible(next))
+                    next = QJsonValue(QJsonValue::Null);
+            }
             // An intervening Save/Commit invalidates even a freshly read
             // target: the POST must still supply and match this generation.
             const WorkingCopyInfo current = service.workingCopy(draft.id, false);

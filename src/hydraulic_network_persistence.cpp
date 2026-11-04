@@ -2132,7 +2132,7 @@ planVerifiedHydraulicDraftActionNavigation(
         };
     try {
         const WorkingCopyInfo draft = service.workingCopy(draftId, true);
-        if (draft.generation != expectedGeneration || !draft.baseRevision ||
+        if (draft.generation != expectedGeneration ||
             draft.journalCount == 0 || draft.journal.size() != draft.journalCount ||
             actionPosition > draft.journalCount ||
             (draft.historyCheckpointRevisionId &&
@@ -2151,24 +2151,34 @@ planVerifiedHydraulicDraftActionNavigation(
         if (!projectId)
             return fail(QStringLiteral("Invalid draft project identity"));
         std::vector<Key> roots;
-        service.withRepository(draft.projectId, [&](Repository& repository) {
-            const std::vector<std::pair<Key, Bytes>> records =
-                repository.scanAtRevision(*projectId, *draft.baseRevision);
-            if (records.size() > 65536)
-                throw StorageError(StorageErrorKind::LimitExceeded,
-                                   "Active history base exceeds bounded model scan");
-            for (const std::pair<Key, Bytes>& item : records) {
-                const ModelRecord record = decodeModelRecord(item.second);
-                if (record.kind == hydraulicNetworkKind)
-                    roots.push_back(item.first);
-            }
-        });
+        if (draft.baseRevision) {
+            service.withRepository(draft.projectId, [&](Repository& repository) {
+                const std::vector<std::pair<Key, Bytes>> records =
+                    repository.scanAtRevision(*projectId, *draft.baseRevision);
+                if (records.size() > 65536)
+                    throw StorageError(StorageErrorKind::LimitExceeded,
+                                       "Active history base exceeds bounded model scan");
+                for (const std::pair<Key, Bytes>& item : records) {
+                    const ModelRecord record = decodeModelRecord(item.second);
+                    if (record.kind == hydraulicNetworkKind)
+                        roots.push_back(item.first);
+                }
+            });
+        } else {
+            // The first private draft has no immutable parent. Network
+            // initialization/import is an unjournaled seed, not an Undo step.
+            // Its unique root must be present in the candidate itself.
+            for (const ModelChange& change : draft.candidateChanges)
+                if (change.record && change.record->kind == hydraulicNetworkKind)
+                    roots.push_back(change.key);
+        }
         if (roots.size() != 1)
-            return fail(QStringLiteral("Active journal replay requires exactly one existing hydraulic network"));
+            return fail(QStringLiteral("Active journal replay requires one unambiguous hydraulic network"));
         const Key rootKey = roots.front();
         const QUuid networkId = uuidFromKey(rootKey);
         const std::function<std::optional<ModelRecord>(const Key&)> readBase =
             [&service, &draft](const Key& key) -> std::optional<ModelRecord> {
+                if (!draft.baseRevision) return std::nullopt;
                 return service.getModelAtRevision(draft.projectId, *draft.baseRevision, key);
             };
         std::map<Key, std::optional<ModelRecord>> candidate;
@@ -2181,12 +2191,16 @@ planVerifiedHydraulicDraftActionNavigation(
                     candidate.find(key);
                 return found != candidate.end() ? found->second : readBase(key);
             };
-        const std::optional<NetworkHydraulic> parent =
-            loadDraftHydraulicNetwork(readBase, networkId);
         const std::optional<NetworkHydraulic> current =
             loadDraftHydraulicNetwork(readCurrent, networkId);
-        if (!parent || !current)
-            return fail(QStringLiteral("Active draft cannot be loaded as its existing hydraulic network"));
+        if (!current)
+            return fail(QStringLiteral("Active draft cannot be loaded as its hydraulic network"));
+        std::optional<NetworkHydraulic> parent;
+        if (draft.baseRevision) {
+            parent = loadDraftHydraulicNetwork(readBase, networkId);
+            if (!parent)
+                return fail(QStringLiteral("Active draft committed network base cannot be loaded"));
+        }
 
         // Root/chunk/member ownership must cover every material candidate
         // change. Otherwise even a mathematically valid MODEL replay might
@@ -2210,7 +2224,8 @@ planVerifiedHydraulicDraftActionNavigation(
                 }
                 return keys;
             };
-        const std::set<Key> baseKeys = ownedKeys(readBase);
+        const std::set<Key> baseKeys = draft.baseRevision
+            ? ownedKeys(readBase) : std::set<Key>{};
         const std::set<Key> currentKeys = ownedKeys(readCurrent);
         for (const std::pair<const Key, std::optional<ModelRecord>>& change : candidate) {
             if (baseKeys.contains(change.first) || currentKeys.contains(change.first))
@@ -2234,6 +2249,39 @@ planVerifiedHydraulicDraftActionNavigation(
         }
         NetworkHydraulic terminal;
         QString replayError;
+        if (!draft.baseRevision) {
+            // Reconstruct the seed of an unborn first draft from the exact
+            // persisted cursor position. There is no immutable checkpoint,
+            // so only additions/updates can be reversed without inventing
+            // a deleted member's original collection insertion index.
+            // Verify the complete forward journal against the saved candidate
+            // below before exposing any historical boundary.
+            std::vector<Bytes> inverseFrames;
+            inverseFrames.reserve(static_cast<std::size_t>(selectedPosition));
+            for (std::size_t index = static_cast<std::size_t>(selectedPosition);
+                 index > 0; --index) {
+                QString decodeError;
+                std::optional<aowis::model::ModelEditTransaction> inverse =
+                    aowis::model::ModelEditTransactionCodec::decode(
+                        qByteArrayFromBytes(frames[index - 1]), &decodeError);
+                if (!inverse)
+                    return fail(QStringLiteral("Cannot decode unborn draft action: ") + decodeError);
+                for (aowis::model::ModelEntityEdit& edit : inverse->edits) {
+                    if (edit.before && !edit.after)
+                        return fail(QStringLiteral("Unborn draft deletion needs original membership order"));
+                    std::swap(edit.before, edit.after);
+                }
+                const QByteArray encoded =
+                    aowis::model::ModelEditTransactionCodec::encode(*inverse, &decodeError);
+                if (encoded.isEmpty())
+                    return fail(QStringLiteral("Cannot invert unborn draft action: ") + decodeError);
+                inverseFrames.push_back(bytesFromQByteArray(encoded));
+            }
+            parent = replayHydraulicActionBoundary(*current, nullptr, inverseFrames,
+                inverseFrames.size(), nullptr, &replayError);
+            if (!parent)
+                return fail(QStringLiteral("Cannot verify unborn network seed: ") + replayError);
+        }
         const std::optional<NetworkHydraulic> persistedPosition =
             replayHydraulicActionBoundary(*parent, nullptr, frames,
                 static_cast<std::size_t>(selectedPosition), &terminal, &replayError);
