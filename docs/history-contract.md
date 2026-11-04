@@ -42,7 +42,7 @@ are listed only in the [History roadmap](history-roadmap.md).
 | Verify an entire revision | `verifiedRevisionNativeActionWitness` plus `verifyHydraulicRevisionActionCoverage` account for every changed native record across affected networks |
 | Plan archived action boundary | `planVerifiedHydraulicActionNavigation` builds an exact, **HEAD-relative replacement** candidate without mutation |
 | Select archived action boundary | `navigateVerifiedHydraulicAction` atomically publishes verified replacement state and V7 cursor metadata under lease, HEAD and generation fences, idempotent by navigation operation UUID |
-| Publish active draft action selection | Internal `publishVerifiedDraftActionNavigation` atomically persists a candidate and `draft-action-position`; retains all journal frames. **No MODEL-aware active-draft reconstruction yet** |
+| Navigate an existing network's active draft actions | `planVerifiedHydraulicDraftActionNavigation` verifies all retained MODEL frames against the persisted selected network state; `navigateVerifiedHydraulicDraftAction` publishes the rebuilt HEAD-relative candidate and cursor through the fenced/idempotent native writer. **Currently limited to one existing hydraulic network per committed base snapshot; not exposed through HTTP** |
 | HTTP Undo / GUI Undo/Redo | **Not implemented** |
 
 The **archived** action-selection API is restricted to an indexed, complete, first-parent
@@ -79,10 +79,13 @@ not** an Undo/Redo, Save or Commit gate.
 
 Original accepted MODEL frames are retained in a permanent local-Commit
 archive; the bounded active-draft journal is cleared after that Commit.
-A native active-journal publication primitive now retains all original frames,
-persists an exact journal position and refuses Save/Commit below the tip; this
-primitive is intentionally **not executable by users** without MODEL-aware
-candidate verification and complete active-journal coverage.
+The native MODEL-aware active-journal adapter validates the whole retained
+journal, including ordered membership and root metadata, compares the
+selected position with the actual persisted canonical network and refuses
+unjournaled/foreign native candidate changes. The existing atomic publisher
+retains original frames and the durable position. Save/Commit below the tip
+remain refused pending explicit redo invalidation. Multi-network drafts,
+unborn-base drafts and HTTP/GUI navigation are not supported by this slice.
 
 The GUI History dock may show committed action metadata, draft actions and
 checkpoints already, but it must not advertise operational Undo/Redo until

@@ -7,8 +7,9 @@ same frames in a durable archive. The active draft journal is cleared when
 the draft rebases; archived actions are not.
 
 The backend provides read-only HTTP timelines and **restricted native C++
-action-boundary navigation**. It does **not yet** provide continuous Undo/Redo
-for active draft edits or an HTTP navigation command. See the
+action-boundary navigation** for archived Commits and the retained active
+journal of one existing hydraulic network. It does **not yet** support
+continuous Undo/Redo across Commit boundaries or an HTTP navigation command. See the
 [History contract](history-contract.md) and [remaining History roadmap](history-roadmap.md).
 
 ## Permanent local-Commit archive
@@ -88,16 +89,19 @@ client-supplied arbitrary changes:
 | `planVerifiedHydraulicActionNavigation` | Full **current-HEAD-relative** candidate overlay for a global archived action position; read-only |
 | `navigateHistoryCheckpoint` | Atomic, fenced exact-checkpoint candidate+marker publication in a private draft |
 | `navigateVerifiedHydraulicAction` | Atomic, fenced, idempotent candidate+action-coordinate publication; restores the selected archived hydraulic state without moving the committed HEAD |
-| `publishVerifiedDraftActionNavigation` | Native-only fenced atomic publication of a **preverified** live-draft journal position and complete candidate; journal frames persist. No public MODEL-aware planner or HTTP execution route exists yet |
+| `planVerifiedHydraulicDraftActionNavigation` | Verifies the full retained active MODEL journal against the draft's selected canonical network and constructs a complete HEAD-relative candidate, read-only. Currently requires one existing hydraulic root in the committed base |
+| `navigateVerifiedHydraulicDraftAction` | Calls the MODEL-aware planner and fenced/idempotent native publisher; retains redo frames and survives service restart. Native C++ only |
+| `publishVerifiedDraftActionNavigation` | Atomic storage boundary for a **preverified** live-draft journal position and complete candidate; never accepts unchecked client native overlays |
 
 MODEL actions in a multi-network Commit retain a **single global action
 position** even when verification splits their edits by network. The
 coverage verifier requires the complete original archive—not merely the
 first page—and rejects unjournaled/foreign records, reordered membership,
 missing images and incomplete final snapshots. It is conservative: the
-current executable action selector does **not** support a live MODEL draft
-journal, network creation/removal, non-hydraulic revision changes, merge
-Commits or checkpoints without fully retained actions.
+archived-Commit selector does **not** support a live MODEL draft journal,
+network creation/removal, non-hydraulic revision changes, merge Commits or
+checkpoints without fully retained actions. Live-journal navigation is a
+separate, currently single-existing-network-only native operation.
 
 For action-boundary navigation the service verifies the draft's private
 role, leased session/fencing token, generation and current committed HEAD;
@@ -123,15 +127,16 @@ confirmed passing run against the current correction.
   first action and position N after its Nth action. Commit markers are not
   extra MODEL edits. A checkpoint-only revision cannot yield fabricated
   internal action positions.
-- Native active-draft publication retains the original journal and records
-  `draft-action-position`, even after restart. Until a MODEL-aware wrapper
-  proves its candidate, this internal method is **not** user-executable.
-  Save and Commit reject a position behind the journal tip rather than losing
-  Redo. This is a temporary fail-closed restriction, not finalized redo
-  invalidation semantics.
-- Archive verification is **not** complete user-facing History: redo
-  eligibility, active-draft action navigation, durable navigation-event
-  provenance, HTTP execution and GUI wiring are still outstanding.
+- The MODEL-aware active-draft adapter validates original frames against the
+  present canonical network before publishing any cursor change. The native
+  publisher retains the journal and records `draft-action-position` across
+  restart. Only **one existing network** in a committed base is currently
+  supported; unjournaled native changes and ambiguous ownership fail closed.
+  Save and Commit reject positions behind the journal tip, preserving Redo.
+- The native adapter is **not** complete user-facing History: multi-network
+  or unborn-base draft replay, redo invalidation on new edits, durable
+  navigation-event provenance, continuous cross-Commit movement, HTTP
+  execution and GUI wiring remain outstanding.
 
 See [working-copy storage](storage-formats.md#private-drafts-aowis-working-copy-7)
 for the persisted cursor fields and [working copies](working-copies.md) for

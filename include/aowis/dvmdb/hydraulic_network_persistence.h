@@ -136,6 +136,33 @@ std::optional<WorkingCopyInfo> navigateVerifiedHydraulicAction(
     const RevisionId& revision, std::size_t actionPosition,
     std::uint64_t expectedGeneration, QString* error = nullptr);
 
+// HDB-03b: verify an active draft's entire retained MODEL journal against
+// its persisted canonical network, then compute a COMPLETE, HEAD-relative
+// candidate for an action position. This first slice supports one existing
+// hydraulic network per base snapshot; additional/ambiguous roots, unjournaled
+// native candidate changes and active checkpoint selection fail closed.
+// Read-only: the native cursor/overlay cannot change while planning.
+struct VerifiedHydraulicDraftActionNavigationPlan final {
+    std::string draftId;
+    std::optional<RevisionId> expectedHead;
+    std::uint64_t expectedGeneration = 0;
+    std::size_t actionPosition = 0;
+    std::vector<ModelChange> candidateChanges;
+};
+std::optional<VerifiedHydraulicDraftActionNavigationPlan> planVerifiedHydraulicDraftActionNavigation(
+    ProjectService& service, std::string_view draftId, std::size_t actionPosition,
+    std::uint64_t expectedGeneration, QString* error = nullptr);
+
+// Only a locally reconstructed and checked candidate is passed to the
+// fenced/idempotent native writer. An uncertain result is retried by the
+// ORIGINAL operation UUID before attempting another replay or publication.
+std::optional<WorkingCopyInfo> navigateVerifiedHydraulicDraftAction(
+    ProjectService& service, std::string_view operationId,
+    std::string_view draftId, std::string_view sessionId,
+    std::string_view fencingToken, std::optional<RevisionId> expectedHead,
+    std::size_t actionPosition, std::uint64_t expectedGeneration,
+    QString* error = nullptr);
+
 // HIST-03c2: read-only MODEL-aware reverse replay for scalar/member updates
 // and network-root metadata. The input frames must be ORIGINAL archived
 // forward events in newest-first order, and `committed` must be the exact

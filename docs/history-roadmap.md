@@ -24,13 +24,17 @@ behavior. This work is part of the [overall DVMDB roadmap](roadmap.md).
   same-operation retry after restart. Draft metadata uses
   `AOWIS-WORKING-COPY-7`.
 
-An internal native active-draft publication primitive also persists a
-selected journal position and full replacement candidate in one durable
-operation, retaining all original journal frames, with lease/generation/HEAD
-fences, exact-operation retry and restart recovery. Ordinary Save and local
-Commit currently **reject** positions below the journal tip; no redo frames
-are silently archived or overwritten. No MODEL-aware live-journal planner or
-HTTP command invokes this primitive yet.
+An internal MODEL-aware active-draft adapter now replays and validates all
+retained journal frames for **one existing hydraulic network** from immutable
+HEAD, checks that its current selected boundary is byte-equal to the actual
+working-copy network, rejects unrelated/unjournaled native edits and
+constructs a complete HEAD-relative candidate. Its native operation publishes
+that candidate and the cursor atomically, retaining all original journal frames
+and the existing lease/generation/HEAD/idempotency protections. It currently
+refuses multi-root and unborn-base drafts rather than guessing ownership.
+Ordinary Save and local Commit still **reject** positions below the journal
+tip; no redo frames are silently archived or overwritten. No HTTP command
+invokes this native adapter yet.
 
 The archived action operation is **not** a general Undo or Redo command. It accepts only
 fully verified archived hydraulic local Commits and a draft with **no active
@@ -63,13 +67,14 @@ navigation test, with immutable revision and branch-ref checks.
 - Define a single server-owned cursor that can move from the selected
   committed action boundaries into the **current draft event journal**,
   including the unborn first draft.
-- Build the MODEL-aware adapter to materialize a complete, verified candidate
-  for every active-journal position (including newborn/unborn drafts), and
-  invoke the existing native atomic publication primitive only after full
-  revision/draft native-record coverage checks.
-- Materialize Undo/Redo of accepted draft actions with canonical MODEL
-  before/after verification, physical membership/root consistency and an
-  atomic candidate+cursor update. Preserve unrelated project and branch refs.
+- Extend the verified native active-journal adapter beyond a single existing
+  hydraulic root: attribute ambiguous created members in multi-network edits,
+  prove complete native-key coverage and support unborn-base drafts and
+  network import/creation/removal without guessed owners.
+- Qualify the existing action-boundary selection and publication with the Qt
+  hydraulic regression, including all 18 collections, physical membership
+  order, root metadata, restart, generation/lease conflicts and canonical
+  forward/backward equality. Preserve unrelated project and branch refs.
 - Represent navigation itself durably as an operation with fresh UUIDv7 and
   provenance to the original action. Preserve an audit trail without
   pretending old immutable revisions were changed.

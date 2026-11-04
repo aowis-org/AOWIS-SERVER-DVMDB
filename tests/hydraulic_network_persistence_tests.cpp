@@ -2531,12 +2531,227 @@ void exerciseVerifiedRevisionHydraulicCoverage() {
     std::filesystem::remove_all(folder, ignored);
 }
 
+// HDB-03b: the public MODEL-aware adapter must prove that original active
+// journal frames describe the ACTUAL draft, not just a plausible sequence.
+// A published position keeps the redo frames, and moving to position zero
+// must yield a clean HEAD-relative candidate even after structural edits.
+void exerciseVerifiedActiveDraftActionNavigation() {
+    const std::filesystem::path folder = tempDir();
+    try {
+        std::unique_ptr<native::ProjectService> service =
+            std::make_unique<native::ProjectService>(folder);
+        service->configureRepositoryRole(native::RepositoryRole::Private);
+        const std::string projectId = service->createUnbornProject(
+            "HDB-03b verified live journal").id;
+        const std::string session = native::UuidV7::generate().toString();
+        const NetworkHydraulic base = completeNetwork();
+        const native::RevisionId head = service->commitModelAtExpectedHead(
+            projectId, "main", hydraulic::fullDraftHydraulicNetworkChanges(base),
+            commitMetadata(), std::nullopt);
+        const std::string draftId = service->createWorkingCopy(
+            projectId, "main", head, session).id;
+        const std::string token = service->acquireWorkingCopyLease(
+            draftId, session, 120).token;
+        const std::function<std::optional<native::ModelRecord>(const native::Key&)> readBase =
+            [&service, &projectId, &head](const native::Key& key)
+                    -> std::optional<native::ModelRecord> {
+                return service->getModelAtRevision(projectId, head, key);
+            };
+        const std::function<NetworkHydraulic()> readDraft =
+            [&service, &draftId, &readBase, &base]() -> NetworkHydraulic {
+                std::map<native::Key, std::optional<native::ModelRecord>> changes;
+                const native::WorkingCopyInfo current = service->workingCopy(draftId, false);
+                for (const native::ModelChange& change : current.candidateChanges)
+                    require(changes.emplace(change.key, change.record).second,
+                            "HDB-03b duplicate draft candidate key");
+                const std::function<std::optional<native::ModelRecord>(const native::Key&)> read =
+                    [&changes, &readBase](const native::Key& key)
+                            -> std::optional<native::ModelRecord> {
+                        const std::map<native::Key, std::optional<native::ModelRecord>>::const_iterator
+                            item = changes.find(key);
+                        return item != changes.end() ? item->second : readBase(key);
+                    };
+                const std::optional<NetworkHydraulic> value =
+                    hydraulic::loadDraftHydraulicNetwork(read, base.uuid);
+                require(value.has_value(), "HDB-03b could not materialize selected draft");
+                return *value;
+            };
+        const std::function<aowis::model::ModelEditTransaction(const QString&)> newAction =
+            [](const QString& operation) -> aowis::model::ModelEditTransaction {
+                aowis::model::ModelEditTransaction event;
+                event.transactionId = QUuid(QString::fromStdString(
+                    native::UuidV7::generate().toString()));
+                event.operation = operation;
+                return event;
+            };
+        NetworkHydraulic stepOne = base;
+        stepOne.map_labels[0].text = QStringLiteral("History journal edit");
+        aowis::model::ModelEditTransaction first = newAction(QStringLiteral("hydraulic.label.update"));
+        first.edits.append(aowis::model::ModelEntityEdit{
+            stepOne.map_labels[0].uuid, QStringLiteral("HydraulicMapLabel"),
+            native::ModelCodec<HydraulicMapLabel>::encode(base.map_labels[0]),
+            native::ModelCodec<HydraulicMapLabel>::encode(stepOne.map_labels[0])});
+        const QByteArray firstBytes = aowis::model::ModelEditTransactionCodec::encode(first);
+        native::ModelChange labelChange;
+        labelChange.key = hydraulic::keyFromUuid(stepOne.map_labels[0].uuid);
+        labelChange.record = readBase(labelChange.key);
+        require(labelChange.record.has_value() && labelChange.record->kind == 18,
+                "HDB-03b missing canonical map-label native record");
+        labelChange.record->payload = hydraulic::bytesFromQByteArray(
+            native::ModelCodec<HydraulicMapLabel>::encode(stepOne.map_labels[0]));
+        require(!firstBytes.isEmpty() &&
+                service->saveWorkingCopyTransactions(draftId, session, token, 0,
+                    {labelChange},
+                    {hydraulic::bytesFromQByteArray(firstBytes)}).generation == 1,
+                "HDB-03b failed to Save first active MODEL event");
+
+        NetworkHydraulic stepTwo = stepOne;
+        const HydraulicNodeJunction added = item<HydraulicNodeJunction>(990201);
+        stepTwo.nodes_junctions.append(added);
+        aowis::model::ModelEditTransaction second = newAction(QStringLiteral("hydraulic.junction.add"));
+        second.edits.append(aowis::model::ModelEntityEdit{
+            added.uuid, QStringLiteral("HydraulicNodeJunction"), std::nullopt,
+            native::ModelCodec<HydraulicNodeJunction>::encode(added)});
+        const QByteArray secondBytes = aowis::model::ModelEditTransactionCodec::encode(second);
+        std::vector<native::ModelChange> secondChanges{hydraulic::changeFor(added)};
+        hydraulic::materializeDraftMembership(readBase,
+            {hydraulic::DraftMembershipIntent{
+                hydraulic::keyFromUuid(base.uuid), hydraulic::keyFromUuid(added.uuid),
+                1, 9, true}}, secondChanges);
+        require(!secondBytes.isEmpty() &&
+                service->saveWorkingCopyTransactions(draftId, session, token, 1,
+                    secondChanges, {hydraulic::bytesFromQByteArray(secondBytes)}).generation == 2,
+                "HDB-03b failed to Save structural MODEL event");
+
+        NetworkHydraulic stepThree = stepTwo;
+        stepThree.title_line_2 = QStringLiteral("History root metadata");
+        aowis::model::ModelEditTransaction third = newAction(QStringLiteral("hydraulic.root.update"));
+        third.edits.append(aowis::model::ModelEntityEdit{
+            base.uuid, QString::fromLatin1(aowis::model::hydraulicRootEditType),
+            aowis::model::hydraulicRootImage(stepTwo),
+            aowis::model::hydraulicRootImage(stepThree)});
+        const QByteArray thirdBytes = aowis::model::ModelEditTransactionCodec::encode(third);
+        const native::WorkingCopyInfo beforeThird = service->workingCopy(draftId, false);
+        std::map<native::Key, std::optional<native::ModelRecord>> beforeThirdChanges;
+        for (const native::ModelChange& change : beforeThird.candidateChanges)
+            beforeThirdChanges.emplace(change.key, change.record);
+        const std::function<std::optional<native::ModelRecord>(const native::Key&)> beforeThirdRead =
+            [&beforeThirdChanges, &readBase](const native::Key& key)
+                    -> std::optional<native::ModelRecord> {
+                const std::map<native::Key, std::optional<native::ModelRecord>>::const_iterator
+                    item = beforeThirdChanges.find(key);
+                return item == beforeThirdChanges.end() ? readBase(key) : item->second;
+            };
+        const native::ModelChange thirdChange =
+            hydraulic::materializeDraftRootEdit(beforeThirdRead, third.edits.first());
+        require(!thirdBytes.isEmpty() &&
+                service->saveWorkingCopyTransactions(draftId, session, token, 2,
+                    {thirdChange}, {hydraulic::bytesFromQByteArray(thirdBytes)}).generation == 3,
+                "HDB-03b failed to Save network-root MODEL event");
+        compareNetworks(stepThree, readDraft());
+
+        QString error;
+        const std::optional<hydraulic::VerifiedHydraulicDraftActionNavigationPlan> cleanPlan =
+            hydraulic::planVerifiedHydraulicDraftActionNavigation(
+                *service, draftId, 0, 3, &error);
+        const std::optional<hydraulic::VerifiedHydraulicDraftActionNavigationPlan> middlePlan =
+            hydraulic::planVerifiedHydraulicDraftActionNavigation(
+                *service, draftId, 2, 3, &error);
+        require(cleanPlan && cleanPlan->candidateChanges.empty() &&
+                middlePlan && !middlePlan->candidateChanges.empty() &&
+                service->workingCopy(draftId, true).journal.size() == 3,
+                "HDB-03b planning mutated the draft or failed to rebuild a clean base");
+        require(!hydraulic::planVerifiedHydraulicDraftActionNavigation(
+                    *service, draftId, 4, 3, &error) && !error.isEmpty(),
+                "HDB-03b accepted an out-of-range action position");
+        const std::string firstMove = native::UuidV7::generate().toString();
+        const std::optional<native::WorkingCopyInfo> toMiddle =
+            hydraulic::navigateVerifiedHydraulicDraftAction(
+                *service, firstMove, draftId, session, token, head, 2, 3, &error);
+        require(toMiddle && toMiddle->generation == 4 &&
+                toMiddle->draftActionPosition == 2 && toMiddle->journalCount == 3,
+                "HDB-03b failed verified backward active-journal navigation");
+        compareNetworks(stepTwo, readDraft());
+        const std::optional<native::WorkingCopyInfo> retry =
+            hydraulic::navigateVerifiedHydraulicDraftAction(
+                *service, firstMove, draftId, session, token, head, 2, 3, &error);
+        require(retry && retry->generation == 4,
+                "HDB-03b repeated operation changed the draft generation");
+        const std::optional<native::WorkingCopyInfo> toBase =
+            hydraulic::navigateVerifiedHydraulicDraftAction(
+                *service, native::UuidV7::generate().toString(),
+                draftId, session, token, head, 0, 4, &error);
+        require(toBase && toBase->generation == 5 && !toBase->dirty &&
+                toBase->candidateChanges.empty(),
+                "HDB-03b did not restore the clean committed base");
+        compareNetworks(base, readDraft());
+        const std::optional<native::WorkingCopyInfo> forward =
+            hydraulic::navigateVerifiedHydraulicDraftAction(
+                *service, native::UuidV7::generate().toString(),
+                draftId, session, token, head, 3, 5, &error);
+        require(forward && forward->generation == 6 &&
+                forward->draftActionPosition == 3 && forward->journalCount == 3 &&
+                service->optionalHead(projectId, "main") == head,
+                "HDB-03b failed verified forward active-journal navigation");
+        compareNetworks(stepThree, readDraft());
+
+        // An ordinary native Save is not an archived MODEL edit. Even with a
+        // valid retained MODEL journal, action navigation must not silently
+        // replace that unjournaled record with a plausible MODEL-only state.
+        const std::string unjournaled = service->createWorkingCopy(
+            projectId, "main", head, session).id;
+        const std::string unjournaledToken = service->acquireWorkingCopyLease(
+            unjournaled, session, 120).token;
+        // Native-only edits are legal before the first MODEL event. Once a
+        // journal exists the service correctly requires atomic event Saves,
+        // so create the mixed draft in that permitted order instead.
+        native::ModelChange foreign;
+        foreign.key = hydraulic::keyFromUuid(uuid(990999));
+        native::ModelRecord foreignRecord;
+        foreignRecord.kind = 999;
+        foreignRecord.payload = {42};
+        foreign.record = foreignRecord;
+        require(service->saveWorkingCopyChanges(unjournaled, session,
+                    unjournaledToken, 0, {foreign}).generation == 1,
+                "HDB-03b could not Save negative-control unjournaled native change");
+        require(service->saveWorkingCopyTransactions(unjournaled, session,
+                    unjournaledToken, 1,
+                    {labelChange},
+                    {hydraulic::bytesFromQByteArray(firstBytes)}).generation == 2,
+                "HDB-03b could not Save negative-control MODEL action");
+        require(!hydraulic::planVerifiedHydraulicDraftActionNavigation(
+                    *service, unjournaled, 0, 2, &error) && !error.isEmpty(),
+                "HDB-03b accepted an unjournaled foreign native draft change");
+        service.reset();
+        {
+            native::ProjectService reopened(folder);
+            const native::WorkingCopyInfo recovered = reopened.workingCopy(draftId, true);
+            require(recovered.generation == 6 && recovered.draftActionPosition == 3 &&
+                    recovered.journal.size() == 3 &&
+                    reopened.optionalHead(projectId, "main") == head,
+                    "HDB-03b lost verified active journal cursor after restart");
+            const std::optional<hydraulic::VerifiedHydraulicDraftActionNavigationPlan> again =
+                hydraulic::planVerifiedHydraulicDraftActionNavigation(
+                    reopened, draftId, 1, 6, &error);
+            require(again && !again->candidateChanges.empty(),
+                    "HDB-03b cannot reconstruct saved journal after restart");
+        }
+    } catch (...) {
+        std::error_code ignored;
+        std::filesystem::remove_all(folder, ignored);
+        throw;
+    }
+    std::error_code ignored;
+    std::filesystem::remove_all(folder, ignored);
+}
+
 int main(int argc, char** argv) {
     QCoreApplication application(argc, argv);
     try {
         exerciseHistoricalScalarActionPreview();
         exerciseVerifiedHydraulicActionBoundary();
         exerciseVerifiedRevisionHydraulicCoverage();
+        exerciseVerifiedActiveDraftActionNavigation();
         exerciseAtomicRootMetadataEdit();
         exerciseInt00IncompleteNetworkRoundTrip();
         exerciseUuidV7Hydraulic();

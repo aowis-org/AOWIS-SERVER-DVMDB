@@ -1979,10 +1979,10 @@ std::optional<WorkingCopyInfo> navigateVerifiedHydraulicAction(
 // deleting; forward replay derives every intermediate ordered collection.
 // Equality with the immutable child proves archive coverage for this network
 // without inventing insertion indices in the MODEL wire format.
-std::optional<NetworkHydraulic> previewVerifiedHydraulicActionBoundary(
-        const NetworkHydraulic& parent, const NetworkHydraulic& committed,
+static std::optional<NetworkHydraulic> replayHydraulicActionBoundary(
+        const NetworkHydraulic& parent, const NetworkHydraulic* committed,
         const std::vector<Bytes>& oldestFirstFrames, std::size_t boundary,
-        QString* error) {
+        NetworkHydraulic* terminal, QString* error) {
     if (error) error->clear();
     const std::function<std::optional<NetworkHydraulic>(const QString&)> fail =
         [error](const QString& reason) -> std::optional<NetworkHydraulic> {
@@ -1996,15 +1996,14 @@ std::optional<NetworkHydraulic> previewVerifiedHydraulicActionBoundary(
     if (oldestFirstFrames.size() > maximumActions || boundary > oldestFirstFrames.size())
         return fail(QStringLiteral("Historical boundary or action count is out of range"));
     const QByteArray parentImage = ModelCodec<NetworkHydraulic>::encode(parent);
-    const QByteArray committedImage = ModelCodec<NetworkHydraulic>::encode(committed);
-    if (parent.uuid.isNull() || parent.uuid != committed.uuid ||
-        parentImage.isEmpty() || committedImage.isEmpty())
+    const QByteArray committedImage = committed ? ModelCodec<NetworkHydraulic>::encode(*committed) : QByteArray();
+    if (parent.uuid.isNull() || (committed && parent.uuid != committed->uuid) ||
+        parentImage.isEmpty() || (committed && committedImage.isEmpty()))
         return fail(QStringLiteral("Invalid or mismatched historical network checkpoints"));
     const aowis::dvmdb::HydraulicDependencyValidation sourceValidation =
         aowis::dvmdb::validateHydraulicNetworkWithDependencies(parent);
-    const aowis::dvmdb::HydraulicDependencyValidation endValidation =
-        aowis::dvmdb::validateHydraulicNetworkWithDependencies(committed);
-    if (!sourceValidation.report.valid() || !endValidation.report.valid())
+    if (!sourceValidation.report.valid() ||
+        (committed && !aowis::dvmdb::validateHydraulicNetworkWithDependencies(*committed).report.valid()))
         return fail(QStringLiteral("Historical checkpoint has invalid model references or values"));
 
     NetworkHydraulic state = parent;
@@ -2094,10 +2093,252 @@ std::optional<NetworkHydraulic> previewVerifiedHydraulicActionBoundary(
         state = std::move(next);
         if (index + 1 == boundary) selected = state;
     }
-    if (ModelCodec<NetworkHydraulic>::encode(state) != committedImage)
+    if (committed && ModelCodec<NetworkHydraulic>::encode(state) != committedImage)
         return fail(QStringLiteral("Historical MODEL archive does not cover the immutable network delta"));
+    if (terminal) *terminal = state;
     return selected;
 }
+
+
+std::optional<NetworkHydraulic> previewVerifiedHydraulicActionBoundary(
+        const NetworkHydraulic& parent, const NetworkHydraulic& committed,
+        const std::vector<Bytes>& oldestFirstFrames, std::size_t boundary,
+        QString* error) {
+    return replayHydraulicActionBoundary(
+        parent, &committed, oldestFirstFrames, boundary, nullptr, error);
+}
+
+// The first live-journal adapter deliberately starts with an existing single
+// network. MODEL frames do not contain a network owner for a new member; in
+// multi-network drafts that owner must be proved rather than guessed. Multiple
+// roots therefore remain ineligible for this API until cross-network
+// attribution is implemented. All 18 member kinds and root metadata use the
+// same already-verified canonical transaction replay below.
+std::optional<VerifiedHydraulicDraftActionNavigationPlan>
+planVerifiedHydraulicDraftActionNavigation(
+        ProjectService& service, std::string_view draftId,
+        std::size_t actionPosition, std::uint64_t expectedGeneration,
+        QString* error) {
+    if (error) error->clear();
+    const std::function<std::optional<VerifiedHydraulicDraftActionNavigationPlan>(const QString&)> fail =
+        [error](const QString& reason)
+                -> std::optional<VerifiedHydraulicDraftActionNavigationPlan> {
+            if (error) *error = reason;
+            return std::nullopt;
+        };
+    try {
+        const WorkingCopyInfo draft = service.workingCopy(draftId, true);
+        if (draft.generation != expectedGeneration || !draft.baseRevision ||
+            draft.journalCount == 0 || draft.journal.size() != draft.journalCount ||
+            actionPosition > draft.journalCount ||
+            draft.historyCheckpointRevisionId || draft.historyActionPosition ||
+            draft.historyArchiveCommitOperationId)
+            return fail(QStringLiteral("Active draft journal, generation or HEAD is not eligible"));
+        const std::uint64_t selectedPosition =
+            draft.draftActionPosition.value_or(draft.journalCount);
+        if (selectedPosition > draft.journalCount)
+            return fail(QStringLiteral("Persisted draft cursor is outside the journal"));
+        const std::optional<RevisionGraphHead> branch =
+            service.branchById(draft.projectId, draft.branchId);
+        if (!branch || branch->revision != draft.baseRevision)
+            return fail(QStringLiteral("Active draft branch HEAD has changed"));
+        const std::optional<ProjectId> projectId = ProjectId::parse(draft.projectId);
+        if (!projectId)
+            return fail(QStringLiteral("Invalid draft project identity"));
+        std::vector<Key> roots;
+        service.withRepository(draft.projectId, [&](Repository& repository) {
+            const std::vector<std::pair<Key, Bytes>> records =
+                repository.scanAtRevision(*projectId, *draft.baseRevision);
+            if (records.size() > 65536)
+                throw StorageError(StorageErrorKind::LimitExceeded,
+                                   "Active history base exceeds bounded model scan");
+            for (const std::pair<Key, Bytes>& item : records) {
+                const ModelRecord record = decodeModelRecord(item.second);
+                if (record.kind == hydraulicNetworkKind)
+                    roots.push_back(item.first);
+            }
+        });
+        if (roots.size() != 1)
+            return fail(QStringLiteral("Active journal replay requires exactly one existing hydraulic network"));
+        const Key rootKey = roots.front();
+        const QUuid networkId = uuidFromKey(rootKey);
+        const std::function<std::optional<ModelRecord>(const Key&)> readBase =
+            [&service, &draft](const Key& key) -> std::optional<ModelRecord> {
+                return service.getModelAtRevision(draft.projectId, *draft.baseRevision, key);
+            };
+        std::map<Key, std::optional<ModelRecord>> candidate;
+        for (const ModelChange& change : draft.candidateChanges)
+            if (!candidate.emplace(change.key, change.record).second)
+                return fail(QStringLiteral("Active draft contains duplicate native keys"));
+        const std::function<std::optional<ModelRecord>(const Key&)> readCurrent =
+            [&candidate, &readBase](const Key& key) -> std::optional<ModelRecord> {
+                const std::map<Key, std::optional<ModelRecord>>::const_iterator found =
+                    candidate.find(key);
+                return found != candidate.end() ? found->second : readBase(key);
+            };
+        const std::optional<NetworkHydraulic> parent =
+            loadDraftHydraulicNetwork(readBase, networkId);
+        const std::optional<NetworkHydraulic> current =
+            loadDraftHydraulicNetwork(readCurrent, networkId);
+        if (!parent || !current)
+            return fail(QStringLiteral("Active draft cannot be loaded as its existing hydraulic network"));
+
+        // Root/chunk/member ownership must cover every material candidate
+        // change. Otherwise even a mathematically valid MODEL replay might
+        // silently discard unjournaled native edits in the same draft.
+        const std::function<std::set<Key>(
+            const std::function<std::optional<ModelRecord>(const Key&)>&)> ownedKeys =
+            [&rootKey](const std::function<std::optional<ModelRecord>(const Key&)>& read)
+                    -> std::set<Key> {
+                std::set<Key> keys{rootKey};
+                const std::optional<ModelRecord> root = read(rootKey);
+                if (!root || root->kind != hydraulicNetworkKind)
+                    throw StorageError(StorageErrorKind::Corruption,
+                                       "Invalid active history network root");
+                for (const Key& chunkKey : root->references) {
+                    keys.insert(chunkKey);
+                    const std::optional<ModelRecord> chunk = read(chunkKey);
+                    if (!chunk || chunk->kind != 101)
+                        throw StorageError(StorageErrorKind::Corruption,
+                                           "Invalid active history membership chunk");
+                    keys.insert(chunk->references.begin(), chunk->references.end());
+                }
+                return keys;
+            };
+        const std::set<Key> baseKeys = ownedKeys(readBase);
+        const std::set<Key> currentKeys = ownedKeys(readCurrent);
+        for (const std::pair<const Key, std::optional<ModelRecord>>& change : candidate) {
+            if (baseKeys.contains(change.first) || currentKeys.contains(change.first))
+                continue;
+            if (!change.second && !readBase(change.first))
+                continue; // A harmless tombstone for a created-then-removed key.
+            return fail(QStringLiteral("Unjournaled or unowned native draft record is present"));
+        }
+
+        std::vector<Bytes> frames;
+        frames.reserve(draft.journal.size());
+        for (const WorkingCopyEvent& event : draft.journal) {
+            QString decodeError;
+            const std::optional<aowis::model::ModelEditTransaction> transaction =
+                aowis::model::ModelEditTransactionCodec::decode(
+                    qByteArrayFromBytes(event.encoded), &decodeError);
+            if (!transaction ||
+                transaction->transactionId.toString(QUuid::WithoutBraces).toStdString() != event.id)
+                return fail(QStringLiteral("Active MODEL journal identity mismatch: ") + decodeError);
+            frames.push_back(event.encoded);
+        }
+        NetworkHydraulic terminal;
+        QString replayError;
+        const std::optional<NetworkHydraulic> persistedPosition =
+            replayHydraulicActionBoundary(*parent, nullptr, frames,
+                static_cast<std::size_t>(selectedPosition), &terminal, &replayError);
+        if (!persistedPosition)
+            return fail(QStringLiteral("Active MODEL journal cannot be replayed: ") + replayError);
+        if (ModelCodec<NetworkHydraulic>::encode(*persistedPosition) !=
+            ModelCodec<NetworkHydraulic>::encode(*current))
+            return fail(QStringLiteral("Active MODEL actions do not explain the persisted draft model"));
+        const std::optional<NetworkHydraulic> desired =
+            replayHydraulicActionBoundary(*parent, &terminal, frames,
+                actionPosition, nullptr, &replayError);
+        if (!desired)
+            return fail(QStringLiteral("Selected active action cannot be reconstructed: ") + replayError);
+
+        const std::vector<ModelChange> generated = fullDraftHydraulicNetworkChanges(*desired);
+        std::map<Key, std::optional<ModelRecord>> overlay;
+        std::set<Key> generatedKeys;
+        for (const ModelChange& change : generated) {
+            if (!generatedKeys.insert(change.key).second)
+                return fail(QStringLiteral("Rebuilt active network contains duplicate native keys"));
+            overlay[change.key] = change.record;
+        }
+        for (const Key& key : baseKeys)
+            if (!generatedKeys.contains(key)) overlay[key] = std::nullopt;
+        for (const Key& key : currentKeys)
+            if (!generatedKeys.contains(key)) overlay[key] = std::nullopt;
+        if (overlay.size() > 20000)
+            return fail(QStringLiteral("Active draft replacement exceeds native change limit"));
+
+        // The replacement is always relative to immutable HEAD, never the
+        // currently selected candidate. Drop byte-identical/no-op entries so
+        // returning to the base is a truly clean working copy.
+        for (std::map<Key, std::optional<ModelRecord>>::iterator item = overlay.begin();
+             item != overlay.end();) {
+            const std::optional<ModelRecord> base = readBase(item->first);
+            const bool equal = (!item->second && !base) ||
+                (item->second && base && item->second->kind == base->kind &&
+                 item->second->payload == base->payload &&
+                 item->second->references == base->references);
+            if (equal) item = overlay.erase(item);
+            else ++item;
+        }
+        const std::function<std::optional<ModelRecord>(const Key&)> readDesired =
+            [&overlay, &readBase](const Key& key) -> std::optional<ModelRecord> {
+                const std::map<Key, std::optional<ModelRecord>>::const_iterator found =
+                    overlay.find(key);
+                return found != overlay.end() ? found->second : readBase(key);
+            };
+        const std::optional<NetworkHydraulic> rebuilt =
+            loadDraftHydraulicNetwork(readDesired, networkId);
+        if (!rebuilt || ModelCodec<NetworkHydraulic>::encode(*rebuilt) !=
+                          ModelCodec<NetworkHydraulic>::encode(*desired))
+            return fail(QStringLiteral("Native active overlay differs from verified MODEL action state"));
+        const WorkingCopyInfo fresh = service.workingCopy(draftId, false);
+        const std::optional<RevisionGraphHead> branchFresh =
+            service.branchById(draft.projectId, draft.branchId);
+        if (fresh.generation != expectedGeneration ||
+            fresh.baseRevision != draft.baseRevision ||
+            !branchFresh || branchFresh->revision != draft.baseRevision)
+            return fail(QStringLiteral("Active draft changed while verifying navigation"));
+        VerifiedHydraulicDraftActionNavigationPlan plan;
+        plan.draftId = draft.id;
+        plan.expectedHead = draft.baseRevision;
+        plan.expectedGeneration = expectedGeneration;
+        plan.actionPosition = actionPosition;
+        for (const std::pair<const Key, std::optional<ModelRecord>>& entry : overlay)
+            plan.candidateChanges.push_back(ModelChange{entry.first, entry.second});
+        return plan;
+    } catch (const std::exception& exception) {
+        return fail(QString::fromUtf8(exception.what()));
+    }
+}
+
+std::optional<WorkingCopyInfo> navigateVerifiedHydraulicDraftAction(
+        ProjectService& service, std::string_view operationId,
+        std::string_view draftId, std::string_view sessionId,
+        std::string_view fencingToken, std::optional<RevisionId> expectedHead,
+        std::size_t actionPosition, std::uint64_t expectedGeneration,
+        QString* error) {
+    if (error) error->clear();
+    const std::function<std::optional<WorkingCopyInfo>(const QString&)> fail =
+        [error](const QString& message) -> std::optional<WorkingCopyInfo> {
+            if (error) *error = message;
+            return std::nullopt;
+        };
+    try {
+        // A lost acknowledgement can be retried without making the old
+        // generation's MODEL state available again: the native operation ID
+        // records the exact published cursor and original generation.
+        const WorkingCopyInfo current = service.workingCopy(draftId, false);
+        if (current.lastHistoryNavigationOperationId == operationId)
+            return service.publishVerifiedDraftActionNavigation(
+                operationId, draftId, sessionId, fencingToken,
+                expectedGeneration, expectedHead, actionPosition, {});
+        const std::optional<VerifiedHydraulicDraftActionNavigationPlan> plan =
+            planVerifiedHydraulicDraftActionNavigation(
+                service, draftId, actionPosition, expectedGeneration, error);
+        if (!plan) return std::nullopt;
+        if (plan->draftId != draftId || plan->expectedHead != expectedHead ||
+            plan->expectedGeneration != expectedGeneration ||
+            plan->actionPosition != actionPosition)
+            return fail(QStringLiteral("Verified draft action plan identity or HEAD mismatch"));
+        return service.publishVerifiedDraftActionNavigation(
+            operationId, draftId, sessionId, fencingToken,
+            expectedGeneration, expectedHead, actionPosition, plan->candidateChanges);
+    } catch (const std::exception& exception) {
+        return fail(QString::fromUtf8(exception.what()));
+    }
+}
+
 
 ModelChange materializeDraftRootEdit(
     const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
