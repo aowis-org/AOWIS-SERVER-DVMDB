@@ -1959,12 +1959,267 @@ void exerciseHistoricalScalarActionPreview() {
             "HIST-03c2 accepted corrupted archived MODEL bytes");
 }
 
+// HIST-03c2b: an immutable parent + *complete* forward action archive is
+// sufficient to reconstruct ordered structural intermediate states. Native
+// draft member insertion appends; a deletion preserves survivor order.
+// An unjournaled change or a different historical ordering must fail closed.
+void exerciseVerifiedHydraulicActionBoundary() {
+    const NetworkHydraulic parent = completeNetwork();
+    NetworkHydraulic current = parent;
+    std::vector<native::Bytes> archived;
+    std::vector<NetworkHydraulic> states{parent};
+    const std::function<void(const aowis::model::ModelEditTransaction&)> archive =
+        [&archived, &states, &current](const aowis::model::ModelEditTransaction& event) {
+            const QByteArray bytes = aowis::model::ModelEditTransactionCodec::encode(event);
+            require(!bytes.isEmpty(), "HIST-03c2b action did not encode");
+            archived.push_back(hydraulic::bytesFromQByteArray(bytes));
+            states.push_back(current);
+        };
+
+    // One logical action updates *all 18* existing collection types.
+    aowis::model::ModelEditTransaction fields;
+    fields.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+    fields.operation = QStringLiteral("hydraulic.history.verified.all-collections");
+#define HISTORY_VERIFY_UPDATE(name, type) \
+    { \
+        const type before = current.name.first(); \
+        type& after = current.name.first(); \
+        after.id += QStringLiteral("-verified"); \
+        fields.edits.append(aowis::model::ModelEntityEdit{ \
+            before.uuid, QStringLiteral(#type), native::ModelCodec<type>::encode(before), \
+            native::ModelCodec<type>::encode(after)}); \
+    }
+    HISTORY_VERIFY_UPDATE(pipe_materials, HydraulicPipeMaterial)
+    HISTORY_VERIFY_UPDATE(patterns_time, HydraulicPatternTime)
+    HISTORY_VERIFY_UPDATE(curves_tank_volume, HydraulicCurveTankVolume)
+    HISTORY_VERIFY_UPDATE(curves_pump_head, HydraulicCurvePumpHead)
+    HISTORY_VERIFY_UPDATE(curves_pump_efficiency, HydraulicCurvePumpEfficiency)
+    HISTORY_VERIFY_UPDATE(curves_valve_headloss, HydraulicCurveValveHeadloss)
+    HISTORY_VERIFY_UPDATE(curves_valve_characteristic, HydraulicCurveValveCharacteristic)
+    HISTORY_VERIFY_UPDATE(curves_generic, HydraulicCurveGeneric)
+    HISTORY_VERIFY_UPDATE(nodes_reservoirs, HydraulicNodeReservoir)
+    HISTORY_VERIFY_UPDATE(nodes_junctions, HydraulicNodeJunction)
+    HISTORY_VERIFY_UPDATE(nodes_tanks, HydraulicNodeTank)
+    HISTORY_VERIFY_UPDATE(demand_points, HydraulicDemandPoint)
+    HISTORY_VERIFY_UPDATE(links_pipes, HydraulicLinkPipe)
+    HISTORY_VERIFY_UPDATE(links_pumps, HydraulicLinkPump)
+    HISTORY_VERIFY_UPDATE(links_valves, HydraulicLinkValve)
+    HISTORY_VERIFY_UPDATE(controls_simple, HydraulicControlSimple)
+    HISTORY_VERIFY_UPDATE(controls_rules, HydraulicControlRule)
+    HISTORY_VERIFY_UPDATE(map_labels, HydraulicMapLabel)
+#undef HISTORY_VERIFY_UPDATE
+    require(fields.edits.size() == 18, "HIST-03c2b must update all collections");
+    archive(fields);
+
+    // One mixed root+creation event. The new member must be appended after
+    // the original two junctions, including when chunks have been rebalanced.
+    aowis::model::ModelEditTransaction mixed;
+    mixed.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+    mixed.operation = QStringLiteral("hydraulic.history.verified.mixed");
+    const NetworkHydraulic beforeMixed = current;
+    current.title_line_2 = QStringLiteral("HIST-03c2b archived mixed edit");
+    const HydraulicNodeJunction firstNew = item<HydraulicNodeJunction>(551);
+    current.nodes_junctions.append(firstNew);
+    mixed.edits.append(aowis::model::ModelEntityEdit{
+        current.uuid, QString::fromLatin1(aowis::model::hydraulicRootEditType),
+        aowis::model::hydraulicRootImage(beforeMixed),
+        aowis::model::hydraulicRootImage(current)});
+    mixed.edits.append(aowis::model::ModelEntityEdit{
+        firstNew.uuid, QStringLiteral("HydraulicNodeJunction"), std::nullopt,
+        native::ModelCodec<HydraulicNodeJunction>::encode(firstNew)});
+    archive(mixed);
+
+    // Create one member and delete an earlier appended member in a single
+    // action, retaining the two original junctions in their exact order.
+    aowis::model::ModelEditTransaction swap;
+    swap.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+    swap.operation = QStringLiteral("hydraulic.history.verified.swap");
+    const HydraulicNodeJunction secondNew = item<HydraulicNodeJunction>(552);
+    swap.edits.append(aowis::model::ModelEntityEdit{
+        secondNew.uuid, QStringLiteral("HydraulicNodeJunction"), std::nullopt,
+        native::ModelCodec<HydraulicNodeJunction>::encode(secondNew)});
+    swap.edits.append(aowis::model::ModelEntityEdit{
+        firstNew.uuid, QStringLiteral("HydraulicNodeJunction"),
+        native::ModelCodec<HydraulicNodeJunction>::encode(firstNew), std::nullopt});
+    current.nodes_junctions.append(secondNew);
+    current.nodes_junctions.removeAt(2);
+    archive(swap);
+
+    // Deleting an original ordered member and then introducing another new
+    // member must reconstruct the parent order at earlier boundaries.
+    aowis::model::ModelEditTransaction removal;
+    removal.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+    removal.operation = QStringLiteral("hydraulic.history.verified.remove");
+    const HydraulicMapLabel oldLabel = current.map_labels.first();
+    removal.edits.append(aowis::model::ModelEntityEdit{
+        oldLabel.uuid, QStringLiteral("HydraulicMapLabel"),
+        native::ModelCodec<HydraulicMapLabel>::encode(oldLabel), std::nullopt});
+    current.map_labels.clear();
+    archive(removal);
+
+    aowis::model::ModelEditTransaction insertion;
+    insertion.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+    insertion.operation = QStringLiteral("hydraulic.history.verified.insert");
+    HydraulicMapLabel newLabel = item<HydraulicMapLabel>(553);
+    newLabel.anchor_node_uuid = uuid(20);
+    newLabel.text = QStringLiteral("Historical label");
+    insertion.edits.append(aowis::model::ModelEntityEdit{
+        newLabel.uuid, QStringLiteral("HydraulicMapLabel"), std::nullopt,
+        native::ModelCodec<HydraulicMapLabel>::encode(newLabel)});
+    current.map_labels.append(newLabel);
+    archive(insertion);
+
+    const NetworkHydraulic committed = current;
+    QString error;
+    for (std::size_t boundary = 0; boundary <= archived.size(); ++boundary) {
+        const std::optional<NetworkHydraulic> reconstructed =
+            hydraulic::previewVerifiedHydraulicActionBoundary(
+                parent, committed, archived, boundary, &error);
+        require(reconstructed.has_value() && error.isEmpty() &&
+                native::ModelCodec<NetworkHydraulic>::encode(*reconstructed) ==
+                native::ModelCodec<NetworkHydraulic>::encode(states[boundary]) &&
+                native::ModelCodec<NetworkHydraulic>::encode(parent) ==
+                native::ModelCodec<NetworkHydraulic>::encode(states.front()),
+                "HIST-03c2b failed byte-exact ordered intermediate reconstruction");
+    }
+    require(!hydraulic::previewVerifiedHydraulicActionBoundary(
+                parent, committed, archived, archived.size() + 1, &error) &&
+            error.contains(QStringLiteral("boundary")),
+            "HIST-03c2b accepted an out-of-range historical position");
+
+    // If an early action is missing, a later action may encounter a stale
+    // before-image before the final checkpoint comparison. That is also a
+    // correct fail-closed result, not evidence that coverage was accepted.
+    std::vector<native::Bytes> missingPrefix = archived;
+    missingPrefix.erase(missingPrefix.begin());
+    require(!hydraulic::previewVerifiedHydraulicActionBoundary(
+                parent, committed, missingPrefix, 0, &error) &&
+            error.contains(QStringLiteral("before-image mismatch")),
+            "HIST-03c2b did not reject an omitted earlier action");
+    // Removing the *last* action leaves a valid prefix that can be replayed
+    // without stale before-images. Only the final immutable snapshot witness
+    // detects its missing edit; that coverage check is essential.
+    std::vector<native::Bytes> incomplete = archived;
+    incomplete.pop_back();
+    require(!hydraulic::previewVerifiedHydraulicActionBoundary(
+                parent, committed, incomplete, 0, &error) &&
+            error.contains(QStringLiteral("does not cover")),
+            "HIST-03c2b accepted incomplete archived action coverage");
+    NetworkHydraulic unjournaled = committed;
+    unjournaled.title_line_3 = QStringLiteral("Unjournaled native change");
+    require(!hydraulic::previewVerifiedHydraulicActionBoundary(
+                parent, unjournaled, archived, 1, &error) &&
+            error.contains(QStringLiteral("does not cover")),
+            "HIST-03c2b accepted unjournaled root metadata");
+
+    NetworkHydraulic outOfOrder = committed;
+    std::swap(outOfOrder.nodes_junctions[0], outOfOrder.nodes_junctions[1]);
+    require(!hydraulic::previewVerifiedHydraulicActionBoundary(
+                parent, outOfOrder, archived, 2, &error) &&
+            error.contains(QStringLiteral("does not cover")),
+            "HIST-03c2b guessed a different historical membership order");
+    std::vector<native::Bytes> corrupted = archived;
+    corrupted[2].back() ^= 0xff;
+    require(!hydraulic::previewVerifiedHydraulicActionBoundary(
+                parent, committed, corrupted, 0, &error) &&
+            error.contains(QStringLiteral("Invalid archived MODEL")),
+            "HIST-03c2b accepted a corrupt historical action frame");
+    std::vector<native::Bytes> duplicated = archived;
+    duplicated.push_back(archived.front());
+    require(!hydraulic::previewVerifiedHydraulicActionBoundary(
+                parent, committed, duplicated, 0, &error) && !error.isEmpty(),
+            "HIST-03c2b accepted a duplicate historical action");
+    aowis::model::ModelEditTransaction collision;
+    collision.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+    collision.operation = QStringLiteral("hydraulic.history.verified.uuid-collision");
+    HydraulicMapLabel duplicate = item<HydraulicMapLabel>(19);
+    duplicate.anchor_node_uuid = uuid(20);
+    collision.edits.append(aowis::model::ModelEntityEdit{
+        duplicate.uuid, QStringLiteral("HydraulicMapLabel"), std::nullopt,
+        native::ModelCodec<HydraulicMapLabel>::encode(duplicate)});
+    const QByteArray collisionBytes = aowis::model::ModelEditTransactionCodec::encode(collision);
+    require(!collisionBytes.isEmpty() &&
+            !hydraulic::previewVerifiedHydraulicActionBoundary(
+                parent, parent, {hydraulic::bytesFromQByteArray(collisionBytes)}, 0, &error) &&
+            error.contains(QStringLiteral("collides")),
+            "HIST-03c2b accepted a member UUID already owned by another collection");
+
+    // Use real immutable native revisions as the before/after witnesses.
+    // This also proves collection ordering survives manifest chunk materialization.
+    const std::filesystem::path folder = tempDir();
+    try {
+        const native::ProjectId project = native::ProjectId::generate();
+        native::Repository repository(folder);
+        const native::RevisionId unborn =
+            repository.createRootBranch(project, "history-verified", commitMetadata());
+        const native::RevisionId parentRevision = hydraulic::saveHydraulicNetwork(
+            repository, project, "history-verified", parent, unborn, commitMetadata());
+        const native::RevisionId childRevision = hydraulic::saveHydraulicNetwork(
+            repository, project, "history-verified", committed, parentRevision, commitMetadata());
+        const std::optional<NetworkHydraulic> storedParent =
+            hydraulic::loadHydraulicNetworkAtRevision(repository, project, parentRevision, parent.uuid);
+        const std::optional<NetworkHydraulic> storedChild =
+            hydraulic::loadHydraulicNetworkAtRevision(repository, project, childRevision, parent.uuid);
+        require(storedParent.has_value() && storedChild.has_value(),
+                "HIST-03c2b could not load immutable checkpoint witnesses");
+        const std::optional<NetworkHydraulic> fromRevisions =
+            hydraulic::previewVerifiedHydraulicActionBoundary(
+                *storedParent, *storedChild, archived, 3, &error);
+        require(fromRevisions.has_value() && error.isEmpty() &&
+                native::ModelCodec<NetworkHydraulic>::encode(*fromRevisions) ==
+                native::ModelCodec<NetworkHydraulic>::encode(states[3]),
+                "HIST-03c2b native revision witnesses disagree with archived action ordering");
+        (void)repository.verifyRepository();
+    } catch (...) {
+        std::error_code ignored;
+        std::filesystem::remove_all(folder, ignored);
+        throw;
+    }
+    std::error_code ignored;
+    std::filesystem::remove_all(folder, ignored);
+
+    // A complete archive may span several HTTP pages. Verification must
+    // only succeed with every frame, never with the first 100 alone.
+    NetworkHydraulic longEnd = parent;
+    std::vector<native::Bytes> longFrames;
+    for (int index = 0; index < 126; ++index) {
+        aowis::model::ModelEditTransaction action;
+        action.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+        action.operation = QStringLiteral("hydraulic.history.verified.root-step");
+        const QByteArray before = aowis::model::hydraulicRootImage(longEnd);
+        longEnd.title_line_2 = QStringLiteral("Action %1").arg(index);
+        action.edits.append(aowis::model::ModelEntityEdit{
+            longEnd.uuid, QString::fromLatin1(aowis::model::hydraulicRootEditType),
+            before, aowis::model::hydraulicRootImage(longEnd)});
+        const QByteArray bytes = aowis::model::ModelEditTransactionCodec::encode(action);
+        require(!bytes.isEmpty(), "HIST-03c2b failed to encode paged action archive");
+        longFrames.push_back(hydraulic::bytesFromQByteArray(bytes));
+    }
+    require(hydraulic::previewVerifiedHydraulicActionBoundary(
+                parent, longEnd, longFrames, 126, &error).has_value() && error.isEmpty(),
+            "HIST-03c2b failed archive spanning multiple read pages");
+    std::vector<native::Bytes> firstPage(longFrames.begin(), longFrames.begin() + 100);
+    require(!hydraulic::previewVerifiedHydraulicActionBoundary(
+                parent, longEnd, firstPage, 100, &error) &&
+            error.contains(QStringLiteral("does not cover")),
+            "HIST-03c2b accepted a truncated first archive page");
+
+    const NetworkHydraulic untouchedParent = parent;
+    const NetworkHydraulic untouchedChild = committed;
+    require(native::ModelCodec<NetworkHydraulic>::encode(parent) ==
+                native::ModelCodec<NetworkHydraulic>::encode(untouchedParent) &&
+            native::ModelCodec<NetworkHydraulic>::encode(committed) ==
+                native::ModelCodec<NetworkHydraulic>::encode(untouchedChild),
+            "HIST-03c2b mutated immutable caller checkpoints");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     QCoreApplication application(argc, argv);
     try {
         exerciseHistoricalScalarActionPreview();
+        exerciseVerifiedHydraulicActionBoundary();
         exerciseAtomicRootMetadataEdit();
         exerciseInt00IncompleteNetworkRoundTrip();
         exerciseUuidV7Hydraulic();

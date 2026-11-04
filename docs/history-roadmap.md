@@ -137,6 +137,25 @@ this step is accepted. Outstanding HIST-03c2 work is proving archives fully
 cover the native revision delta, recording membership order for structural
 Undo/Redo, and publishing the planned result atomically with its cursor.
 
+**HIST-03c2b ordered membership + full-network archive verification
+(implemented read-only, Qt acceptance pending):**
+`hydraulic::previewVerifiedHydraulicActionBoundary(parent, committed, frames,
+boundary)` now replays the *entire* oldest-first archive from the immutable
+parent, using the native append-on-insert / order-preserving-delete rules for
+all 18 collections. Mixed root/typed events are verified as one atomic
+candidate step. After verifying every canonical MODEL before/after image and
+model dependency, it requires the reconstructed **whole network** to equal
+the committed snapshot byte for byte before returning any intermediate state.
+It rejects incomplete archives, unjournaled root changes, invalid UUID/type,
+corrupt frames, unexpected ordering and truncated pages. Native persisted
+revision snapshots are exercised as comparison witnesses. This is still
+network-scoped, not a proof that every model record in a multi-network
+revision is accounted for. The next backend step must bind the verifier to
+the **actual pinned archived Commit and revision model records**, qualify
+all changed networks and non-network records, and atomically persist the
+result/cursor under lease, generation and HEAD fences. The history dock
+remains read-only.
+
 ### HDB-03 — Durable Undo/Redo operation and concurrency
 
 Generate new canonical inverse or forward events with fresh operation IDs,

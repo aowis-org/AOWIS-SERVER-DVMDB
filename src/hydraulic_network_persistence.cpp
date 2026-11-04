@@ -1555,6 +1555,144 @@ std::optional<NetworkHydraulic> previewReverseHydraulicActions(
     return candidate;
 }
 
+namespace {
+// A cross-collection UUID collision must be rejected before appending any
+// historical creation; UUID identity is global within a hydraulic network.
+bool historicalMemberExists(const NetworkHydraulic& network, const QUuid& uuid) {
+#define CHECK_HISTORY_UUID(name, type, kind) \
+    for (const type& item : network.name) \
+        if (item.uuid == uuid) return true;
+    AOWIS_DVMDB_HYDRAULIC_COLLECTIONS(CHECK_HISTORY_UUID)
+#undef CHECK_HISTORY_UUID
+    return false;
+}
+} // namespace
+
+// HIST-03c2b: the immutable parent supplies the exact ordering provenance.
+// Native draft membership appends each creation and preserves order when
+// deleting; forward replay derives every intermediate ordered collection.
+// Equality with the immutable child proves archive coverage for this network
+// without inventing insertion indices in the MODEL wire format.
+std::optional<NetworkHydraulic> previewVerifiedHydraulicActionBoundary(
+        const NetworkHydraulic& parent, const NetworkHydraulic& committed,
+        const std::vector<Bytes>& oldestFirstFrames, std::size_t boundary,
+        QString* error) {
+    if (error) error->clear();
+    const std::function<std::optional<NetworkHydraulic>(const QString&)> fail =
+        [error](const QString& reason) -> std::optional<NetworkHydraulic> {
+            if (error) *error = reason;
+            return std::nullopt;
+        };
+    // Limits match the present persisted working-copy MODEL journal. The
+    // caller must retrieve the complete immutable archive, not just a page.
+    constexpr std::size_t maximumActions = 4096;
+    constexpr std::size_t maximumBytes = 8 * 1024 * 1024;
+    if (oldestFirstFrames.size() > maximumActions || boundary > oldestFirstFrames.size())
+        return fail(QStringLiteral("Historical boundary or action count is out of range"));
+    const QByteArray parentImage = ModelCodec<NetworkHydraulic>::encode(parent);
+    const QByteArray committedImage = ModelCodec<NetworkHydraulic>::encode(committed);
+    if (parent.uuid.isNull() || parent.uuid != committed.uuid ||
+        parentImage.isEmpty() || committedImage.isEmpty())
+        return fail(QStringLiteral("Invalid or mismatched historical network checkpoints"));
+    const aowis::dvmdb::HydraulicDependencyValidation sourceValidation =
+        aowis::dvmdb::validateHydraulicNetworkWithDependencies(parent);
+    const aowis::dvmdb::HydraulicDependencyValidation endValidation =
+        aowis::dvmdb::validateHydraulicNetworkWithDependencies(committed);
+    if (!sourceValidation.report.valid() || !endValidation.report.valid())
+        return fail(QStringLiteral("Historical checkpoint has invalid model references or values"));
+
+    NetworkHydraulic state = parent;
+    NetworkHydraulic selected = parent;
+    QSet<QUuid> seenTransactions;
+    std::size_t totalBytes = 0;
+    for (std::size_t index = 0; index < oldestFirstFrames.size(); ++index) {
+        const Bytes& frame = oldestFirstFrames[index];
+        if (frame.empty() || frame.size() > maximumBytes - totalBytes)
+            return fail(QStringLiteral("Historical archive exceeds the supported byte budget"));
+        totalBytes += frame.size();
+        QString decodeError;
+        const std::optional<aowis::model::ModelEditTransaction> event =
+            aowis::model::ModelEditTransactionCodec::decode(
+                qByteArrayFromBytes(frame), &decodeError);
+        if (!event)
+            return fail(QStringLiteral("Invalid archived MODEL action: ") + decodeError);
+        if (seenTransactions.contains(event->transactionId))
+            return fail(QStringLiteral("Duplicate archived history action identity"));
+        seenTransactions.insert(event->transactionId);
+        QSet<QUuid> seenEntities;
+        NetworkHydraulic next = state;
+        for (const aowis::model::ModelEntityEdit& edit : event->edits) {
+            if (edit.entityId.isNull() || seenEntities.contains(edit.entityId))
+                return fail(QStringLiteral("Duplicate or null entity UUID in history action"));
+            seenEntities.insert(edit.entityId);
+            if (edit.entityType == QString::fromLatin1(aowis::model::hydraulicRootEditType)) {
+                if (edit.entityId != next.uuid || !edit.before || !edit.after ||
+                    aowis::model::hydraulicRootImage(next) != *edit.before)
+                    return fail(QStringLiteral("Historical root before-image mismatch"));
+                QString rootError;
+                const std::optional<NetworkHydraulic> metadata =
+                    aowis::model::decodeHydraulicRootImage(*edit.after, &rootError);
+                if (!metadata || !aowis::model::applyHydraulicRootMetadata(next, *metadata))
+                    return fail(QStringLiteral("Invalid historical root after-image: ") + rootError);
+                continue;
+            }
+            if (edit.entityId == next.uuid || (!edit.before && !edit.after))
+                return fail(QStringLiteral("Invalid historical typed edit identity or images"));
+            bool knownType = false;
+            QString failure;
+#define REPLAY_VERIFIED_HISTORY(name, type, kind) \
+            if (!knownType && edit.entityType == QStringLiteral(#type)) { \
+                knownType = true; \
+                QList<type>& collection = next.name; \
+                qsizetype found = -1; \
+                for (qsizetype position = 0; position < collection.size(); ++position) { \
+                    if (collection.at(position).uuid == edit.entityId) { \
+                        found = position; \
+                        break; \
+                    } \
+                } \
+                if (edit.before) { \
+                    if (found < 0 || ModelCodec<type>::encode(collection.at(found)) != *edit.before) \
+                        failure = QStringLiteral("Historical typed before-image mismatch"); \
+                } else if (found >= 0 || historicalMemberExists(next, edit.entityId)) { \
+                    failure = QStringLiteral("Historical creation collides with existing UUID"); \
+                } \
+                if (failure.isEmpty()) { \
+                    if (edit.after) { \
+                        QString imageError; \
+                        const std::optional<type> value = \
+                            ModelCodec<type>::decode(*edit.after, &imageError); \
+                        if (!value || value->uuid != edit.entityId || \
+                            ModelCodec<type>::encode(*value) != *edit.after) { \
+                            failure = QStringLiteral("Invalid historical typed after-image: ") + imageError; \
+                        } else if (found >= 0) { \
+                            collection[found] = *value; \
+                        } else { \
+                            collection.append(*value); \
+                        } \
+                    } else { \
+                        collection.removeAt(found); \
+                    } \
+                } \
+            }
+            AOWIS_DVMDB_HYDRAULIC_COLLECTIONS(REPLAY_VERIFIED_HISTORY)
+#undef REPLAY_VERIFIED_HISTORY
+            if (!knownType)
+                return fail(QStringLiteral("Unknown historical hydraulic entity type: ") + edit.entityType);
+            if (!failure.isEmpty()) return fail(failure);
+        }
+        const aowis::dvmdb::HydraulicDependencyValidation validated =
+            aowis::dvmdb::validateHydraulicNetworkWithDependencies(next);
+        if (!validated.report.valid() || ModelCodec<NetworkHydraulic>::encode(next).isEmpty())
+            return fail(QStringLiteral("Historical action produced an invalid hydraulic state"));
+        state = std::move(next);
+        if (index + 1 == boundary) selected = state;
+    }
+    if (ModelCodec<NetworkHydraulic>::encode(state) != committedImage)
+        return fail(QStringLiteral("Historical MODEL archive does not cover the immutable network delta"));
+    return selected;
+}
+
 ModelChange materializeDraftRootEdit(
     const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
     const aowis::model::ModelEntityEdit& edit)

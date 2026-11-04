@@ -85,6 +85,21 @@ std::optional<NetworkHydraulic> previewReverseHydraulicActions(
     const NetworkHydraulic& committed, const std::vector<Bytes>& newestFirstFrames,
     QString* error = nullptr);
 
+// HIST-03c2b: verify a *complete* forward archive for one hydraulic network
+// against immutable before/after snapshots. Archived events are oldest-first,
+// and `boundary` counts accepted logical actions (0 = parent, size = child).
+// Structural edits obey the native draft membership contract: additions append
+// to the owning collection, removals preserve the order of surviving members.
+// Every before image, type and UUID is checked before applying an action;
+// complete canonical equality with `committed` is mandatory, so changes-only
+// Saves or an incompatible ordering scheme fail closed. This verifies one
+// network's content, not every record in a multi-network revision, and does
+// not publish the resulting state or a history cursor.
+std::optional<NetworkHydraulic> previewVerifiedHydraulicActionBoundary(
+    const NetworkHydraulic& parent, const NetworkHydraulic& committed,
+    const std::vector<Bytes>& oldestFirstFrames, std::size_t boundary,
+    QString* error = nullptr);
+
 // Exactly the 18 top-level types persisted by saveHydraulicNetwork().
 // The alternative order follows the manifest's collection order.
 using HydraulicEntity = std::variant<

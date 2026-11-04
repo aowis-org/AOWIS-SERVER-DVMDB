@@ -104,6 +104,37 @@ preserve ordered membership and publish the candidate with the history cursor
 under one fenced, idempotent atomic update. There is no new on-disk format and
 no public Undo/Redo route in this step.
 
+## Verified ordered structural replay (HIST-03c2b)
+
+`hydraulic::previewVerifiedHydraulicActionBoundary(parent, committed,
+oldestFirstFrames, boundary)` is a **read-only** verifier for one hydraulic
+network across a single immutable parent/child snapshot pair. It uses the
+native membership writer's established ordering semantics: adding a member
+**appends** it to its collection, while deleting a member preserves the order
+of the survivors. Replaying the complete original action archive **forward**
+from the immutable parent produces the exact intermediate collection order,
+including mixed network-root/typed edits, additions and deletions. Each
+MODEL before/after image is checked and canonicalized, and each complete
+logical action is validated for referential and value consistency.
+
+Only after **every** frame has been replayed and the final *complete*
+`ModelCodec<NetworkHydraulic>` image matches the immutable child byte for
+byte does the verifier return the requested action boundary. It fails closed
+if a changes-only Save was omitted from the archive, if a historical insertion
+used different ordering semantics, if a frame is corrupt or missing, or if a
+UUID/type/image conflicts. The first 100-frame page of a 126-action archive
+is **not** an acceptable complete history. Caller inputs must still come
+from authenticated, pinned revision snapshots and the retained revision
+archive; this helper does not perform that binding itself.
+
+This validates **one network's canonical model delta**, not the entire native
+revision's record delta: unrelated model records, multiple hydraulic networks,
+merge-origin changes and revisions containing no complete action archive
+remain unqualified. The method neither rewrites a draft nor persists a cursor.
+The older reverse-only preview intentionally continues to reject structural
+changes when no parent snapshot is supplied. No new disk format or REST
+navigation command is introduced in this step.
+
 ## Retention, restart and UI
 
 The durable action archive survives a Commit; the bounded working-copy event
