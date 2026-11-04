@@ -1568,6 +1568,205 @@ bool historicalMemberExists(const NetworkHydraulic& network, const QUuid& uuid) 
 }
 } // namespace
 
+// HIST-03c3b: pair a native-record-exact immutable Commit witness with
+// canonical MODEL replay. Every native changed key must be reachable from an
+// affected root through the native root -> chunk -> member ownership graph.
+// A MODEL action is accepted only if its exact final state agrees with the
+// independently loaded revision snapshot for *each* affected network.
+std::optional<VerifiedHydraulicRevisionCoverage> verifyHydraulicRevisionActionCoverage(
+        ProjectService& service, std::string_view projectId, std::string_view branch,
+        const RevisionId& revision, QString* error) {
+    if (error) error->clear();
+    const std::function<std::optional<VerifiedHydraulicRevisionCoverage>(const QString&)> fail =
+        [error](const QString& reason) -> std::optional<VerifiedHydraulicRevisionCoverage> {
+            if (error) *error = reason;
+            return std::nullopt;
+        };
+    try {
+        const RevisionNativeActionWitness witness =
+            service.verifiedRevisionNativeActionWitness(projectId, branch, revision);
+        // An unborn first Commit cannot be replayed against a non-existent
+        // NetworkHydraulic parent. It remains a valid checkpoint, not a
+        // fabricated sequence of individually reversible actions.
+        if (!witness.parentRevision)
+            return fail(QStringLiteral("Historical revision has no first-parent network snapshot"));
+        if (witness.hydraulicRootKeys.size() > 65536)
+            return fail(QStringLiteral("Historical revision contains too many network roots"));
+        struct NetworkState final {
+            QUuid id;
+            NetworkHydraulic before;
+            NetworkHydraulic after;
+            std::set<Key> rootKeys;
+            std::set<Key> chunkKeys;
+            std::set<Key> memberKeys;
+            std::vector<Bytes> frames;
+            QSet<QUuid> typedEdits;
+            bool rootEdited = false;
+            bool membershipEdited = false;
+        };
+        std::vector<NetworkState> networks;
+        std::map<Key, std::size_t> keyOwners;
+        QHash<QUuid, std::size_t> entityOwners;
+        const std::function<void(const Key&, std::size_t, std::set<Key>&)> own =
+            [&keyOwners](const Key& key, std::size_t owner, std::set<Key>& keys) {
+                const std::pair<std::map<Key, std::size_t>::iterator, bool> inserted =
+                    keyOwners.emplace(key, owner);
+                if (!inserted.second && inserted.first->second != owner)
+                    throw std::runtime_error("historical hydraulic network ownership collision");
+                keys.insert(key);
+            };
+        const std::function<void(const std::optional<RevisionId>&, NetworkState&, std::size_t)> gather =
+            [&service, projectId, &own, &entityOwners](
+                const std::optional<RevisionId>& snapshot, NetworkState& state, std::size_t index) {
+                if (!snapshot) return;
+                const std::function<std::optional<ModelRecord>(const Key&)> read =
+                    [&service, projectId, snapshot](const Key& key) -> std::optional<ModelRecord> {
+                        return service.getModelAtRevision(projectId, *snapshot, key);
+                    };
+                const Key rootKey = keyFromUuid(state.id);
+                const std::optional<ModelRecord> rootRecord = read(rootKey);
+                if (!rootRecord || rootRecord->kind != hydraulicNetworkKind)
+                    throw std::runtime_error("historical network root is missing or malformed");
+                own(rootKey, index, state.rootKeys);
+                for (const Key& chunkKey : rootRecord->references) {
+                    const std::optional<ModelRecord> chunk = read(chunkKey);
+                    if (!chunk || chunk->kind != 101)
+                        throw std::runtime_error("historical network has an invalid membership chunk");
+                    own(chunkKey, index, state.chunkKeys);
+                    for (const Key& memberKey : chunk->references) {
+                        const std::optional<ModelRecord> member = read(memberKey);
+                        if (!member || member->kind == 100 || member->kind == 101)
+                            throw std::runtime_error("historical membership references a non-entity");
+                        own(memberKey, index, state.memberKeys);
+                        const QUuid id = uuidFromKey(memberKey);
+                        const QHash<QUuid, std::size_t>::const_iterator existing =
+                            entityOwners.constFind(id);
+                        if (existing != entityOwners.cend() && *existing != index)
+                            throw std::runtime_error("historical entity belongs to multiple networks");
+                        entityOwners.insert(id, index);
+                    }
+                }
+            };
+        const std::optional<RevisionId> parent = witness.parentRevision;
+        const std::function<std::optional<ModelRecord>(const Key&)> readBefore =
+            [&service, projectId, parent](const Key& key) -> std::optional<ModelRecord> {
+                return service.getModelAtRevision(projectId, *parent, key);
+            };
+        const std::function<std::optional<ModelRecord>(const Key&)> readAfter =
+            [&service, projectId, revision](const Key& key) -> std::optional<ModelRecord> {
+                return service.getModelAtRevision(projectId, revision, key);
+            };
+        for (const Key& rootKey : witness.hydraulicRootKeys) {
+            NetworkState state;
+            state.id = uuidFromKey(rootKey);
+            const std::optional<NetworkHydraulic> before =
+                loadDraftHydraulicNetwork(readBefore, state.id);
+            const std::optional<NetworkHydraulic> after =
+                loadDraftHydraulicNetwork(readAfter, state.id);
+            if (!before || !after)
+                return fail(QStringLiteral("Network creation/removal is checkpoint-only until history support exists"));
+            state.before = *before;
+            state.after = *after;
+            const std::size_t index = networks.size();
+            gather(parent, state, index);
+            gather(std::optional<RevisionId>(revision), state, index);
+            networks.push_back(std::move(state));
+        }
+        QSet<QUuid> seenActions;
+        for (const WorkingCopyEvent& archived : witness.actions) {
+            QString decodeError;
+            const std::optional<aowis::model::ModelEditTransaction> event =
+                aowis::model::ModelEditTransactionCodec::decode(
+                    qByteArrayFromBytes(archived.encoded), &decodeError);
+            if (!event || seenActions.contains(event->transactionId) ||
+                event->transactionId.toString(QUuid::WithoutBraces).toStdString() != archived.id)
+                return fail(QStringLiteral("Historical MODEL archive contains invalid or duplicate action: ") + decodeError);
+            seenActions.insert(event->transactionId);
+            std::map<std::size_t, aowis::model::ModelEditTransaction> partitions;
+            for (const aowis::model::ModelEntityEdit& edit : event->edits) {
+                std::size_t owner = 0;
+                if (edit.entityType == QString::fromLatin1(aowis::model::hydraulicRootEditType)) {
+                    const std::map<Key, std::size_t>::const_iterator found =
+                        keyOwners.find(keyFromUuid(edit.entityId));
+                    if (found == keyOwners.end() || found->second >= networks.size() ||
+                        networks[found->second].id != edit.entityId)
+                        return fail(QStringLiteral("Historical root event has no owning hydraulic network"));
+                    owner = found->second;
+                    networks[owner].rootEdited = true;
+                } else {
+                    const QHash<QUuid, std::size_t>::const_iterator found =
+                        entityOwners.constFind(edit.entityId);
+                    if (found == entityOwners.cend())
+                        return fail(QStringLiteral("Historical MODEL edit refers to an unowned entity"));
+                    owner = *found;
+                    networks[owner].typedEdits.insert(edit.entityId);
+                    if (!edit.before || !edit.after) networks[owner].membershipEdited = true;
+                }
+                std::map<std::size_t, aowis::model::ModelEditTransaction>::iterator partition =
+                    partitions.find(owner);
+                if (partition == partitions.end()) {
+                    aowis::model::ModelEditTransaction filtered = *event;
+                    filtered.edits.clear();
+                    partition = partitions.emplace(owner, std::move(filtered)).first;
+                }
+                partition->second.edits.append(edit);
+            }
+            if (partitions.empty())
+                return fail(QStringLiteral("Historical MODEL action has no owned entity edits"));
+            for (const std::pair<const std::size_t, aowis::model::ModelEditTransaction>& partition : partitions) {
+                const QByteArray bytes = aowis::model::ModelEditTransactionCodec::encode(partition.second);
+                if (bytes.isEmpty())
+                    return fail(QStringLiteral("Cannot encode a historical per-network MODEL action"));
+                networks[partition.first].frames.push_back(bytesFromQByteArray(bytes));
+            }
+        }
+        VerifiedHydraulicRevisionCoverage covered;
+        covered.revisionId = witness.revisionId;
+        covered.commitOperationId = witness.commitOperationId;
+        covered.actionCount = witness.actions.size();
+        for (NetworkState& state : networks) {
+            if (state.frames.empty()) {
+                if (ModelCodec<NetworkHydraulic>::encode(state.before) !=
+                    ModelCodec<NetworkHydraulic>::encode(state.after))
+                    return fail(QStringLiteral("An unjournaled hydraulic network changed in the revision"));
+                continue;
+            }
+            QString replayError;
+            if (!previewVerifiedHydraulicActionBoundary(
+                    state.before, state.after, state.frames, state.frames.size(), &replayError))
+                return fail(QStringLiteral("Native revision MODEL replay is incomplete: ") + replayError);
+            covered.changedNetworkIds.push_back(state.id);
+        }
+        // Now account for EVERY native delta key, including deleted records.
+        // Root/chunk changes are admissible only when an action changes the
+        // relevant root metadata or membership; unrelated native changes do
+        // not become navigable just because a sibling entity was journaled.
+        for (const ModelChange& change : witness.actualNativeChanges) {
+            const std::map<Key, std::size_t>::const_iterator owner = keyOwners.find(change.key);
+            if (owner == keyOwners.end())
+                return fail(QStringLiteral("Native revision has an unjournaled/non-hydraulic record delta"));
+            const NetworkState& state = networks[owner->second];
+            if (state.frames.empty())
+                return fail(QStringLiteral("Native revision modified a network without any MODEL actions"));
+            if (state.rootKeys.contains(change.key)) {
+                if (!state.rootEdited && !state.membershipEdited)
+                    return fail(QStringLiteral("Native root change lacks a metadata or membership action"));
+            } else if (state.chunkKeys.contains(change.key)) {
+                if (!state.membershipEdited)
+                    return fail(QStringLiteral("Native chunk change lacks a membership action"));
+            } else if (state.memberKeys.contains(change.key)) {
+                if (!state.typedEdits.contains(uuidFromKey(change.key)))
+                    return fail(QStringLiteral("Native entity delta lacks a matching MODEL edit"));
+            } else {
+                return fail(QStringLiteral("Native revision delta has unknown ownership"));
+            }
+        }
+        return covered;
+    } catch (const std::exception& exception) {
+        return fail(QString::fromUtf8(exception.what()));
+    }
+}
+
 // HIST-03c2b: the immutable parent supplies the exact ordering provenance.
 // Native draft membership appends each creation and preserves order when
 // deleting; forward replay derives every intermediate ordered collection.

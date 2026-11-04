@@ -7,6 +7,7 @@
 // authoritative entity bytes are encoded by the native-owned canonical ModelCodec;
 // ordered network membership is stored as bounded, individually versioned chunks.
 #include "aowis/dvmdb/model_codec_adapter.h"
+#include "aowis/dvmdb/project_service.h"
 
 #include <QList>
 #include <aowis/model/edit/model_edit_transaction.h>
@@ -69,6 +70,23 @@ void materializeDraftMembership(
     const std::vector<DraftMembershipIntent>& intents,
     std::vector<ModelChange>& changes);
 
+
+// HIST-03c3b: prove that a *real indexed local Commit* is completely
+// accounted for by its archived MODEL actions, including native-owned
+// membership chunks/root manifests and edits across multiple networks.
+// The native witness supplies ALL roots in the parent and child snapshots;
+// every changed native record must belong to a network with matching MODEL
+// events. Initial network creation/deletion and foreign model kinds fail
+// closed until explicitly supported. Read-only; no history cursor mutation.
+struct VerifiedHydraulicRevisionCoverage final {
+    std::string revisionId;
+    std::string commitOperationId;
+    std::size_t actionCount = 0;
+    std::vector<QUuid> changedNetworkIds;
+};
+std::optional<VerifiedHydraulicRevisionCoverage> verifyHydraulicRevisionActionCoverage(
+    ProjectService& service, std::string_view projectId, std::string_view branch,
+    const RevisionId& revision, QString* error = nullptr);
 
 // HIST-03c2: read-only MODEL-aware reverse replay for scalar/member updates
 // and network-root metadata. The input frames must be ORIGINAL archived

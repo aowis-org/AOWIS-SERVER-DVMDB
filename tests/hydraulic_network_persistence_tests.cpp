@@ -1,5 +1,6 @@
 #include "commit_metadata_fixture.h"
 #include "aowis/dvmdb/hydraulic_network_persistence.h"
+#include "aowis/dvmdb/project_service.h"
 #include "aowis/dvmdb/revision_record.h"
 #include <aowis/model/edit/hydraulic_root_edit.h>
 
@@ -19,6 +20,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -2215,11 +2217,192 @@ void exerciseVerifiedHydraulicActionBoundary() {
 
 } // namespace
 
+// HIST-03c3b: the indexed native witness alone is not enough. Exercise a
+// real local Commit with a single MODEL action touching two independent
+// hydraulic networks, including a native-owned root/chunk membership update.
+// An unrelated native write must remain ineligible for history navigation.
+void exerciseVerifiedRevisionHydraulicCoverage() {
+    const std::filesystem::path folder = tempDir();
+    try {
+        std::unique_ptr<native::ProjectService> service =
+            std::make_unique<native::ProjectService>(folder);
+        service->configureRepositoryRole(native::RepositoryRole::Private);
+        const std::string projectId = service->createUnbornProject(
+            "HIST-03c3b multi-network action coverage").id;
+        const std::string session = native::UuidV7::generate().toString();
+        NetworkHydraulic a;
+        a.uuid = uuid(930000);
+        a.id = QStringLiteral("Network A");
+        a.nodes_junctions.append(item<HydraulicNodeJunction>(930001));
+        NetworkHydraulic b;
+        b.uuid = uuid(940000);
+        b.id = QStringLiteral("Network B");
+        b.nodes_junctions.append(item<HydraulicNodeJunction>(940001));
+        std::vector<native::ModelChange> initial =
+            hydraulic::fullDraftHydraulicNetworkChanges(a);
+        const std::vector<native::ModelChange> other =
+            hydraulic::fullDraftHydraulicNetworkChanges(b);
+        initial.insert(initial.end(), other.begin(), other.end());
+        const native::RevisionId baseline = service->commitModelAtExpectedHead(
+            projectId, "main", initial, commitMetadata(), std::nullopt);
+
+        const std::string draft = service->createWorkingCopy(
+            projectId, "main", baseline, session).id;
+        const std::string token = service->acquireWorkingCopyLease(draft, session, 120).token;
+        const HydraulicNodeJunction added = item<HydraulicNodeJunction>(930002);
+        HydraulicNodeJunction changedB = b.nodes_junctions.first();
+        changedB.elevation_m = 16;
+        NetworkHydraulic changedRootB = b;
+        changedRootB.title_line_2 = QStringLiteral("Edited in one action with Network A");
+        aowis::model::ModelEditTransaction action;
+        action.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+        action.operation = QStringLiteral("hydraulic.history.multi-network");
+        action.edits.append(aowis::model::ModelEntityEdit{
+            added.uuid, QStringLiteral("HydraulicNodeJunction"), std::nullopt,
+            native::ModelCodec<HydraulicNodeJunction>::encode(added)});
+        action.edits.append(aowis::model::ModelEntityEdit{
+            changedB.uuid, QStringLiteral("HydraulicNodeJunction"),
+            native::ModelCodec<HydraulicNodeJunction>::encode(b.nodes_junctions.first()),
+            native::ModelCodec<HydraulicNodeJunction>::encode(changedB)});
+        action.edits.append(aowis::model::ModelEntityEdit{
+            b.uuid, QString::fromLatin1(aowis::model::hydraulicRootEditType),
+            aowis::model::hydraulicRootImage(b),
+            aowis::model::hydraulicRootImage(changedRootB)});
+        const QByteArray eventBytes = aowis::model::ModelEditTransactionCodec::encode(action);
+        require(!eventBytes.isEmpty(), "HIST-03c3b could not encode multi-network action");
+        std::vector<native::ModelChange> changes{
+            hydraulic::changeFor(added), hydraulic::changeFor(changedB)};
+        const std::function<std::optional<native::ModelRecord>(const native::Key&)> readBase =
+            [&service, &projectId, &baseline](const native::Key& key)
+                    -> std::optional<native::ModelRecord> {
+                return service->getModelAtRevision(projectId, baseline, key);
+            };
+        hydraulic::materializeDraftMembership(readBase,
+            {hydraulic::DraftMembershipIntent{
+                hydraulic::keyFromUuid(a.uuid), hydraulic::keyFromUuid(added.uuid), 1, 9, true}},
+            changes);
+        changes.push_back(hydraulic::materializeDraftRootEdit(readBase,
+            action.edits.last()));
+        require(service->saveWorkingCopyTransactions(draft, session, token, 0,
+                    changes, {hydraulic::bytesFromQByteArray(eventBytes)}).generation == 1,
+                "HIST-03c3b could not Save a mixed two-network action");
+        const native::LocalCommitInfo committed = service->commitWorkingCopy(
+            native::UuidV7::generate().toString(), draft, session, token, 1,
+            baseline, commitMetadata());
+        require(committed.state == native::LocalCommitState::Succeeded,
+                "HIST-03c3b local Commit did not succeed");
+        const native::RevisionId revision =
+            *native::RevisionId::parse(committed.reservedRevisionId);
+        QString error;
+        const std::optional<hydraulic::VerifiedHydraulicRevisionCoverage> verified =
+            hydraulic::verifyHydraulicRevisionActionCoverage(
+                *service, projectId, "main", revision, &error);
+        require(verified && error.isEmpty() && verified->actionCount == 1 &&
+                verified->changedNetworkIds.size() == 2 &&
+                verified->changedNetworkIds[0] == a.uuid &&
+                verified->changedNetworkIds[1] == b.uuid,
+                "HIST-03c3b failed to attribute complete two-network native delta");
+        const native::RevisionNativeActionWitness witness =
+            service->verifiedRevisionNativeActionWitness(projectId, "main", revision);
+        require(witness.hydraulicRootKeys.size() == 2 &&
+                witness.actualNativeChanges.size() >= 4,
+                "HIST-03c3b native witness omitted server-owned root/chunk changes");
+
+        const std::string unrelatedDraft = service->createWorkingCopy(
+            projectId, "main", revision, session).id;
+        const std::string unrelatedToken = service->acquireWorkingCopyLease(
+            unrelatedDraft, session, 120).token;
+        HydraulicNodeJunction nextA = a.nodes_junctions.first();
+        nextA.elevation_m = 41;
+        aowis::model::ModelEditTransaction nextAction;
+        nextAction.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+        nextAction.operation = QStringLiteral("hydraulic.history.unjournaled-native");
+        nextAction.edits.append(aowis::model::ModelEntityEdit{
+            nextA.uuid, QStringLiteral("HydraulicNodeJunction"),
+            native::ModelCodec<HydraulicNodeJunction>::encode(a.nodes_junctions.first()),
+            native::ModelCodec<HydraulicNodeJunction>::encode(nextA)});
+        const QByteArray nextFrame = aowis::model::ModelEditTransactionCodec::encode(nextAction);
+        require(!nextFrame.isEmpty(), "HIST-03c3b unjournaled fixture action failed to encode");
+        native::ModelRecord foreign;
+        foreign.kind = 55;
+        foreign.payload = {42};
+        const native::ModelChange foreignChange{hydraulic::keyFromUuid(uuid(950000)), foreign};
+        require(service->saveWorkingCopyTransactions(
+                    unrelatedDraft, session, unrelatedToken, 0,
+                    {hydraulic::changeFor(nextA), foreignChange},
+                    {hydraulic::bytesFromQByteArray(nextFrame)}).generation == 1,
+                "HIST-03c3b unjournaled native Save failed");
+        const native::LocalCommitInfo unrelatedCommit = service->commitWorkingCopy(
+            native::UuidV7::generate().toString(), unrelatedDraft, session,
+            unrelatedToken, 1, revision, commitMetadata());
+        require(unrelatedCommit.state == native::LocalCommitState::Succeeded,
+                "HIST-03c3b unjournaled native Commit failed");
+        const native::RevisionId later =
+            *native::RevisionId::parse(unrelatedCommit.reservedRevisionId);
+        require(!hydraulic::verifyHydraulicRevisionActionCoverage(
+                    *service, projectId, "main", later, &error) &&
+                error.contains(QStringLiteral("unjournaled")),
+                "HIST-03c3b accepted a native record with no MODEL action");
+        // Also reject a *valid hydraulic* native record omitted from the
+        // archived event when a different network has a genuine event.
+        const std::string missingDraft = service->createWorkingCopy(
+            projectId, "main", later, session).id;
+        const std::string missingToken = service->acquireWorkingCopyLease(
+            missingDraft, session, 120).token;
+        HydraulicNodeJunction newestA = nextA;
+        newestA.elevation_m = 42;
+        HydraulicNodeJunction hiddenB = changedB;
+        hiddenB.elevation_m = 73;
+        aowis::model::ModelEditTransaction onlyA;
+        onlyA.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+        onlyA.operation = QStringLiteral("hydraulic.history.only-one-network");
+        onlyA.edits.append(aowis::model::ModelEntityEdit{
+            newestA.uuid, QStringLiteral("HydraulicNodeJunction"),
+            native::ModelCodec<HydraulicNodeJunction>::encode(nextA),
+            native::ModelCodec<HydraulicNodeJunction>::encode(newestA)});
+        const QByteArray onlyAFrame = aowis::model::ModelEditTransactionCodec::encode(onlyA);
+        require(!onlyAFrame.isEmpty() &&
+                service->saveWorkingCopyTransactions(missingDraft, session, missingToken, 0,
+                    {hydraulic::changeFor(newestA), hydraulic::changeFor(hiddenB)},
+                    {hydraulic::bytesFromQByteArray(onlyAFrame)}).generation == 1,
+                "HIST-03c3b missing hydraulic action fixture Save failed");
+        const native::LocalCommitInfo missingCommit = service->commitWorkingCopy(
+            native::UuidV7::generate().toString(), missingDraft, session,
+            missingToken, 1, later, commitMetadata());
+        require(missingCommit.state == native::LocalCommitState::Succeeded,
+                "HIST-03c3b missing hydraulic action fixture Commit failed");
+        require(!hydraulic::verifyHydraulicRevisionActionCoverage(
+                    *service, projectId, "main",
+                    *native::RevisionId::parse(missingCommit.reservedRevisionId), &error) &&
+                error.contains(QStringLiteral("unjournaled hydraulic network")),
+                "HIST-03c3b accepted a changed hydraulic network with no MODEL event");
+        // ProjectService owns an exclusive root lock. Simulate a real server
+        // restart by destroying the first service before opening the second.
+        service.reset();
+        {
+            native::ProjectService reopened(folder);
+            const std::optional<hydraulic::VerifiedHydraulicRevisionCoverage> recovered =
+                hydraulic::verifyHydraulicRevisionActionCoverage(
+                    reopened, projectId, "main", revision, &error);
+            require(recovered && recovered->actionCount == 1 &&
+                    recovered->changedNetworkIds.size() == 2,
+                    "HIST-03c3b archive/native attribution was lost after restart");
+        }
+    } catch (...) {
+        std::error_code ignored;
+        std::filesystem::remove_all(folder, ignored);
+        throw;
+    }
+    std::error_code ignored;
+    std::filesystem::remove_all(folder, ignored);
+}
+
 int main(int argc, char** argv) {
     QCoreApplication application(argc, argv);
     try {
         exerciseHistoricalScalarActionPreview();
         exerciseVerifiedHydraulicActionBoundary();
+        exerciseVerifiedRevisionHydraulicCoverage();
         exerciseAtomicRootMetadataEdit();
         exerciseInt00IncompleteNetworkRoundTrip();
         exerciseUuidV7Hydraulic();

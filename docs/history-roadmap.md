@@ -173,6 +173,28 @@ server-generated root and chunk records, and explicitly reject unrelated
 native changes. Do not publish an intermediate snapshot or enable Undo/Redo
 based on the native witness alone.
 
+**HIST-03c3b complete hydraulic native-delta attribution (implemented as a
+read-only, fail-closed verifier; Qt acceptance pending):**
+`hydraulic::verifyHydraulicRevisionActionCoverage(service, project, branch,
+revision)` obtains the authenticated HIST-03c3a witness and an authoritative
+bounded scan of the first-parent and committed native root manifests. It
+loads both snapshots for *every* hydraulic network, assigns each MODEL edit
+by its root/member UUID to exactly one network, splits cross-network actions
+only for in-memory replay, and verifies every network's full canonical state
+against the immutable child. Every changed native key must belong to a
+verified root, chunk, or member and be explained by a root, membership, or
+typed MODEL edit. Unrelated native records, changed networks without frames,
+or missing/reordered members fail closed. The original archived frames are
+never rewritten.
+
+**Scope:** immutable first-parent local Commits containing existing hydraulic
+networks. Network creation/removal, non-hydraulic records, merge commits and
+unindexed/checkpoint-only revisions are deliberately ineligible. A complete
+attribution proof establishes eligibility for a future atomic navigation
+executor; it does **not** persist a history cursor or expose Undo/Redo.
+Reading large snapshots is bounded to 65,536 native records per revision;
+larger collections require a separate paginated verification design.
+
 ### HDB-03 — Durable Undo/Redo operation and concurrency
 
 Generate new canonical inverse or forward events with fresh operation IDs,

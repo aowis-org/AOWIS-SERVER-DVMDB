@@ -175,6 +175,11 @@ struct RevisionNativeActionWitness {
     std::optional<RevisionId> parentRevision;
     std::vector<ModelChange> actualNativeChanges;
     std::vector<WorkingCopyEvent> actions;
+    // HIST-03c3b: *all* root manifests in the two immutable snapshots, not
+    // just changed roots. A scalar entity edit need not change the manifest.
+    // This bounded set lets the Qt validator prove ownership of every native
+    // delta key without trusting a caller-provided network list.
+    std::vector<Key> hydraulicRootKeys;
 };
 
 struct BranchActionHistoryPage {

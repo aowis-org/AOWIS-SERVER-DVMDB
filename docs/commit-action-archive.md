@@ -140,3 +140,15 @@ reconstructed for historical revisions whose original journals were discarded.
 
 See [History contract](history-contract.md), [History roadmap](history-roadmap.md)
 and [HTTP workflows](http-workflows.md).
+
+## Hydraulic action coverage (HIST-03c3b)
+
+Archive authenticity and the native revision-delta witness are distinct from
+MODEL action completeness. The read-only hydraulic verifier now collects all
+first-parent and child network roots, validates exact MODEL replay for each
+network, and attributes every native changed key—including server-generated
+root/chunk records—to a corresponding typed, membership or metadata action.
+An unjournaled native record or hydraulic network change prevents action-level
+navigation. This is not yet a durable history cursor or executable Undo/Redo.
+Initial network creation/removal and non-hydraulic changes currently remain
+checkpoint-only rather than being assigned invented intermediate actions.

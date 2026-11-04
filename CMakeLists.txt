@@ -462,8 +462,11 @@ if(AOWIS_DVMDB_WITH_MODEL_CODEC)
         target_compile_features(aowis-dvmdb-hydraulic PUBLIC cxx_std_20)
         target_include_directories(aowis-dvmdb-hydraulic PUBLIC
             "${CMAKE_CURRENT_SOURCE_DIR}/include")
+        # Hydraulic revision-action coverage invokes ProjectService directly.
+        # Export that dependency to every consumer (HTTP, tests, benchmarks),
+        # with the service archive after the hydraulic archive at link time.
         target_link_libraries(aowis-dvmdb-hydraulic PUBLIC
-            aowis-dvmdb-store AOWIS::Model)
+            aowis-dvmdb-project-service aowis-dvmdb-store AOWIS::Model)
         add_executable(aowis-dvmdb-hydraulic-model-benchmark
             benchmarks/v5_model_benchmark.cpp)
         target_link_libraries(aowis-dvmdb-hydraulic-model-benchmark PRIVATE aowis-dvmdb-hydraulic)

@@ -2709,6 +2709,30 @@ RevisionNativeActionWitness ProjectService::verifiedRevisionNativeActionWitness(
     result.actions = commit.actions;
 
     withRepository(projectId, [&](Repository& repository) {
+        // Enumerate committed and parent root manifests, including unchanged
+        // roots whose typed members nevertheless changed. This list is
+        // authoritative for later MODEL-aware attribution; a caller cannot
+        // simply omit an affected hydraulic network.
+        constexpr std::uint16_t hydraulicRootKind = 100;
+        constexpr std::size_t maxHydraulicSnapshotKeys = 65536;
+        std::set<Key> rootKeys;
+        const std::function<void(const RevisionId&)> gatherRoots =
+            [&repository, &project, &rootKeys](const RevisionId& snapshot) {
+                const std::vector<std::pair<Key, Bytes>> records =
+                    translated<std::vector<std::pair<Key, Bytes>>>([&]() {
+                        return repository.scanAtRevision(*project, snapshot);
+                    });
+                check(records.size() <= maxHydraulicSnapshotKeys,
+                      "history snapshot exceeds bounded root scan");
+                for (const std::pair<Key, Bytes>& record : records) {
+                    const ModelRecord decoded = decodeModelRecord(record.second);
+                    if (decoded.kind == hydraulicRootKind)
+                        rootKeys.insert(record.first);
+                }
+            };
+        if (commit.info.expectedHead) gatherRoots(*commit.info.expectedHead);
+        gatherRoots(revision);
+        result.hydraulicRootKeys.assign(rootKeys.begin(), rootKeys.end());
         // Only a complete native delta is evidence: unlike the candidate
         // overlay, a revision's diff excludes no-op records and includes
         // server-generated chunks and network root records.
