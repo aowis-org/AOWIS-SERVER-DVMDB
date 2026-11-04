@@ -46,8 +46,9 @@ verification, checkpoint planning/selection and native atomic selection of a
 verified archived hydraulic action boundary with a V7 draft cursor,
 plus a MODEL-verified active-journal navigator for one existing network.
 An atomic event Save after Undo invalidates the redo tail safely. The HTTP
-server now exposes fenced selection of a verified **active single-network**
-draft action boundary, plus the authoritative cursor read. This is not yet
+server now exposes fenced selection of verified **active single-network**
+draft action boundaries and explicit **archived Commit** action boundaries,
+plus the authoritative cursor read. This is not yet
 continuous cross-Commit Undo/Redo and the GUI dock remains read-only.
 
 **Remaining:** confirm the corrected Qt hydraulic navigation regression;

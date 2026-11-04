@@ -354,6 +354,21 @@ QJsonObject workingCopyJson(const WorkingCopyInfo& draft, bool includeChanges = 
     result.insert(QStringLiteral("draftActionPosition"),
                   QString::number(static_cast<qulonglong>(
                       draft.draftActionPosition.value_or(draft.journalCount))));
+    // Historical Commit positions and live draft-journal positions are
+    // different coordinates. Expose the persisted provenance explicitly so
+    // clients can recover the selected marker after an uncertain response.
+    result.insert(QStringLiteral("archivedRevisionId"),
+                  draft.historyCheckpointRevisionId
+                      ? QJsonValue(QString::fromStdString(*draft.historyCheckpointRevisionId))
+                      : QJsonValue(QJsonValue::Null));
+    result.insert(QStringLiteral("archivedActionPosition"),
+                  draft.historyActionPosition
+                      ? QJsonValue(QString::number(static_cast<qulonglong>(*draft.historyActionPosition)))
+                      : QJsonValue(QJsonValue::Null));
+    result.insert(QStringLiteral("archiveCommitOperationId"),
+                  draft.historyArchiveCommitOperationId
+                      ? QJsonValue(QString::fromStdString(*draft.historyArchiveCommitOperationId))
+                      : QJsonValue(QJsonValue::Null));
     if (includeChanges) {
         result.insert(QStringLiteral("changes"), changes);
         QJsonArray events;
@@ -1522,14 +1537,27 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 {"journalCount", QString::number(static_cast<qulonglong>(draft.journalCount))},
                 {"actionPosition", QString::number(static_cast<qulonglong>(position))},
                 {"hasPreviousDraftAction", position > 0},
-                {"hasNextDraftAction", position < draft.journalCount}}};
+                {"hasNextDraftAction", position < draft.journalCount},
+                {"selectionKind", draft.historyActionPosition
+                    ? QStringLiteral("archived") : draft.historyCheckpointRevisionId
+                        ? QStringLiteral("checkpoint") : QStringLiteral("draft")},
+                {"archivedRevisionId", draft.historyCheckpointRevisionId
+                    ? QJsonValue(QString::fromStdString(*draft.historyCheckpointRevisionId))
+                    : QJsonValue(QJsonValue::Null)},
+                {"archivedActionPosition", draft.historyActionPosition
+                    ? QJsonValue(QString::number(static_cast<qulonglong>(*draft.historyActionPosition)))
+                    : QJsonValue(QJsonValue::Null)},
+                {"archiveCommitOperationId", draft.historyArchiveCommitOperationId
+                    ? QJsonValue(QString::fromStdString(*draft.historyArchiveCommitOperationId))
+                    : QJsonValue(QJsonValue::Null)}}};
         });
     });
-    // Fenced action-boundary selection for ONE existing hydraulic network.
-    // The client supplies only a logical position, never native record bytes.
-    // The MODEL-aware adapter verifies the entire journal, reconstructs the
-    // complete candidate, and delegates atomic cursor+candidate publication.
-    // Explicit coordinates make an uncertain POST retry stable after a move.
+    // Fenced action-boundary selection. With revisionId this selects an
+    // archived local Commit's global MODEL action boundary; without it the
+    // current single-network draft journal is selected. The client never
+    // supplies a native candidate. Cross-mode movement from a live journal
+    // is intentionally refused until a continuous-history handoff exists.
+    // Explicit coordinates permit exact retries after a lost response.
     server.Post(routeWorkingCopyHistoryNavigate,
                 [&service](const httplib::Request& request, httplib::Response& response) {
         guarded(response, [&]() {
@@ -1537,7 +1565,8 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 return *pin;
             const QJsonObject body = parseBody(request, maxJsonSmallBytes);
             requireKeys(body, {"operationId", "sessionId", "fencingToken",
-                               "expectedGeneration", "expectedHead", "actionPosition"});
+                               "expectedGeneration", "expectedHead", "actionPosition",
+                               "revisionId"});
             const std::string operationId = requiredString(body, "operationId");
             requireInput(UuidV7::parse(operationId).has_value(),
                          "history navigation operationId must be UUIDv7");
@@ -1550,16 +1579,29 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                     requiredString(body, "expectedHead")));
             const std::uint64_t position = strictUint64(body, "actionPosition");
             requireInput(position <= 4096, "draft actionPosition exceeds journal limit");
+            const bool archived = body.contains("revisionId");
+            requireInput(!archived || body.value("revisionId").isString(),
+                         "revisionId must be a revision UUIDv7 when provided");
+            requireInput(!archived || expectedHead.has_value(),
+                         "archived action navigation requires a committed expectedHead");
+            const std::optional<RevisionId> revision = archived
+                ? std::optional<RevisionId>(parseRevisionId(requiredString(body, "revisionId")))
+                : std::nullopt;
+            const std::string draftId = pathParam(request, "draft");
+            const std::string sessionId = requiredString(body, "sessionId");
+            const std::string fencingToken = requiredString(body, "fencingToken");
+            const std::uint64_t generation = strictUint64(body, "expectedGeneration");
             QString reason;
-            const std::optional<WorkingCopyInfo> result =
-                hydraulic::navigateVerifiedHydraulicDraftAction(service, operationId,
-                    pathParam(request, "draft"), requiredString(body, "sessionId"),
-                    requiredString(body, "fencingToken"), expectedHead,
-                    static_cast<std::size_t>(position),
-                    strictUint64(body, "expectedGeneration"), &reason);
+            const std::optional<WorkingCopyInfo> result = archived
+                ? hydraulic::navigateVerifiedHydraulicAction(service, operationId,
+                      draftId, sessionId, fencingToken, *expectedHead, *revision,
+                      static_cast<std::size_t>(position), generation, &reason)
+                : hydraulic::navigateVerifiedHydraulicDraftAction(service, operationId,
+                      draftId, sessionId, fencingToken, expectedHead,
+                      static_cast<std::size_t>(position), generation, &reason);
             if (!result)
                 return errorReply(409, QStringLiteral("history_not_navigable"),
-                    QStringLiteral("Draft action navigation is stale, unsupported or failed MODEL verification"));
+                    QStringLiteral("Action navigation is stale, unsupported or failed MODEL verification"));
             return Reply{200, workingCopyJson(*result, false)};
         });
     });

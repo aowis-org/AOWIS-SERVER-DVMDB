@@ -43,15 +43,18 @@ are listed only in the [History roadmap](history-roadmap.md).
 | Plan archived action boundary | `planVerifiedHydraulicActionNavigation` builds an exact, **HEAD-relative replacement** candidate without mutation |
 | Select archived action boundary | `navigateVerifiedHydraulicAction` atomically publishes verified replacement state and V7 cursor metadata under lease, HEAD and generation fences, idempotent by navigation operation UUID |
 | Navigate an existing network's active draft actions | `planVerifiedHydraulicDraftActionNavigation` verifies all retained MODEL frames against the persisted selected network state; `navigateVerifiedHydraulicDraftAction` publishes the rebuilt HEAD-relative candidate and cursor through the fenced/idempotent native writer. **Currently limited to one existing hydraulic network per committed base snapshot** |
-| HTTP active-draft action navigation | `GET /working-copies/{draftId}/history/cursor` reports authoritative journal position; fenced `POST /working-copies/{draftId}/history/navigate` selects an explicit verified active action boundary with an idempotent UUIDv7. No caller-created overlay accepted |
+| HTTP action navigation | `GET /working-copies/{draftId}/history/cursor` distinguishes an active journal cursor from an archived Commit coordinate; fenced `POST /working-copies/{draftId}/history/navigate` selects a verified active boundary, or an indexed archived boundary when `revisionId` is supplied. Both use a UUIDv7 operation identity and server-built overlays |
 | Continuous cross-Commit Undo/Redo and GUI navigation | **Not implemented** |
 
-The **archived** action-selection API is restricted to an indexed, complete, first-parent
-local hydraulic Commit and a draft with **no active MODEL journal**. Network
+The **archived** HTTP/native action selector is restricted to an indexed, complete,
+first-parent local hydraulic Commit and a draft with **no active MODEL journal**.
+It permits explicit movement between individually verified archived boundaries,
+including returning to a clean committed HEAD, but it does not yet perform
+automatic stepwise handoff from active draft actions across a Commit marker. Network
 creation/removal, non-hydraulic data, merge Commits and missing archives are
-not action-level targets today. Returning to the committed HEAD must produce
-an empty native candidate overlay (a clean draft); the regression for this
-behavior needs a confirmed passing Qt run.
+not action-level targets today. Returning to the committed HEAD must produce an empty native candidate
+overlay (a clean draft); the Qt hydraulic regression has passed locally,
+while HTTP archived selection still requires its dedicated regression run.
 
 ## Required future navigation semantics
 

@@ -2961,6 +2961,119 @@ void exerciseHydraulicDraftMembershipHttp() {
           "HDB-03d durable HTTP native overlay does not reconstruct branched hydraulic network");
     check(service.optionalHead(project.id, "main") == base,
           "HDB-03d durable HTTP draft history advanced committed HEAD");
+
+    // HDB-03e: after a real local Commit moves HEAD and clears the active
+    // journal, the SAME HTTP History command can address the archived MODEL
+    // action boundaries explicitly. The immutable HEAD must never move when
+    // selecting a historical state in the private working copy.
+    const std::string draftId = created.json.value("id").toString().toStdString();
+    const std::string sessionId = session.toStdString();
+    const native::WorkingCopyLease renewed =
+        service.acquireWorkingCopyLease(draftId, sessionId, 120);
+    const native::LocalCommitInfo committed = service.commitWorkingCopy(
+        native::UuidV7::generate().toString(), draftId, sessionId, renewed.token,
+        8, base, commitMetadata());
+    const std::optional<native::RevisionId> archivedHead =
+        native::RevisionId::parse(committed.reservedRevisionId);
+    const native::WorkingCopyInfo rebased = service.workingCopy(draftId);
+    check(committed.state == native::LocalCommitState::Succeeded &&
+          archivedHead && rebased.generation == 9 &&
+          rebased.baseRevision == archivedHead && rebased.journalCount == 0 &&
+          !rebased.dirty && service.optionalHead(project.id, "main") == archivedHead,
+          "HDB-03e failed to establish committed action archive and clean draft");
+
+    TestServer archiveServer(service, native::BundleLimits{4ULL * 1024ULL * 1024ULL,
+                                                          10000ULL, 1024ULL * 1024ULL});
+    Client archiveClient(archiveServer.port());
+    const QString archivedRevision = QString::fromStdString(committed.reservedRevisionId);
+    const QString archivedPath = path + "/history/navigate";
+    const QString archivedCursorPath = path + "/history/cursor";
+    const std::function<QJsonObject(const QString&, const QString&, const QString&)> archivedBody =
+        [&](const QString& operation, const QString& generation, const QString& position) {
+            return QJsonObject{{"operationId", operation}, {"sessionId", session},
+                {"fencingToken", QString::fromStdString(renewed.token)},
+                {"expectedGeneration", generation}, {"expectedHead", archivedRevision},
+                {"revisionId", archivedRevision}, {"actionPosition", position}};
+        };
+    const Response beforeArchived = archiveClient.call("GET", archivedCursorPath);
+    check(beforeArchived.status == 200 &&
+          beforeArchived.json.value("generation") == "9" &&
+          beforeArchived.json.value("journalCount") == "0" &&
+          beforeArchived.json.value("selectionKind") == "draft" &&
+          beforeArchived.json.value("archivedRevisionId").isNull(),
+          "HDB-03e freshly committed draft reported a phantom archived selection");
+    QJsonObject malformedArchived = archivedBody(
+        QString::fromStdString(native::UuidV7::generate().toString()), "9", "0");
+    malformedArchived.insert("revisionId", QStringLiteral("invalid-revision"));
+    check(archiveClient.call("POST", archivedPath, malformedArchived).status == 400,
+          "HDB-03e accepted malformed archived revision UUID");
+    const QString zeroOperation =
+        QString::fromStdString(native::UuidV7::generate().toString());
+    const QJsonObject zeroBody = archivedBody(zeroOperation, "9", "0");
+    const Response atArchivedParent = archiveClient.call("POST", archivedPath, zeroBody);
+    const Response parentView = archiveClient.call("GET", path + "/networks/" + networkId);
+    const std::optional<NetworkHydraulic> parentNetwork =
+        native::ModelCodec<NetworkHydraulic>::decode(QByteArray::fromBase64(
+            parentView.json.value("payloadBase64").toString().toLatin1()));
+    const Response parentCursor = archiveClient.call("GET", archivedCursorPath);
+    check(atArchivedParent.status == 200 &&
+          atArchivedParent.json.value("generation") == "10" &&
+          atArchivedParent.json.value("archivedRevisionId") == archivedRevision &&
+          atArchivedParent.json.value("archivedActionPosition") == "0" &&
+          parentView.status == 200 && parentNetwork &&
+          parentNetwork->nodes_junctions.size() == 1 &&
+          parentNetwork->nodes_junctions.first().uuid == oldUuid &&
+          parentCursor.json.value("selectionKind") == "archived" &&
+          parentCursor.json.value("archivedRevisionId") == archivedRevision &&
+          parentCursor.json.value("archivedActionPosition") == "0" &&
+          !parentCursor.json.value("hasPreviousDraftAction").toBool() &&
+          service.optionalHead(project.id, "main") == archivedHead,
+          "HDB-03e archived parent selection did not preserve the immutable HEAD");
+    check(archiveClient.call("POST", archivedPath, zeroBody).status == 200 &&
+          archiveClient.call("GET", archivedCursorPath).json.value("generation") == "10",
+          "HDB-03e archived action retry advanced generation twice");
+    check(archiveClient.call("POST", archivedPath,
+              archivedBody(zeroOperation, "9", "1")).status == 409,
+          "HDB-03e accepted conflicting reuse of navigation UUID");
+    check(archiveClient.call("POST", archivedPath,
+              archivedBody(QString::fromStdString(native::UuidV7::generate().toString()),
+                           "9", "1")).status == 409,
+          "HDB-03e accepted stale archived action generation");
+    const Response atArchivedFirst = archiveClient.call("POST", archivedPath,
+        archivedBody(QString::fromStdString(native::UuidV7::generate().toString()), "10", "1"));
+    const Response firstView = archiveClient.call("GET", path + "/networks/" + networkId);
+    const std::optional<NetworkHydraulic> firstNetwork =
+        native::ModelCodec<NetworkHydraulic>::decode(QByteArray::fromBase64(
+            firstView.json.value("payloadBase64").toString().toLatin1()));
+    check(atArchivedFirst.status == 200 &&
+          atArchivedFirst.json.value("generation") == "11" &&
+          firstView.status == 200 && firstNetwork &&
+          firstNetwork->nodes_junctions.size() == 2 &&
+          firstNetwork->nodes_junctions.first().uuid == oldUuid &&
+          firstNetwork->nodes_junctions.last().uuid == newUuid &&
+          firstNetwork->nodes_junctions.last().elevation_m == 55,
+          "HDB-03e archived intermediate MODEL action was not reconstructed");
+    const Response atArchivedTip = archiveClient.call("POST", archivedPath,
+        archivedBody(QString::fromStdString(native::UuidV7::generate().toString()), "11", "2"));
+    const Response tipView = archiveClient.call("GET", path + "/networks/" + networkId);
+    const std::optional<NetworkHydraulic> tipNetwork =
+        native::ModelCodec<NetworkHydraulic>::decode(QByteArray::fromBase64(
+            tipView.json.value("payloadBase64").toString().toLatin1()));
+    const Response tipCursor = archiveClient.call("GET", archivedCursorPath);
+    check(atArchivedTip.status == 200 &&
+          atArchivedTip.json.value("generation") == "12" &&
+          !atArchivedTip.json.value("dirty").toBool() &&
+          tipView.status == 200 && tipNetwork &&
+          tipNetwork->nodes_junctions.size() == 2 &&
+          tipNetwork->nodes_junctions.last().elevation_m == 66 &&
+          tipCursor.json.value("archivedActionPosition") == "2" &&
+          service.optionalHead(project.id, "main") == archivedHead,
+          "HDB-03e Redo to committed archive tip did not yield clean HEAD");
+    check(archiveClient.call("POST", archivedPath,
+              archivedBody(QString::fromStdString(native::UuidV7::generate().toString()),
+                           "12", "3")).status == 409,
+          "HDB-03e accepted action position beyond immutable archive");
+    archiveServer.stop();
 }
 #endif
 

@@ -154,9 +154,12 @@ remains read-only until continuous navigation is integrated.
   and journal metadata together. Commit still refuses a non-tip cursor.
 - The native adapter is **not** complete user-facing History: multi-network
   or unborn-base draft replay, durable navigation-event provenance,
-  continuous cross-Commit movement, HTTP execution and GUI wiring remain
-  outstanding. The HTTP Save path must still receive an actual end-to-end
-  Undo → new Save regression before this behavior is considered GUI-ready.
+  continuous cross-Commit movement and GUI wiring remain outstanding. The
+  existing HTTP History navigation route now also accepts an explicit archived
+  revision ID to select a verified committed action boundary when no active
+  MODEL journal is present. This is not yet automatic Undo/Redo across a Commit
+  marker. The HTTP Save path needs end-to-end Undo → new Save qualification
+  before the feature is considered GUI-ready.
 
 See [working-copy storage](storage-formats.md#private-drafts-aowis-working-copy-7)
 for the persisted cursor fields and [working copies](working-copies.md) for

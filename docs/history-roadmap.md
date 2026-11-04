@@ -35,25 +35,29 @@ refuses multi-root and unborn-base drafts rather than guessing ownership.
 Navigation preserves the original journal and future Redo actions. The
 server now exposes a draft-scoped HTTP cursor read and fenced, idempotent
 HTTP selection of an explicit verified active-journal position for this
-single-network case. These routes do **not** navigate archived Commit actions
-or activate the GUI History dock. A new
+single-network case. Providing an archived `revisionId` instead selects an
+explicit verified action boundary within an indexed local Commit, when the
+draft has no active MODEL journal. These HTTP operations do **not** yet hand off
+automatically between the live journal and immutable Commit boundaries, or
+activate the GUI History dock. A new
 atomic MODEL event Save from a non-tip position retains the selected prefix
 and replaces the redo tail with the new actions in a crash-safe metadata
 publication. Local Commit still **rejects** positions below the journal tip;
 no unapplied redo frames are silently archived. A limited HTTP command now invokes this adapter; continuous cross-Commit
 navigation remains outstanding.
 
-The archived action operation is **not** a general Undo or Redo command. It accepts only
-fully verified archived hydraulic local Commits and a draft with **no active
-MODEL journal**. It does not preserve redo eligibility across arbitrary user
-edits, generate a continuous action log, or expose an HTTP mutation endpoint.
+The archived selector is **not** a continuous Undo/Redo command. It accepts
+only fully verified archived hydraulic local Commits and a draft with **no
+active MODEL journal**. It exposes an HTTP mutation via the existing fenced
+History navigation route, but cannot yet safely cross from a live journal
+into archival action positions or maintain redo eligibility across arbitrary
+user edits and Commit markers.
 
-**Acceptance evidence:** Native working-copy, local-Commit, project-service and
-offline-backup suites passed in the most recent reported run. The Qt hydraulic
-regression failed at forward navigation in that run; a subsequent overlay
-normalization correction is present in the supplied 2026-11-04 source snapshot,
-but no passing rerun has been reported. Do not mark this gate complete until
-it passes.
+**Acceptance evidence:** The latest user-reported Qt hydraulic network suite
+passed (2026-11-04), and adjacent native suites previously passed. The HTTP
+suite's HDB-03d durability assertion was corrected in the uploaded source,
+but the corrected full HTTP suite and the new archived-HTTP regression still
+require a passing run. Do not declare continuous cross-Commit Undo/Redo ready.
 
 ## 1. Qualify the native action-boundary selector
 
@@ -100,9 +104,11 @@ markers, Undo, Redo, new edit and local Commit; survives GUI/service restart.
 
 ## 3. Expose safe navigation over HTTP
 
-- **Available for the active single-network journal:** read the persisted
-  cursor and select a verified boundary over HTTP using draft/session/lease,
-  expected generation and branch HEAD, repository pin and UUIDv7 operation ID.
+- **Available for the active single-network journal and eligible archived
+  Commits:** read the persisted cursor and select an explicit verified boundary
+  over HTTP using draft/session/lease, expected generation and branch HEAD,
+  repository pin and UUIDv7 operation ID. An archived selection uses a
+  `revisionId` and stores its action position separately from the draft journal.
 - Extend those safe HTTP controls to **continuous cross-Commit navigation**
   and the normal unborn first draft; never accept unchecked native overlays.
 - Ensure identical retry after a lost reply returns the persisted outcome;
