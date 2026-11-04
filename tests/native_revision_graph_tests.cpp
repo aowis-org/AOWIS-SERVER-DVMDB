@@ -367,6 +367,25 @@ void runService() {
     service.deleteBranch(project.id, unborn.toString(), std::nullopt);
     check(!service.branchById(project.id, unborn.toString()).has_value(),
           "service deletion did not remove unborn HEAD");
+    // Deleting one branch must never discard another branch's saved edits.
+    const BranchId retained = service.createUnbornBranch(project.id, "retained-draft");
+    const WorkingCopyInfo retainedDraft = service.createWorkingCopyForBranch(
+        project.id, retained.toString(), std::nullopt, UuidV7::generate().toString());
+    const BranchId removed = service.createUnbornBranch(project.id, "removed-draft");
+    const WorkingCopyInfo removedDraft = service.createWorkingCopyForBranch(
+        project.id, removed.toString(), std::nullopt, UuidV7::generate().toString());
+    bool staleRejected = false;
+    try { service.deleteBranch(project.id, removed.toString(), RevisionId::generate(), true); }
+    catch (const ProjectError& error) { staleRejected = error.kind() == ProjectErrorKind::Conflict; }
+    check(staleRejected && service.workingCopy(removedDraft.id).id == removedDraft.id,
+          "stale confirmed deletion discarded an unrelated draft");
+    service.deleteBranch(project.id, removed.toString(), std::nullopt, true);
+    check(service.workingCopy(retainedDraft.id).id == retainedDraft.id,
+          "deleting a branch discarded the surviving branch's working copy");
+    check(service.listWorkingCopies().size() == 1,
+          "branch deletion did not clean up exactly the selected draft");
+    check(service.branchById(project.id, retained.toString()).has_value(),
+          "branch deletion removed another branch's HEAD");
 }
 }
 
