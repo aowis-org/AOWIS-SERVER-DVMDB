@@ -53,12 +53,16 @@ General replacement/selected-entity import is not implemented. Branch
 checkout and immutable revision bundles exist; whole-project Fetch and
 Publish are not yet operational GUI flows.
 
-`GET /revision-graph` and immutable revision records provide **committed
-history**. DVMDB's bounded draft journal provides **accepted Save events**.
-Neither currently supplies a persisted cross-Commit action-history cursor,
-operational Undo/Redo or the future left History dock. The current History
-toolbar action navigates to the Projects revision tree. The planned
-cross-Commit feature is in [History roadmap](history-roadmap.md).
+`GET /revision-graph` exposes the immutable revision DAG. DVMDB's
+`action-history` and revision events routes expose **archived original MODEL
+actions across local Commit markers**, alongside the bounded live-draft
+journal; readers can page both without changing HEAD or draft state.
+Native code has a persisted V6 cursor for **restricted, verified archived
+action-boundary selection**. There is **no HTTP action-navigation endpoint**,
+continuous active-draft Undo/Redo or completed GUI controller. The existing
+GUI left History dock is therefore **read-only**, with Undo/Redo disabled.
+See [current History](commit-action-archive.md) and
+[remaining History work](history-roadmap.md).
 
 ## Validation and tests
 

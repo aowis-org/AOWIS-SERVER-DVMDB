@@ -12,9 +12,9 @@ implemented; planned work is in the [roadmap](roadmap.md). Byte layouts are in
 | Layer | Code | Responsibility |
 |---|---|---|
 | Model definitions and codec | `external/AOWIS-SERVER-MODEL` (`AOWIS::Model`) | Typed models, canonical `ModelCodec<T>`, validation, value rules, field merge, MODEL edit transactions |
-| Hydraulic persistence | `aowis::dvmdb::hydraulic` (`AOWIS::DvmdbHydraulic`) | Networks as one root record + 256-member membership chunks + one record per entity; indexed edits; hydraulic-aware merges; draft membership materialization |
+| Hydraulic persistence | `aowis::dvmdb::hydraulic` (`AOWIS::DvmdbHydraulic`) | Networks as root + 256-member membership chunks + typed entities; indexed edits, hydraulic merges, draft membership and MODEL-aware archived-action replay/coverage verification |
 | Native store | `aowis::dvmdb::Repository` (`aowis-dvmdb-store`) | Object pack, Merkle tries, reverse-reference index, revisions, branches, merges, diffs, bundles, verification, compaction |
-| Project service | `aowis::dvmdb::ProjectService` (`AOWIS::DvmdbProjectService`, Qt-free) | Catalogue of projects, repository identity, role and tracking, private drafts, local Commit ledger |
+| Project service | `aowis::dvmdb::ProjectService` (`AOWIS::DvmdbProjectService`, Qt-free) | Catalogue of projects, repository identity, role and tracking, private drafts, durable local Commit/action archive, revision witness and fenced atomic checkpoint/action selection |
 | HTTP service | `aowis-server-dvmdb` (cpp-httplib, `src/dvmdb_http_routes.cpp`) | JSON/binary REST adapter over the project service; no persistence of its own |
 | Tools | `aowis-dvmdb-verify`, `-compact`, `-sync`, `-access`, `tools/offline_backup.py` | Offline verification, compaction, bundle transfer, backup/restore |
 

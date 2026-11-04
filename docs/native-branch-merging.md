@@ -38,7 +38,7 @@ Dangling or wrong-type hydraulic model references remain subject to the
 current strict rules pending a separate policy decision. Overlapping *edit
 collisions* require explicit user choices; no last-writer-wins fallback or
 silent force-overwrite is permissible. Non-blocking hydraulic feasibility
-in the merge path remains a qualification gap for INT-10.
+in the merge path remains part of release qualification.
 
 An editor with a private working copy may reconcile it against the newly
 committed target HEAD; this does not by itself publish a new revision. The

@@ -59,7 +59,7 @@ The current hydraulic-layer checks still enforce model endpoint types and
 membership; solver feasibility, supply availability and connectedness are
 not required before Commit. Missing/wrong-type model references remain
 rejected under the current reference policy, independently of solver validity.
-The merge workflow must preserve the same separation (INT-10).
+The merge workflow must preserve that same separation.
 
 ## Format changes
 

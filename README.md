@@ -47,12 +47,16 @@ separate server executable is required for Standalone.
   transfer staging budgets and explicit 409/413/503 semantics.
 
 DVMDB is **pre-release**. There is no TLS, authentication or authorization;
-keep the server on localhost or a trusted network. HTTP local Commit and saved-draft network summaries/import are implemented.
-Hydraulic solver feasibility is not a Commit precondition. External
-GUI/Standalone process-restart acceptance, whole-project Fetch/Publish,
-permanent cross-Commit action history and full Undo/Redo remain open; see
-the [integration roadmap](docs/roadmap.md) and
-[History roadmap](docs/history-roadmap.md).
+keep the server on localhost or a trusted network. HTTP local Commit, saved-draft network summaries/import, permanent local-Commit
+MODEL action archives and read-only first-parent History routes are implemented.
+Native C++ can verify and atomically select certain archived hydraulic action
+boundaries with a durable V6 draft cursor. **Continuous Undo/Redo, active-draft
+action navigation, HTTP mutation routes and GUI activation remain unfinished.**
+Hydraulic solver feasibility is not a Save/Commit precondition. Real external
+GUI and embedded Standalone process-restart acceptance, whole-project
+Clone/Fetch and recoverable Publish also remain open. See the
+[integration roadmap](docs/roadmap.md), [current action history](docs/commit-action-archive.md)
+and [remaining History work](docs/history-roadmap.md).
 
 ## Quick start
 

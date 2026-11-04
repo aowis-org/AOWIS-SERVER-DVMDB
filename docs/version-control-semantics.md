@@ -60,10 +60,14 @@ and **active event journal are cleared** on successful rebase. Status is
 available at `GET /local-commits/{operationId}` for uncertain replies.
 A local Commit **does not Publish** the result to a shared repository.
 
-These event bytes and frozen revisions are useful ingredients for a future
-History subsystem but **there is currently no permanent per-action history
-across Commit and no operational Undo/Redo**. See
-[history-roadmap.md](history-roadmap.md).
+Each successful local Commit retains its accepted MODEL event frames in a
+**permanent revision-indexed action archive**, even though the draft's active
+journal is cleared. Read-only branch timelines and original action pages are
+available over HTTP. Native C++ can verify and atomically select a fully
+qualified archived hydraulic action boundary in a private draft, with a V6
+cursor; **continuous Undo/Redo for current draft actions and HTTP/GUI execution
+are not implemented**. See [current History](commit-action-archive.md) and
+[remaining work](history-roadmap.md).
 
 ## Replication and branch relationships
 

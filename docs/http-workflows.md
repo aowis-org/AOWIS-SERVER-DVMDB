@@ -82,11 +82,15 @@ branch's committed HEAD. Network summaries are read-only and do not save.
 ## Revision history versus edit-action history
 
 `GET /projects/{id}/revision-graph` exposes the immutable committed DAG;
-`GET /working-copies/{id}` exposes a bounded draft event journal. These
-are **not** a permanent action-history API: Commit clears the active draft
-journal and no persisted cross-Commit Undo/Redo cursor exists. The requested
-History dock and continuous action timeline are future work in the
-[History roadmap](history-roadmap.md).
+`GET /working-copies/{id}` exposes a bounded draft event journal. In addition,
+the **permanent local-Commit MODEL action archive** is available through the
+read-only `/action-history` and `/action-history/{revisionId}/events` routes
+below, including real actions across Commit markers. Native code can persist
+a verified historical action cursor in a private V6 draft, but no HTTP Undo,
+Redo or jump mutation endpoint exists yet. The GUI History dock remains
+read-only until continuous active-draft navigation, HTTP execution and
+recovery semantics are implemented. See [History](commit-action-archive.md)
+and [remaining work](history-roadmap.md).
 
 ## Local Commit and message annotations
 
@@ -154,6 +158,7 @@ have null metadata rather than fabricated operation names. Revisions not on
 the selected branch's first-parent ancestry are rejected. Both endpoints are **read-only** and do not move HEAD or
 provide Undo/Redo.
 
-The response is read-only: there is **no** state navigation, Undo or Redo
-endpoint yet. See [committed action archive](commit-action-archive.md) for
+Both responses are read-only: there is **no HTTP** state navigation,
+Undo or Redo endpoint yet. Restricted native C++ checkpoint and action-boundary
+selection exists and is not an HTTP contract. See [committed action archive](commit-action-archive.md) for
 current limits and the [History roadmap](history-roadmap.md) for future work.

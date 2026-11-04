@@ -1,168 +1,89 @@
-# Persistent cross-Commit History contract (planned behavior)
+# History contract — current capabilities and intended Undo/Redo behavior
 
-This document defines **future** Undo/Redo semantics, not functionality
-currently exposed by the DVMDB API. The implemented backend currently offers
-read-only Commit checkpoints, retained action UUIDs and draft journal pages.
+History has two distinct layers. **Revision history** is an immutable DAG
+of model snapshots with branch refs. **Edit history** is an ordered record of
+MODEL actions performed in a private draft and archived by a successful
+local Commit. Commit markers connect the two layers; they are **not Undo
+barriers** or extra synthetic edit steps.
 
-## Identity and scope
+For the actual API and supported targets, see
+[committed action archives](commit-action-archive.md). The missing features
+are listed only in the [History roadmap](history-roadmap.md).
 
-A History timeline belongs to a selected private working copy and follows
-its selected branch's first-parent revision ancestry. Immutable MODEL action
-UUIDv7 identities and their before/after bytes are retained verbatim;
-independent Undo/Redo operations have fresh operation UUIDv7 identities and
-refer to their original action. New actions after Undo invalidate ordinary
-Redo eligibility without deleting the immutable action audit trail.
+## Identity and timeline
 
-Merge commits are first-parent checkpoints by default. Other parents remain
-visible through the revision graph, not fabricated into a single linear
-sequence. Commits imported or created without action frames appear as
-checkpoint-only states; the server cannot invent missing intermediate steps.
+- A selected private working copy has a repository UUIDv7, project UUIDv7,
+  branch UUIDv7, draft UUIDv7, pinned committed HEAD/null and monotonically
+  increasing draft generation. Each accepted MODEL transaction has its own
+  UUIDv7 and original canonical before/after images.
+- The branch's timeline uses **first-parent** committed ancestry. An action
+  archive is linked to its immutable revision and original local-Commit
+  operation UUIDv7. Merge second parents remain part of the revision DAG,
+  not invented linear edit steps.
+- A revision without retained original actions is a **checkpoint-only** entry.
+  Incomplete, mismatched or corrupt archives cannot be treated as verified
+  intermediate steps. Imported and earlier revisions are not retroactively
+  assigned fictitious transactions.
+- Selecting a past action boundary changes only **private draft content**.
+  It does not rewrite a revision, its SHA-256, ordered parents or the committed
+  branch HEAD. Committing subsequently creates a new revision after the
+  branch's **current committed** HEAD. Creating a branch from an older
+  revision is a separate ancestry operation.
 
-## Navigation
+## What native DVMDB supports now
 
-Undo moves to the previous meaningful model state; Redo moves forward. Commit
-markers are visible states, **not Undo barriers or separate Undo steps**.
-Clicking a Commit marker requests its exact immutable snapshot as the desired
-*private working-copy content*. It never moves an immutable branch HEAD,
-changes committed revision ancestry, or rewrites earlier revisions. A new
-Commit after moving backward is a successor of the branch's *current* HEAD;
-creating a branch whose ancestry originates at an older revision is a separate
-operation.
+| Operation | Behavior and boundary |
+|---|---|
+| Read checkpoints/actions | Native `branchActionHistory`, `revisionActionPage`, HTTP first-parent history and paged original frames |
+| Preview exact committed checkpoint | `planHistoryCheckpoint` computes a full overlay against the current committed HEAD; read-only |
+| Select committed checkpoint | `navigateHistoryCheckpoint` atomically replaces the private candidate and stores an exact checkpoint marker; refuses an active MODEL journal |
+| Preview action frames | `readHistoryReverseActionWindow` returns original frames newest-first, not executable inverse records |
+| Verify one hydraulic action sequence | `previewVerifiedHydraulicActionBoundary` replays ordered insert/delete/update/root operations and checks byte-equal committed network |
+| Verify an entire revision | `verifiedRevisionNativeActionWitness` plus `verifyHydraulicRevisionActionCoverage` account for every changed native record across affected networks |
+| Plan archived action boundary | `planVerifiedHydraulicActionNavigation` builds an exact, **HEAD-relative replacement** candidate without mutation |
+| Select archived action boundary | `navigateVerifiedHydraulicAction` atomically publishes verified replacement state and V6 cursor metadata under lease, HEAD and generation fences, idempotent by navigation operation UUID |
+| Navigate live draft events / HTTP Undo / GUI buttons | **Not implemented** |
 
-Each navigation must be an atomic, fenced, idempotent MODEL mutation tied to
-the expected repository, draft, generation and branch HEAD. The cursor and
-corresponding model change must be durably reconciled together. A dropped
-response does not permit a second, differently identified Undo/Redo. If
-navigation encounters stale images, a conflicting writer or a missing
-referenced entity, it fails without partial application. Hydraulic solver
-feasibility itself is never an Undo/Redo precondition.
+The action-selection API is restricted to an indexed, complete, first-parent
+local hydraulic Commit and a draft with **no active MODEL journal**. Network
+creation/removal, non-hydraulic data, merge Commits and missing archives are
+not action-level targets today. Returning to the committed HEAD must produce
+an empty native candidate overlay (a clean draft); the regression for this
+behavior needs a confirmed passing Qt run.
 
-## Checkpoint state reconstruction (native read-only foundation)
+## Required future navigation semantics
 
-`ProjectService::planHistoryCheckpoint(draftId, revision, expectedGeneration)`
-returns the exact candidate overlay needed to represent an immutable
-first-parent checkpoint *relative to the draft's currently committed HEAD*.
-It rejects stale HEADs and draft generations, and cannot be used as an
-unfenced edit. Its output is a **full replacement overlay**, not an
-incremental patch suitable for `saveWorkingCopyChanges()`. This **planning** API does not
-perform Undo/Redo, write cursor state, or synthesize missing intermediate
-actions. Pre-first-Commit unborn states and individual action targets are
-separate future reconstruction paths. The eventual navigation mutation must
-recompute or validate the plan and atomically persist both candidate and
-logical cursor under the same writer/HEAD checks.
+Undo steps back to the previous meaningful model state and Redo forward to
+an eligible next state, even across a visible Commit marker. Jumps select a
+verified boundary. A new ordinary edit after Undo makes later Redo
+**ineligible**, without deleting prior immutable Commits or their audit
+frames. Active draft Save, navigation and local Commit must form one
+coherent, durable action timeline.
 
-## Native exact-checkpoint selection (HIST-03b)
+Navigation is a server-owned transaction, **not** a pair of separate
+"write model" and "move cursor" requests. Each mutation requires a live
+private-draft lease/session, expected generation, expected committed HEAD,
+repository identity and a fresh operation UUIDv7. The model candidate,
+logical cursor and provenance must be durably published together. Retry
+ambiguous responses using the **same** operation ID and parameters; query
+persisted status rather than issuing a different Undo. Lost responses,
+conflicting writers and stale images fail closed.
 
-`ProjectService::navigateHistoryCheckpoint()` applies the HIST-03a
-replacement overlay in one atomic private-draft metadata publication, with
-an exact checkpoint marker, operation UUIDv7, and original generation. It
-pins the current lease and branch HEAD and is idempotent for identical
-retries across a restart. It never edits any immutable revision. This initial
-native facility accepts only a draft with no MODEL action journal, because
-no permanent record for the navigation event has yet been defined. A later
-normal Save or Commit clears the checkpoint marker. This is **not** a full
-history cursor with redo eligibility or cross-Commit step navigation; it is
-not yet exposed as an HTTP command or connected to the GUI History dock.
+All 18 hydraulic collections, root metadata and native membership order
+must round-trip byte-identically on Undo → Redo. Canonical model and UUID
+reference integrity remains mandatory. **Hydraulic solver feasibility is
+not** an Undo/Redo, Save or Commit gate.
 
-## Archived action-boundary planning (HIST-03c1)
+## Retention and user interface
 
-`ProjectService::readHistoryReverseActionWindow()` provides a read-only,
-generation- and first-parent-HEAD-pinned window of original MODEL frames,
-ordered from most recent to oldest. Action positions are **boundaries**
-within one immutable Commit; position zero is before that Commit's first
-retained action, and position `actionCount` is its last retained action.
-Commit markers are not separate Undo steps. A revision with no retained
-actions has only its checkpoint marker. The window is limited to 100 frames
-and includes the exact original operation/transaction IDs for provenance.
+Original accepted MODEL frames are retained in a permanent local-Commit
+archive; the bounded active-draft journal is cleared after that Commit.
+The GUI History dock may show committed action metadata, draft actions and
+checkpoints already, but it must not advertise operational Undo/Redo until
+the continuous cursor, HTTP commands, redo rules and recovery tests exist.
+Imported, old and merge checkpoints must be labelled honestly rather than
+shown as sequences of invented edits.
 
-This window is **not** an Undo execution plan. It does not yet prove that
-retained events completely describe a Commit's model delta, nor does it
-convert event images into native model/membership records. The executor must
-verify every before/after image against reconstructed state and reject any
-gap before atomically publishing both the replacement model and cursor. No
-history cursor or extra draft bytes are written by this API.
-
-## MODEL-aware reverse image verification (HIST-03c2a)
-
-The Qt hydraulic adapter now provides
-`hydraulic::previewReverseHydraulicActions(committed, newestFirstFrames)`.
-It takes an exact, already-hydrated terminal `NetworkHydraulic` and a bounded
-page of original MODEL frames, verifies their canonical after-images against
-the successive reconstructed states, and applies canonical prior images for
-all 18 typed collections and root metadata. It returns a new model without
-mutating DVMDB or the supplied network. Wrong image/type/UUID, corrupt frames
-and invalid resulting model dependencies are rejected atomically.
-
-**Important:** this is *only a validated read-only preview*. It deliberately
-rejects creation/deletion: the current MODEL action envelope does not record
-ordered collection insertion/removal positions, so a restored member could
-otherwise have the wrong canonical collection order. Furthermore, an older
-Commit may contain changes-only Saves not represented in its archived actions.
-Before any preview can be published as a working-copy candidate, the backend
-must prove full archive coverage against the immutable parent/child snapshots,
-preserve ordered membership and publish the candidate with the history cursor
-under one fenced, idempotent atomic update. There is no new on-disk format and
-no public Undo/Redo route in this step.
-
-## Verified ordered structural replay (HIST-03c2b)
-
-`hydraulic::previewVerifiedHydraulicActionBoundary(parent, committed,
-oldestFirstFrames, boundary)` is a **read-only** verifier for one hydraulic
-network across a single immutable parent/child snapshot pair. It uses the
-native membership writer's established ordering semantics: adding a member
-**appends** it to its collection, while deleting a member preserves the order
-of the survivors. Replaying the complete original action archive **forward**
-from the immutable parent produces the exact intermediate collection order,
-including mixed network-root/typed edits, additions and deletions. Each
-MODEL before/after image is checked and canonicalized, and each complete
-logical action is validated for referential and value consistency.
-
-Only after **every** frame has been replayed and the final *complete*
-`ModelCodec<NetworkHydraulic>` image matches the immutable child byte for
-byte does the verifier return the requested action boundary. It fails closed
-if a changes-only Save was omitted from the archive, if a historical insertion
-used different ordering semantics, if a frame is corrupt or missing, or if a
-UUID/type/image conflicts. The first 100-frame page of a 126-action archive
-is **not** an acceptable complete history. Caller inputs must still come
-from authenticated, pinned revision snapshots and the retained revision
-archive; this helper does not perform that binding itself.
-
-This validates **one network's canonical model delta**, not the entire native
-revision's record delta: unrelated model records, multiple hydraulic networks,
-merge-origin changes and revisions containing no complete action archive
-remain unqualified. The method neither rewrites a draft nor persists a cursor.
-The older reverse-only preview intentionally continues to reject structural
-changes when no parent snapshot is supplied. No new disk format or REST
-navigation command is introduced in this step.
-
-## Verified draft-relative action targets (HIST-03c4a)
-
-`hydraulic::planVerifiedHydraulicActionNavigation()` now generates the exact
-**replacement** native candidate for a selected action position. It requires
-full first-parent revision/action coverage, preserves the order of all 18
-hydraulic collections, splits cross-network actions by ownership without
-splitting their global timeline positions, and reconstructs from the
-immutable parent rather than modifying the current draft incrementally.
-Every affected network must reopen byte-for-byte from the proposed native
-overlay. A changed draft generation, branch HEAD or unverified native delta
-invalidates the plan. This is **not yet an executed history transition**;
-no cursor or candidate is published. Future execution requires replay-safe
-operation identity, a live writer lease, and an atomic state/cursor update.
-
-## Retention, restart and UI
-
-The durable action archive survives a Commit; the bounded working-copy event
-journal may be cleared after an archived Commit without losing original
-actions. The logical History cursor must survive GUI and service restarts.
-The left GUI History dock shows the selected branch, Commit markers, archived
-and pending actions, and the current-state marker. Undo/Redo and jump
-controls stay disabled until mutation/cursor/recovery APIs are implemented.
-
-The first navigation implementation must prove canonical equality after
-Undo→Redo and multi-step jumps, correct redo invalidation, first-parent
-checkpoints, ambiguous response recovery and no mutation of immutable
-revisions. Future retention/pruning must be explicit and must not silently
-replace missing actions with guessed edits.
-
-See [current archive behavior](commit-action-archive.md) and the
-[remaining implementation roadmap](history-roadmap.md).
+No automatic compatibility migration is provided for pre-release draft
+formats. The current working-copy marker is `AOWIS-WORKING-COPY-6`;
+recreate older disposable drafts. See [storage formats](storage-formats.md).

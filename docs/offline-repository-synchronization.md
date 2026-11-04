@@ -20,7 +20,7 @@ unchanged. Drafts are never part of a bundle. Wire format:
 
 An unborn branch has no revision and cannot be bundled; copy it with
 `POST /projects/{id}/unborn-checkout` instead
-([private repositories](private-working-repositories.md#checkout-of-an-unborn-branch)).
+([private repositories](private-working-repositories.md#what-is-implemented)).
 
 ## Import rules
 

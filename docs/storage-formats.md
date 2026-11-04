@@ -267,8 +267,8 @@ history-action-position\t<global action boundary within archived Commit|->
 history-archive-operation\t<archived local Commit operation UUIDv7|->
 ```
 
-HIST-03b uses the existing atomic meta publication to persist the full
-checkpoint replacement candidate and its checkpoint identity **together**.
+Native checkpoint selection uses the existing atomic meta publication to persist
+the full replacement candidate and its checkpoint identity **together**.
 The first three `history-*` fields are either all absent (`-`) or all present.
 For an exact checkpoint the last two are absent; for a verified action
 boundary they are both present. The source generation must be exactly one
@@ -278,8 +278,9 @@ Selecting a checkpoint requires a live lease, a pinned HEAD, an empty MODEL
 journal, and a first-parent ancestor of that HEAD. Retrying the same operation
 at its original generation returns the already published result; intervening
 edits, another selection, or a changed HEAD reject the retry. Normal Save or
-Commit clears these fields. HIST-03c4b atomically publishes a verified action
-boundary and candidate with the same lease/generation/HEAD fencing. This is not yet a general
+Commit clears these fields. Native verified action navigation atomically
+publishes a qualified action boundary and its complete replacement candidate
+under the same lease/generation/HEAD fencing. It is **not** a continuous
 Undo/Redo engine for active draft journals. No migration from earlier
 pre-release draft meta records is provided: **V5 drafts must be recreated**.
 
@@ -338,7 +339,8 @@ A changes-only draft may produce an empty archive; that means *no individual
 actions recorded*, not permission to fabricate Undo steps. The draft's bounded
 journal is cleared on successful rebase, whereas the Commit ledger remains.
 Read currently via `ProjectService::localCommitActionHistory(operationId)`;
-paginated branch timelines and GUI Undo/Redo are future work.
+read-only paginated branch action history is implemented; continuous GUI
+Undo/Redo and HTTP navigation remain future work.
 The immutable `local-commit-revisions/<revision-uuidv7>` sidecar stores the
 repository UUIDv7, project UUIDv7, reserved revision UUIDv7, operation UUIDv7
 and a SHA-256 checksum under the marker `AOWIS-LOCAL-REVISION-INDEX-1`.

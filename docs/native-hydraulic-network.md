@@ -101,11 +101,26 @@ checks remain in force. Remaining HTTP/Standalone verification and the
 future separation of optional hydraulic-merge diagnostics are in the
 [roadmap](roadmap.md).
 
+## History reconstruction
+
+The hydraulic adapter verifies immutable MODEL action archives against
+committed native revision deltas. It can replay full, ordered actions (including
+root metadata, insertions, deletions and multi-network transactions), check
+canonical equality with immutable parent/child states, and construct a
+complete candidate overlay relative to the current committed HEAD. With a
+live private draft lease it can atomically select a verified archived action
+boundary and persist a V6 cursor. An **active draft MODEL journal is rejected**;
+this is not continuous Undo/Redo or an HTTP execution endpoint. See
+[History](commit-action-archive.md).
+
 ## Tests
 
 `aowis-dvmdb-hydraulic-network-tests` covers all 18 collections, the 256-member
 chunk boundaries, indexed and fallback edits, stale pins, physical and
 reference validation, merge choices and ancestry, fast-forward validation,
-concurrent immutable snapshots, compaction and reopening;
-`aowis-dvmdb-model-value-rules-tests` the value rules; the HTTP suite the
-routes, draft hydration and membership materialization.
+concurrent immutable snapshots, compaction, reopening and archived-action
+reconstruction/navigation. `aowis-dvmdb-model-value-rules-tests` covers value
+rules; the HTTP suite covers routes, draft hydration and membership
+materialization. **The current Qt-enabled History navigation regression still
+needs a confirmed passing rerun** following the forward-overlay fix.
+

@@ -51,10 +51,14 @@ These are documented in [remaining work](roadmap.md).
 
 One writer session at a time holds a leased/fenced token for a particular
 draft. Private draft events are ordered and durable, with generation CAS.
-The active event journal is **cleared after local Commit**; it is not a
-permanent undo/redo timeline. A future History store must archive accepted
-actions and Commit checkpoints separately so the editor can traverse them
-without rewriting immutable revision refs. See [History](history-roadmap.md).
+The active event journal is **cleared after local Commit**, but its accepted
+MODEL frames are retained in a **permanent, revision-indexed local-Commit
+action archive**. Paged read-only history includes real action UUIDs and
+checkpoint-only revisions. A native selector can atomically install a
+verified archived action boundary in an empty-journal private draft; it is
+**not** yet a continuous Undo/Redo timeline for active draft edits. See
+[current History](commit-action-archive.md) and
+[remaining History work](history-roadmap.md).
 
 No current DVMDB role, lease or repository ID authenticates a caller. Isolate
 writable endpoints using deployment boundaries until a separate security

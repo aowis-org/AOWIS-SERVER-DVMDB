@@ -7,7 +7,7 @@ journal that produced it. Saving a draft **never creates a revision or moves a
 branch HEAD**; only a local Commit does. The product rules are in the
 [version-control contract](version-control-semantics.md) and
 [private working repositories](private-working-repositories.md); the bytes are
-in [storage formats](storage-formats.md#private-drafts-aowis-working-copy-4).
+in [storage formats](storage-formats.md#private-drafts-aowis-working-copy-6).
 
 Drafts exist only in a catalogue whose repository role is explicitly set to
 `private` ([repository tracking](repository-tracking.md)). The role is
@@ -71,7 +71,7 @@ Only one session writes a draft at a time:
 Leases and tokens prevent accidental concurrent overwrites. They are **not**
 authentication: anyone who can reach the service can read the session IDs.
 
-## Selecting a committed history checkpoint (native API)
+## Selecting verified history states (native API)
 
 A private draft with an empty MODEL event journal can select an earlier
 checkpoint on its current branch's first-parent ancestry using
@@ -82,9 +82,16 @@ the **entire** draft overlay and saves a checkpoint cursor in draft metadata.
 Retrying the same request after a lost response does not apply it twice;
 a different operation or stale generation fails. The branch HEAD and
 immutable revision content never change. A subsequent normal Save or Commit
-clears the exact-checkpoint cursor. This is not yet available over HTTP, and
-the History dock remains read-only until permanent action-level Undo/Redo
-is implemented; checkpoint navigation does not manufacture MODEL events.
+clears the exact-checkpoint cursor. Native `hydraulic::navigateVerifiedHydraulicAction`
+can also select an **individual archived hydraulic action boundary**, once
+complete original MODEL replay and native-record coverage have been verified.
+It publishes the entire replacement overlay and V6 action coordinate together,
+with lease/generation/HEAD checks and exact-operation retry. The draft must
+have **no active MODEL journal**, and the action's local Commit must be fully
+covered by archived events. Returning to the committed HEAD is intended to
+leave an empty (clean) candidate. These selectors are not exposed over HTTP;
+they do not implement continuous Undo/Redo or navigation of live draft events.
+See [History](commit-action-archive.md).
 
 ## Saving
 
@@ -196,8 +203,11 @@ undecided. A network without a water source, with disconnected components
 or an unsuccessful hydraulic simulation is not prohibited **solely** for
 hydraulic feasibility. No full EPANET solver-success validation is required
 by local Commit. The active draft candidate and event journal are **cleared
-on successful Commit**; earlier individual edit steps are not retained as a
-permanent History subsystem. See [History roadmap](history-roadmap.md).
+on successful Commit**; its original acknowledged MODEL event frames remain
+in the **durable, indexed local-Commit archive**. This supplies committed
+action history, but not yet general active-draft Undo/Redo. See
+[current History](commit-action-archive.md) and
+[History roadmap](history-roadmap.md).
 Actual cross-process recovery acceptance remains work in the
 [remaining integration roadmap](roadmap.md).
 

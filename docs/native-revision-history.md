@@ -12,10 +12,12 @@ action trail. **Local Commits do preserve their original MODEL events** in a
 separate immutable, revision-indexed archive. Working copies have a bounded
 event journal that is **cleared on successful local Commit**, but the archived
 frames remain available through paginated first-parent history reads.
-Neither the archive nor the native revision DAG currently provides a complete
-user-facing undo/redo cursor or arbitrary jump-to-edit. A native revision
-delta witness can compare an archived local Commit with its exact published
-record changes; it does **not** by itself prove MODEL action completeness.
+The native History adapter can verify **complete** hydraulic MODEL action
+coverage against the published native revision delta and atomically select a
+qualified historical action boundary in an empty-journal private draft.
+That is not yet an HTTP/GUI Undo/Redo facility or a continuous action cursor
+spanning live draft events. An unaided native revision delta witness alone
+does **not** prove MODEL action completeness.
 See the [History roadmap](history-roadmap.md). No revision may be rewritten
 or HEAD ref silently rewound as a substitute.
 

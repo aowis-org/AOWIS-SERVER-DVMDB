@@ -1,58 +1,67 @@
 # DVMDB documentation
 
-DVMDB is AOWIS's **native multi-project, versioned model store** with a C++
-service API and HTTP endpoints. The pages linked here describe behavior
-present in the source snapshot of 2026-11-03. Future development is in the
-[remaining roadmap](roadmap.md); no old implementation-stage chronicle is
-necessary to understand the product.
+DVMDB is AOWIS's **native, multi-project model repository**, with immutable
+revisions, branches, private working copies, canonical hydraulic persistence,
+replication primitives and a C++/HTTP service. This index reflects the
+**2026-11-04 source snapshot**. A capability described as *implemented* is not
+necessarily qualified for every GUI, browser or Standalone deployment.
 
-## Current product contracts
+Start with the [repository README](../README.md) to build and run the server.
 
-| Guide | What it documents |
+## Product and data contracts
+
+| Topic | Reference |
 |---|---|
-| [Architecture](architecture.md) | Store, project service, repository identity and durability |
-| [Version-control semantics](version-control-semantics.md) | UUIDv7 projects, branches, unborn HEADs, immutable revisions and drafts |
-| [Working copies and local Commit](working-copies.md) | Leased/fenced events, draft journal, generation, idempotent local Commit |
-| [Private and shared repositories](private-working-repositories.md) | Roles, local vs shared refs, checkout building blocks, current workflow boundary |
-| [Committed revision graph](native-revision-history.md) | Revision records, branch ancestry, graph reads and immutable metadata |
-| [Committed actions and branch timeline](commit-action-archive.md) | Verified MODEL action archives, paged read-only Commit checkpoints and draft event UUIDs |
-| [Hydraulic persistence](native-hydraulic-network.md) | 18 collections, root metadata, chunks, full/read/edit paths |
-| [Model record integrity](model-records.md) | Canonical records, identities, reverse references |
-| [Hydraulic feasibility and storage validity](model-validity-boundary-audit.md) | What is allowed despite solver failure versus what is structurally invalid |
-| [Generic merge](native-branch-merging.md) / [hydraulic merge](native-hydraulic-merging.md) | Native APIs and current conflict/validation rules |
-| [Repository tracking](repository-tracking.md) | Repository role, UUID, remote registry and tracking observations |
-| [Revision bundles](offline-repository-synchronization.md) | Actual native/HTTP/CLI replication primitives |
+| System components, storage and concurrency | [Architecture](architecture.md) |
+| UUIDs, branches, unborn HEAD, immutable Commit and drafts | [Version-control semantics](version-control-semantics.md) |
+| Draft lifecycle, autosave, leases, local Commit and recovery | [Working copies](working-copies.md) |
+| Repository roles, private checkout and shared refs | [Private and shared repositories](private-working-repositories.md) |
+| Revision DAG, metadata and parent order | [Revision history](native-revision-history.md) |
+| **Current History features:** durable Commit action archive, checkpoint/action-boundary selection and exact limitations | [History and action archives](commit-action-archive.md) |
+| **Target History behavior:** cross-Commit Undo/Redo and cursor rules | [History contract](history-contract.md) |
+| Network roots, 18 collections, membership, edit and read paths | [Hydraulic persistence](native-hydraulic-network.md) |
+| MODEL codec, native record identity and references | [Model records](model-records.md) |
+| Structural integrity versus hydraulic solvability | [Validation boundary](model-validity-boundary-audit.md) |
+| Existing generic and hydraulic merge primitives | [Branch merge](native-branch-merging.md), [hydraulic merge](native-hydraulic-merging.md) |
+| Revision bundles and transport primitives | [Offline synchronization](offline-repository-synchronization.md) |
+| Repository UUID/role and tracking refs | [Repository tracking](repository-tracking.md) |
 
-## HTTP service and operations
+## APIs and operation
 
-- [Current HTTP workflows](http-workflows.md) and [REST conventions](rest-api-design.md)
-  summarize the implemented endpoints. [OpenAPI](dvmdb-http-api.yaml) documents
-  concrete fields and response shapes; verify its source-generated contract
-  in tests when making protocol changes.
-- [Database service](native-database-service.md) — configuration, limits,
-  startup and health.
-- [Storage formats](storage-formats.md), [operations](operations.md),
-  [verification](repository-verification.md),
-  [durability](durability-qualification.md) and
-  [engineering measurements](engineering-findings.md) document the native
-  persistence implementation and how to evaluate it. Measurements are dated
-  evidence, not claims about every later change.
-- [GUI integration contract](gui-integration-requirements.md) describes the
-  currently exercised API boundary with AOWIS-SERVER-GUI.
+| Topic | Reference |
+|---|---|
+| Common HTTP workflows, failure/retry expectations | [HTTP workflows](http-workflows.md) |
+| Implemented routes and error conventions | [REST guide](rest-api-design.md), [OpenAPI](dvmdb-http-api.yaml) |
+| Native service configuration and startup | [Database service](native-database-service.md) |
+| GUI integration boundaries | [GUI integration](gui-integration-requirements.md) |
+| On-disk and wire markers (including working-copy V6) | [Storage formats](storage-formats.md), [format policy](format-compatibility.md) |
+| Backup, restore, data-root protection | [Operations](operations.md) |
+| Full integrity verification and compaction | [Repository verification](repository-verification.md) |
+| Test and benchmark procedures | [Durability qualification](durability-qualification.md), [benchmark procedures](benchmark-plan.md) |
+| Dated measurements (evidence, not release guarantees) | [Engineering findings](engineering-findings.md) |
 
-## Still future work
+## Remaining work — only future milestones
 
-- [Remaining database and GUI integration roadmap](roadmap.md): exact
-  external/embedded persistence acceptance, import/replacement, whole-project
-  Fetch, recoverable Publish, UI Merge, scaling and qualification.
-- [Persistent History and cross-Commit Undo/Redo roadmap](history-roadmap.md):
-  persistent action indexing, a durable navigation cursor and cross-Commit
-  Undo/Redo on top of the already implemented read-only action timeline.
-  **Undo/Redo is not implemented.**
-- [Security design](security-permissions-design.md) is explicitly deferred.
-  Repository role, UUIDs and fencing are not authentication or authorization.
+- [**Integration and release roadmap**](roadmap.md) is the primary queue for
+  hydraulic acceptance, History, import, Clone/Fetch, Publish, Merge and
+  durability/scale qualification.
+- [**History implementation roadmap**](history-roadmap.md) details only the
+  work still required for reliable Undo/Redo across Commit markers.
+- [**Security backlog**](security-permissions-design.md) is intentionally
+  outside the current pre-release delivery scope. Repository IDs and leases
+  are **not** authentication or authorization.
 
-The canonical MODEL codec, edit transactions and value rules are part of
-AOWIS-SERVER-MODEL, not a second DVMDB-specific serializer. Before first
-release, do not add migration/backward-compatibility machinery solely for
-obsolete development storage formats.
+## Status in one paragraph
+
+The source retains the original MODEL events after local Commit and serves
+paged read-only first-parent action timelines over HTTP. Native code can
+verify a hydraulic revision's complete action coverage and atomically select
+an archived action boundary in a leased private draft, with a durable cursor
+and idempotent retry. **This is not yet user-facing Undo/Redo**: active draft
+journals, continuous cursor/redo eligibility, HTTP navigation and GUI wiring
+remain unfinished. Historic revisions without action archives remain honest
+checkpoint-only entries. See [History](commit-action-archive.md).
+
+Before the first release, unsupported development storage formats are rejected
+rather than migrated. Always distinguish source functionality, test results,
+and end-to-end deployment acceptance.

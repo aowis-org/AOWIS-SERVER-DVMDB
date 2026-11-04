@@ -11,8 +11,11 @@ Every persisted record and bundle starts with a marker or magic; the byte
 layouts are in [storage formats](storage-formats.md). Names such as
 `revision-v2/`, `AOWREV21`–`24` and the `T`/`RID`/`PRJ` version byte `2` are
 the **current** format, not a compatibility layer. When a format changes, the
-marker changes and the old one is rejected (for example, single-file
-`AOWIS-WORKING-COPY-3` drafts are refused since drafts became directories).
+marker changes and the old one is rejected (for example,
+pre-release single-file draft layouts are refused). Current private drafts
+use **`AOWIS-WORKING-COPY-6`**, with an atomic history action coordinate.
+Earlier V5 draft metadata cannot be loaded and **must be recreated**; a
+working-copy format change does not invalidate immutable committed revisions.
 `aowis-dvmdb-format-compatibility-tests` keeps a frozen pre-release pack and
 its bundles (`tests/fixtures/pack-20261024`) to prove they are refused without
 modifying anything.

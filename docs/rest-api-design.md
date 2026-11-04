@@ -76,7 +76,8 @@ UUIDv7 intent ledger and status lookup.
 | Repository | `GET /repository`, `GET /repository/tracking`, `POST /repository/role` | identity, role, remote tracking ([details](repository-tracking.md)) |
 | Projects | `GET`/`POST /projects`, `GET`/`PATCH /projects/{id}`, `POST /projects/clone-target` | create with `unborn: true` for an unborn `main` (see below) |
 | Branches | `GET`/`POST /projects/{id}/branches`, `PATCH /projects/{id}/branches/{branch}`, `PATCH /projects/{id}/branch-ids/{branchId}`, `GET …/branches/{branch}/head`, `GET /projects/{id}/branch-ids/{branchId}`, `POST /projects/{id}/unborn-checkout` | create independent unborn or from committed revision; identity-based branch metadata/name update supports unborn branches |
-| History | `GET …/branches/{branch}/history`, `GET /projects/{id}/revisions/{revision}`, `PATCH /projects/{id}/revisions/{revision}/message`, `GET /projects/{id}/revision-graph`, `GET /projects/{id}/diff` | first-parent history, one revision, the pinned paged DAG of all branches, record-level diff |
+| Revision history | `GET …/branches/{branch}/history`, `GET /projects/{id}/revisions/{revision}`, `PATCH /projects/{id}/revisions/{revision}/message`, `GET /projects/{id}/revision-graph`, `GET /projects/{id}/diff` | first-parent committed history, pinned revision DAG and record-level diff |
+| MODEL action history | `GET …/branches/{branch}/action-history`, `GET …/action-history/{revisionId}/events` | read-only paged first-parent Commit markers, original archived MODEL frames and optional generation-pinned active draft event pages; **not** Undo/Redo |
 | Model commits | `POST …/branches/{branch}/model-commits` | generic record batch with reference checks only |
 | Merges | `POST /projects/{id}/merges`, `POST /projects/{id}/hydraulic-merges` | both need both expected HEADs; the hydraulic route validates the whole network and accepts field/object choices |
 | Hydraulic networks | `POST …/branches/{branch}/networks`, `GET …/branches/{branch}/networks/summary`, `GET …/networks/{networkId}`, `GET …/networks/{networkId}/entities`, `GET …/entities/{entityId}`, `POST …/networks/{networkId}/edits` | whole-network save, pinned reads, indexed edits ([details](native-hydraulic-network.md)) |
@@ -103,7 +104,8 @@ should assume they exist:
 * Fetch and Publish between a personal and a shared repository, including
   branch provisioning on the remote and Publish status lookup;
 * registering remotes and recording tracking observations over HTTP;
-* reconcile/compare of a stale draft against a new HEAD.
+* reconcile/compare of a stale draft against a new HEAD;
+* History Undo/Redo and jump **mutation endpoints** (native C++ only supports restricted verified archived action/checkpoint selection today).
 
 The original commit message is still hashed into the canonical revision.
 `PATCH /projects/{id}/revisions/{revision}/message` updates only a separately

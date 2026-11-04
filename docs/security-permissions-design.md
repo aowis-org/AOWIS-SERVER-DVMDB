@@ -2,7 +2,7 @@
 
 **Unscheduled future reference only; not a milestone in the database/GUI
 version-control implementation roadmap.** The [DVMDB roadmap](roadmap.md) and
-companion GUI roadmap end at VC-11. This document collects security findings,
+companion GUI roadmap describe only the remaining deliverables. This document collects security findings,
 questions and possible design requirements for an eventual, **separately
 approved AOWIS-wide initiative**. It creates **no current implementation task,
 numbered milestone, release gate or dependency** for the graph, private drafts,

@@ -1,140 +1,131 @@
-# DVMDB — remaining implementation and acceptance roadmap
+# DVMDB — remaining integration and release roadmap
 
-This is **only a forward-looking roadmap**. Current functionality is described
-in [product documentation](README.md), particularly
-[working copies](working-copies.md), [revision history](native-revision-history.md),
-[hydraulic storage](native-hydraulic-network.md), and
-[HTTP workflows](http-workflows.md). GUI-specific remaining work is in
-[the GUI roadmap](../../AOWIS-SERVER-GUI/docs/dvmdb-integration-roadmap.md).
-The cross-Commit Undo/Redo feature is **not implemented**; its data model and
-rollout are in [DVMDB History](history-roadmap.md).
+This document lists **unfinished work only**. It is not a record of old
+patches, implementation stages or obsolete storage variants. For current
+behavior start with the [documentation index](README.md),
+[working copies](working-copies.md), [hydraulic persistence](native-hydraulic-network.md)
+and [HTTP workflows](http-workflows.md).
 
-Latest sources reviewed: 2026-11-03. A patch in source is not a passing
-regression, and a passing HTTP fixture is not a real external-server or
-embedded-Standalone restart acceptance. Record evidence before marking a
-future gate complete.
+DVMDB is pre-release. A native C++ implementation, a passing unit fixture and
+an accepted end-to-end GUI/Standalone workflow are **three different things**.
+Do not mark a delivery gate complete without recording its test evidence.
 
-## Proposed sequence
+## Delivery priorities
 
-| Priority | Remaining backend/integration work | Acceptance condition |
+| Order | Outstanding deliverable | Definition of done |
 |---|---|---|
-| **1** | Complete mixed hydraulic Save qualification | GUI+HTTP+Standalone full-network equality, 18 typed collections + root; crash/restart and strict mismatch rejection |
-| **2** | Design and implement permanent action history | Durable paged edit history across Commit, reconstruction and history cursor without rewriting immutable revisions |
-| **3** | Support safe large logical edits and import/replacement | One atomic saved action, robust queue and generation/lease checks, no partial replacement |
-| **4** | Complete local project/branch/Commit acceptance | New unborn branch through draft/save/local Commit/branch/restart, durable lost-response recovery and multi-session safety |
-| **5** | Implement full-project Clone and Fetch | Verified full/incremental transfer and pinned remote tracking; local branches and drafts untouched |
-| **6** | Implement recoverable Publish | Missing objects first, expected remote HEAD CAS, durable operation ledger/status and safe first branch provisioning |
-| **7** | Complete reconciliation/Merge workflow | Exact base/local/remote refs, explicit conflict selection, two-parent immutable result and no draft loss |
-| **8** | Release durability and scale | ENOSPC/power-cut/crash/soak, large graph/list/journal, supported platform matrix and clear recovery errors |
+| 1 | **Qualify hydraulic Save and local Commit** | All 18 typed collections and root options round-trip exactly through real HTTP + GUI + Standalone, across restart and lost responses |
+| 2 | **Finish continuous History/Undo/Redo** | A user can Undo, Redo and jump through accepted draft actions and archived Commit markers with durable cursor, correct redo invalidation and restart recovery |
+| 3 | **Atomic large edits and import/replacement** | Network creation/replacement and larger logical actions are fully fenced, idempotent, recoverable and never partially visible |
+| 4 | **Qualify the private project lifecycle** | Project/unborn branch → saved draft → local Commit → rebase/reopen/branch, including multiple sessions and ambiguous-result recovery |
+| 5 | **Whole-project Clone/Fetch** | Verified complete or incremental project history transfer and durable remote observations without moving local branch HEADs or discarding drafts |
+| 6 | **Recoverable Publish** | Verified transfer plus expected-remote-HEAD CAS with durable operation status; safe first remote branch provisioning |
+| 7 | **GUI reconciliation/Merge** | Pinned base/local/remote refs, explicit conflict choices and correct two-parent result without draft loss |
+| 8 | **Release qualification and scale** | Disk-full/power-cut/soak/backup evidence, large histories and graphs, platform-specific acceptance and clear operational recovery |
 
-### 1 — Hydraulic persistence qualification
+## 1. Hydraulic persistence and local acceptance
 
-**Present in source:** server-owned hydraulic root/membership chunks, indexed
-entity edits, 18 typed collections, canonical MODEL event transport, root
-metadata event materialization and mixed root/entity Save requests. Local
-Commit creates immutable revisions and can reopen their saved networks.
+**Already implemented:** canonical MODEL serialization, indexed physical
+records, server-owned hydraulic root and membership chunks, 18 collections,
+root metadata edits, mixed MODEL events, fenced `save-events`, saved-state
+reads and local Commit/reopen. Solver convergence is deliberately **not** a
+Commit precondition.
 
-**Outstanding evidence/work:** run the latest DVMDB HTTP mixed-save tests
-(including new chunk, existing chunk, stale images and exact replay), then
-exercise a real external service and persistent Standalone across process
-restarts. Compare complete `ModelCodec<NetworkHydraulic>` images, including
-root options, timing, report, energy, MSX and backdrop, not sample counts.
-Test dropped responses, stale lease/generation, wrong repository/model
-fingerprint and power loss. Keep the current canonical storage and
-model-reference checks; **hydraulic solvability is not a Commit gate**.
+**Remaining:** compare complete `ModelCodec<NetworkHydraulic>` bytes—not just
+counts—after external HTTP Save, Commit, GUI reopen and persistent embedded
+Standalone restart. Exercise multi-network mixed edits, membership chunk
+boundaries, stale before-images, lease/generation errors, network import,
+corrupted frames, queue overflow, interrupted requests and recovery.
+A test passing against an in-process fake is not sufficient.
 
-### 2 — Persistent action history and cross-Commit navigation
+## 2. History across Commit boundaries
 
-The current draft journal is bounded and **cleared when a successful local
-Commit rebases the working copy**. Immutable revisions retain model snapshots,
-not necessarily individual editor actions. This is insufficient for
-persistent Undo/Redo across Commit markers.
+**Already implemented:** durable indexed archives of original MODEL events,
+paged native/HTTP read-only action history, native full-revision coverage
+verification, checkpoint planning/selection and native atomic selection of a
+verified archived hydraulic action boundary with a V6 draft cursor.
 
-Design a separately retained action-history store linked to working copy,
-branch, committed revisions and source events; support paged reads, selective
-checkpoint reconstruction, durable cursor/redo eligibility, crash-safe
-inverse/reapply events and explicit merge histories. A history navigation
-must never edit old revision records or move a published branch HEAD.
-Native checkpoint preview and atomic exact-checkpoint selection are available
-in `ProjectService`, with one meta publication and idempotent navigation
-identity. The current MODEL journal must be empty; there is no HTTP action
-cursor, per-step inversion, or cross-Commit Undo/Redo yet. These remain
-future work. See [history-roadmap.md](history-roadmap.md) for the backend contract
-and [the GUI History roadmap](../../AOWIS-SERVER-GUI/docs/history-roadmap.md)
-for the left dock and interaction semantics.
+**Remaining:** confirm the corrected Qt hydraulic navigation regression;
+support active draft journals, continuous cursor/redo eligibility, inverse
+and forward navigation provenance, recoverable HTTP mutation endpoints,
+then wire the GUI History dock. Imported/merge/checkpoint-only revisions
+must stay honest; do not synthesize edits from snapshot differences. See the
+[dedicated History roadmap](history-roadmap.md) for exact acceptance gates.
 
-### 3 — Big edits, network import and replacement
+## 3. Safe bulk operations
 
-Current per-Save event/changed-record limits protect the service, but can
-prevent large user actions. Design a bounded **atomic** large-action mechanism
-without exposing partially applied user operations. Preserve the implemented
-first import into an untouched empty unborn private draft. Add explicit,
-idempotent new-network, replace-existing-draft and selected-entity/library
-import operations, with exact repository/draft/network identity, generation,
-lease and queue preconditions, collision/reference handling and recovery.
-History must treat each bulk operation as a coherent logical action.
+The current journal and per-request candidate budgets are intentional
+resource limits, not a general bulk replacement interface. First import
+into an untouched empty unborn draft is supported; replacing a populated
+network or importing selected libraries/entities remains separate work.
 
-### 4 — Complete local lifecycle and recovery evidence
+Design coherent logical operations that may be large but are **atomic** at
+publication, lease/HEAD/generation checked, UUID/reference validated and
+recoverable by operation ID. Avoid exposing intermediate candidate states.
+Record each logical bulk edit as one meaningful History action when its
+MODEL representation is complete; never claim Undo support for an
+unjournaled import.
 
-Exercise private repository creation/designation, unborn HEAD, multiple
-branches, checkout, network initialization, event Save, immutable local
-Commit, draft rebase, read-only historical revisions and new writable HEAD.
-Verify caller-chosen UUIDv7 Commit-intent replay and status after dropped
-POST+status replies, crash between ledger and ref publication and a GUI
-restart. Add wrong-target/idempotent metadata failure cases and stale writer
-collisions. The GUI and native DVMDB must agree on UUIDs, nullable HEAD and
-error categories. A test being present is not proof of end-to-end acceptance.
+## 4. Private project and Commit lifecycle
 
-### 5 — Whole-project Clone/Fetch and tracking
+Qualify designation of a personal repository, identity-preserving source
+checkout, independent unborn branches, draft creation/discovery and leases,
+Save → local Commit → draft rebase → next Save, and branch-from-committed
+revision. Verify UUID stability, exact nullable-HEAD semantics, restart and
+status-lookup recovery, multi-session fencing and operation UUID reuse.
+Saved network content must survive both an external server restart and
+embedded Standalone process restart.
 
-Verified bundles and identity-preserving project/unborn-branch provisioning
-exist; a complete Fetch workflow does not. Pin the source repository ID,
-MODEL compatibility and branch HEAD snapshot; import all immutable objects,
-including two-parent ancestry, then persist accurate remote-tracking
-observations. Preserve logical project/branch UUIDs and allow absent vs
-unborn remote branches to remain distinct. Fetch must not move local HEADs
-or discard dirty working copies; interrupted transfer must be recoverable.
-Provide the GUI with progress and authoritative result/status information.
+## 5. Clone/Fetch
 
-### 6 — Publish
+Verified full/incremental revision bundles, remote-tracking storage and
+project/branch provisioning primitives exist. What is missing is an
+end-to-end **whole-project** workflow that pins the source repository and
+MODEL fingerprint, transfers full immutable ancestry (including two-parent
+revisions), preserves project/branch UUIDs, updates remote observations and
+recovers interrupted transfers. An absent remote branch is not an unborn
+branch. Fetch must not move the private local committed HEAD or overwrite a
+dirty draft.
 
-Use separate server-verified immutable object transfer and conditional
-remote HEAD movement; first remote provision of a branch must preserve its
-UUID. Every publication carries operation UUID/digest, expected remote
-HEAD/null, durable status and safe exact replay after a timeout. On stale
-remote HEAD, retain the entire private branch and draft and return a
-conflict. No force push, silent rebase or guessed branch-name matching.
-Hydraulic simulation failure must not reject an otherwise well-formed
-immutable revision; storage and ancestry remain strict.
+## 6. Publish
 
-### 7 — Merge and reconciliation
+Transfer immutable objects first, verify full closure, then conditionally
+advance the shared branch HEAD against the **exact expected remote HEAD**
+(null where appropriate). Preserve the stable branch UUID on first provision;
+never match by name alone. Use a durable operation identity/request digest
+and status lookup for lost acknowledgements. A stale remote ref is a
+conflict, not permission to force-push, rebase or erase local work.
 
-Connect the existing native generic/hydraulic merge primitives to pinned
-Fetch/tracking and a deliberate GUI resolution flow. Compare pinned base,
-local and remote commits, present actual field/object/edit collisions,
-respect delete/edit cases, preserve the dirty draft, and produce the
-correct ordered two-parent revision. Hydraulic solver feasibility is a
-non-blocking diagnostic; absent/wrong-type object references still follow
-current model-integrity policy unless separately redesigned. Include
-criss-cross/ambiguous bases and concurrent remote updates as explicit
-error states, not invented automatic winners.
+## 7. Merge/reconciliation
 
-### 8 — Scale and release qualification
+The native generic and hydraulic three-way merge primitives exist; the
+full collaboration workflow does not. Fetch and pin base/local/remote
+revisions; expose actual object/field/delete conflicts; apply deliberate
+choices; verify an ordered two-parent immutable result while preserving
+any unrelated private draft. Handle concurrent remote updates, ambiguous
+merge bases, criss-cross histories and unsupported non-hydraulic changes
+explicitly. Solver feasibility remains a non-blocking diagnostic; canonical
+model references and storage integrity remain mandatory.
 
-Evaluate 4,096-event/8-MiB draft journal ceiling, 128 changed-record/event
-Save limits, candidate size and large project/branch graphs. Permanent
-History cannot merely raise these quotas; it needs its own retention and
-compaction design. Re-run native integrity verification, bundle corruption
-checks, disk-full/ENOSPC, crash/power-cut tests and HTTP soak on the final
-implementation. Record exact build, platform, results and skips. Linux
-native and external HTTP, embedded Standalone and supported browser/WASM
-paths require separate signoff.
+## 8. Durability, capacity and release acceptance
 
-## Deferred / excluded work
+Re-run pack/integrity, power-cut, ENOSPC, crash during Commit/publish,
+compaction, backup/restore, transfer corruption and resource/HTTP soak on
+the final implementation. Exercise the 4,096-event / 8-MiB active journal,
+large project graphs, repository tracking growth and multi-network edits.
+History needs a deliberate archive retention/compaction policy, **not** an
+unbounded journal or silent action pruning. Record exact build and runtime,
+platform, duration, failures, environment and supported limits for Linux
+native, external HTTP, Standalone and browser/WASM client paths separately.
 
-Authentication/TLS/authorization are a **separate security project**, not
-an implicit prerelease pass/fail item in this integration roadmap. Keep
-unauthenticated writable services on localhost or trusted isolated networks.
-No pre-first-release legacy migration is required. Permitting dangling or
-wrong-type hydraulic UUID references is **undecided** and must not be
-silently implemented as part of non-blocking solver validation.
+## Explicit exclusions
+
+- **No pre-first-release migration or legacy compatibility support** for
+  abandoned development storage layouts. Unsupported formats fail closed.
+- **No mandatory full hydraulic simulation** as a Save/Commit/History gate.
+  Unique IDs, canonical values and existing model/reference integrity checks
+  continue to apply.
+- **No security deliverable inside this roadmap.** Authentication, TLS and
+  authorization are a separate [security initiative](security-permissions-design.md).
+  Until then, writable services belong on localhost or trusted isolated
+  networks; repository role/UUID and fencing do not authenticate a user.
