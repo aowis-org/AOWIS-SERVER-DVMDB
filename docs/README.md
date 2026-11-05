@@ -1,70 +1,65 @@
 # DVMDB documentation
 
-DVMDB is AOWIS's **native, multi-project model repository**, with immutable
-revisions, branches, private working copies, canonical hydraulic persistence,
-replication primitives and a C++/HTTP service. This index reflects the
-**2026-11-04 source snapshot**. A capability described as *implemented* is not
-necessarily qualified for every GUI, browser or Standalone deployment.
+DVMDB is AOWIS's **native multi-project repository and HTTP service**:
+immutable versioned model snapshots, UUIDv7 identity, branches, fenced
+personal working copies, canonical hydraulic persistence, original MODEL
+action history and verified transfer primitives. Documentation reflects the
+**5 November 2026** source. Implementation and deployment acceptance are
+different claims.
 
-Start with the [repository README](../README.md) to build and run the server.
+## Current product contracts
 
-## Product and data contracts
-
-| Topic | Reference |
+| Area | Documentation |
 |---|---|
-| System components, storage and concurrency | [Architecture](architecture.md) |
-| UUIDs, branches, unborn HEAD, immutable Commit and drafts | [Version-control semantics](version-control-semantics.md) |
-| Draft lifecycle, autosave, leases, local Commit and recovery | [Working copies](working-copies.md) |
-| Repository roles, private checkout and shared refs | [Private and shared repositories](private-working-repositories.md) |
-| Revision DAG, metadata and parent order | [Revision history](native-revision-history.md) |
-| **Current History features:** durable Commit action archive, checkpoint/action-boundary selection and exact limitations | [History and action archives](commit-action-archive.md) |
-| **Target History behavior:** cross-Commit Undo/Redo and cursor rules | [History contract](history-contract.md) |
-| Network roots, 18 collections, membership, edit and read paths | [Hydraulic persistence](native-hydraulic-network.md) |
-| MODEL codec, native record identity and references | [Model records](model-records.md) |
-| Structural integrity versus hydraulic solvability | [Validation boundary](model-validity-boundary-audit.md) |
-| Existing generic and hydraulic merge primitives | [Branch merge](native-branch-merging.md), [hydraulic merge](native-hydraulic-merging.md) |
-| Revision bundles and transport primitives | [Offline synchronization](offline-repository-synchronization.md) |
-| Repository UUID/role and tracking refs | [Repository tracking](repository-tracking.md) |
+| Architecture, storage, concurrency | [Architecture](architecture.md), [storage format](storage-formats.md) |
+| Projects, branches, revisions and unborn HEAD | [Version control](version-control-semantics.md), [revision DAG](native-revision-history.md) |
+| Personal draft, Save and local Commit | [Working copies](working-copies.md), [private repositories](private-working-repositories.md) |
+| Continuous Undo/Redo and action archives | [History contract](history-contract.md), [original MODEL action archive](commit-action-archive.md) |
+| Sparse MODEL updates and SHA-256 recovery | [History transport/reconciliation](history-transport.md) |
+| Hydraulic root, 18 collections and references | [Hydraulic persistence](native-hydraulic-network.md), [MODEL records](model-records.md) |
+| Commit/working-copy integrity versus solver feasibility | [Validation boundary](model-validity-boundary-audit.md) |
+| Clone/Fetch primitives, tracking and merge | [Offline synchronization](offline-repository-synchronization.md), [tracking](repository-tracking.md), [merge](native-hydraulic-merging.md) |
 
-## APIs and operation
+## APIs, deployment and validation
 
-| Topic | Reference |
+| Area | Documentation |
 |---|---|
-| Common HTTP workflows, failure/retry expectations | [HTTP workflows](http-workflows.md) |
-| Implemented routes and error conventions | [REST guide](rest-api-design.md), [OpenAPI](dvmdb-http-api.yaml) |
-| Native service configuration and startup | [Database service](native-database-service.md) |
-| GUI integration boundaries | [GUI integration](gui-integration-requirements.md) |
-| On-disk and wire markers (including working-copy V8) | [Storage formats](storage-formats.md), [format policy](format-compatibility.md) |
-| Backup, restore, data-root protection | [Operations](operations.md) |
-| Full integrity verification and compaction | [Repository verification](repository-verification.md) |
-| Test and benchmark procedures | [Durability qualification](durability-qualification.md), [deletion power-cut results](vm-deletion-powercut.md), [benchmark procedures](benchmark-plan.md) |
-| Dated measurements (evidence, not release guarantees) | [Engineering findings](engineering-findings.md) |
+| HTTP operations and errors | [HTTP workflows](http-workflows.md), [REST guide](rest-api-design.md), [OpenAPI](dvmdb-http-api.yaml) |
+| Server startup, backup and verify | [Service](native-database-service.md), [operations](operations.md), [repository verification](repository-verification.md) |
+| GUI contract | [GUI integration](gui-integration-requirements.md) |
+| Durability and power-loss | [Qualification](durability-qualification.md), [deletion power-cut](vm-deletion-powercut.md) |
+| Benchmarks | [Benchmark procedures](benchmark-plan.md), [observed engineering findings](engineering-findings.md) |
+| Format policy | [Storage formats](storage-formats.md), [format policy](format-compatibility.md) |
 
-## Remaining work — only future milestones
+## Current History behavior
 
-- [**Integration and release roadmap**](roadmap.md) is the primary queue for
-  hydraulic acceptance, History, import, Clone/Fetch, Publish, Merge and
-  durability/scale qualification.
-- [**History implementation roadmap**](history-roadmap.md) details only the
-  work still required for reliable Undo/Redo across Commit markers.
-- [**Security backlog**](security-permissions-design.md) is intentionally
-  outside the current pre-release delivery scope. Repository IDs and leases
-  are **not** authentication or authorization.
+DVMDB keeps original MODEL frames in the active journal and indexes them
+permanently after local Commit. Its durable cursor navigates eligible
+actions across Commit boundaries without changing immutable revisions.
+Navigation returns a verified **sparse change set** for the one selected
+hydraulic network, with canonical source/destination SHA-256 values. The
+server also provides a lightweight operation/generation/cursor/hash
+reconciliation receipt and pinned previous candidate for same-UUID delta
+replay after lost acknowledgements or restart. The GUI has a separate
+client-side **durable pending navigation intent** for GUI process restart;
+it does not require a new DVMDB storage format. Normal opening can still
+transfer the complete model once.
 
-## Status in one paragraph
+The **personal** role is an editing designation: personal DVMDB can be local,
+embedded or reachable via REST. A remote personal server does not promise
+editing during a total network outage. DVMDB's working-copy limits and
+single-network History-navigation scope remain explicit.
 
-The source retains the original MODEL events after local Commit and serves
-paged read-only first-parent action timelines over HTTP. Native code can
-verify a hydraulic revision's complete action coverage and atomically select
-an archived action boundary in a leased private draft, with a durable cursor
-and idempotent retry. A native MODEL-verified adapter also navigates active
-actions for one existing network, and atomic event Save after Undo invalidates
-the redo tail without touching committed revisions. **This is not yet
-user-facing Undo/Redo**: multi-network/unborn drafts, the continuous cross-Commit
-cursor, HTTP navigation and GUI wiring remain unfinished. Historic revisions
-without action archives remain honest
-checkpoint-only entries. See [History](commit-action-archive.md).
+## Remaining work
 
-Before the first release, unsupported development storage formats are rejected
-rather than migrated. Always distinguish source functionality, test results,
-and end-to-end deployment acceptance.
+- [Integration and release roadmap](roadmap.md): project checkout, Fetch,
+  Publish, reconciliation/merge, large imports and platform qualification.
+- [History acceptance](history-roadmap.md): live process-kill, power-loss,
+  GUI/editor, Standalone and browser storage qualification; no new Undo
+  engine is scheduled.
+- [Security design](security-permissions-design.md): separate workstream;
+  UUIDs, repository roles and writer leases are **not** authentication.
+
+Unsupported pre-release storage formats are rejected rather than silently
+migrated. Historic measurements and audits are evidence, not current feature
+roadmaps.

@@ -1,4 +1,4 @@
-# History contract — current capabilities and intended Undo/Redo behavior
+# History contract — current editing and revision history
 
 History has two distinct layers. **Revision history** is an immutable DAG
 of model snapshots with branch refs. **Edit history** is an ordered record of
@@ -6,10 +6,10 @@ MODEL actions performed in a private draft and archived by a successful
 local Commit. Commit markers connect the two layers; they are **not Undo
 barriers** or extra synthetic edit steps.
 
-The native draft marker is V9; V8 development drafts must be recreated.
-For the actual API and supported targets, see
-[committed action archives](commit-action-archive.md). The missing features
-are listed only in the [History roadmap](history-roadmap.md).
+For the native persistence format see
+[working-copy storage](storage-formats.md); for the wire protocol and
+recovery see [sparse History transport](history-transport.md). The remaining
+acceptance work is in [History acceptance](history-roadmap.md).
 
 ## Identity and timeline
 
@@ -42,22 +42,22 @@ are listed only in the [History roadmap](history-roadmap.md).
 | Verify one hydraulic action sequence | `previewVerifiedHydraulicActionBoundary` replays ordered insert/delete/update/root operations and checks byte-equal committed network |
 | Verify an entire revision | `verifiedRevisionNativeActionWitness` plus `verifyHydraulicRevisionActionCoverage` account for every changed native record across affected networks |
 | Plan archived action boundary | `planVerifiedHydraulicActionNavigation` builds an exact, **HEAD-relative replacement** candidate without mutation |
-| Select archived action boundary | `navigateVerifiedHydraulicAction` atomically publishes verified replacement state and V9 cursor metadata under lease, HEAD and generation fences, idempotent by navigation operation UUID |
+| Select archived action boundary | `navigateVerifiedHydraulicAction` atomically publishes verified replacement state and durable cursor metadata under lease, HEAD and generation fences, idempotent by navigation operation UUID |
 | Navigate an existing network's active draft actions | `planVerifiedHydraulicDraftActionNavigation` verifies all retained MODEL frames against the persisted selected network state; `navigateVerifiedHydraulicDraftAction` publishes the rebuilt HEAD-relative candidate and cursor through the fenced/idempotent native writer. **Limited to one unambiguous hydraulic network**; an unborn network initialized/imported before the first MODEL event can replay journaled creations/updates, but ambiguous unborn deletions are refused |
 | HTTP action navigation | `GET /working-copies/{draftId}/history/cursor` distinguishes an active journal cursor from an archived Commit coordinate and supplies bounded, server-resolved `previousAction`/`nextAction` coordinates (including adjacent Commit archives); fenced `POST /working-copies/{draftId}/history/navigate` selects a verified active boundary, or an indexed archived boundary when `revisionId` is supplied. Both use a UUIDv7 operation identity and server-built overlays |
-| Suspended draft / archived handoff | At active position zero, `previousAction` can address the last archived Commit action; the published V9 cursor preserves original draft frames for Redo. From the newest Commit's final action, `nextAction` returns to the retained draft at zero, then continues to its first action. A new MODEL Save from an archived selection atomically creates a forked active action path and invalidates its forward Redo suffix; immutable Commits are not removed |
+| Suspended draft / archived handoff | At active position zero, `previousAction` can address the last archived Commit action; the published cursor preserves original draft frames for Redo. From the newest Commit's final action, `nextAction` returns to the retained draft at zero, then continues to its first action. A new MODEL Save from an archived selection atomically creates a forked active action path and invalidates its forward Redo suffix; immutable Commits are not removed |
 | Unborn first-draft creation/update Undo/Redo | **Implemented for one verified initialized network; Qt/HTTP acceptance pending; ambiguous member deletions fail closed** |
-| GUI Undo/Redo and end-to-end recovery | **Implemented GUI integration; full live-session/restart acceptance pending** |
+| GUI Undo/Redo and restart reconciliation | **GUI integration and durable local navigation intent implemented; process-kill/Standalone/WASM deployment acceptance outstanding** |
 
 The **archived** HTTP/native action selector requires an indexed, complete,
 first-parent local hydraulic Commit. It can navigate from an active journal
 only when the latter is already verified and selected at position zero. The
-suspended journal and archival coordinate persist atomically, and the HTTP
-cursor supplies adjacent targets across that boundary. Network
+suspended journal and archival coordinate persist atomically, and the
+HTTP cursor supplies adjacent targets across that boundary. Network
 creation/removal, non-hydraulic data, merge Commits and missing archives are
-not action-level targets today. Returning to the committed HEAD must produce an empty native candidate
-overlay (a clean draft); the Qt hydraulic regression has passed locally,
-while HTTP archived selection still requires its dedicated regression run.
+not action-level targets today. Returning to the committed HEAD produces a
+clean native candidate. GUI/editor/platform acceptance is tracked separately
+from the implemented native and HTTP selection APIs.
 
 ## Navigating and branching the active action path
 
@@ -71,7 +71,8 @@ UUID), starts a replacement active journal and clears the archived cursor.
 After a new local Commit, its indexed local action archive retains this
 origin, so branch action History follows the new logical path and skips the
 abandoned committed-action suffix. Immutable revision ancestry remains
-first-parent as before: a logical History fork never rewrites it. Active draft Save, navigation and local Commit must form one
+first-parent as before: a logical History fork never rewrites it. Active draft Save, navigation and
+local Commit must form one
 coherent, durable action timeline.
 
 For incremental HTTP navigation, the caller identifies the loaded
@@ -81,7 +82,8 @@ the canonical source and destination `NetworkHydraulic`, only changed entity
 before/after images (including root metadata), and sparse membership moves.
 Unchanged entities and the complete network are not transmitted. The GUI must
 check the source digest and every before-image, reconstruct a temporary copy,
-verify the destination digest, then publish it locally. DVMDB retains the preceding native candidate overlay file as an atomic
+verify the destination digest, then publish it locally. DVMDB retains the
+preceding native candidate overlay file as an atomic
 reference in the navigation's working-copy metadata. An identical retry of
 the last operation UUID and source generation reconstructs the exact source,
 then returns the same sparse delta after a lost HTTP acknowledgement or a
@@ -122,8 +124,9 @@ its initialized/imported network is the unjournaled seed: journaled creations
 and updates may be undone/redone without fabricating a Commit. Deletions whose
 original membership order cannot be proved fail closed. Multi-network
 navigation remains deferred. HTTP adjacent navigation crosses eligible Commit
-markers; end-to-end editor/restart acceptance is still outstanding. A new MODEL Save
-from a verified archived action is allowed as a durable logical fork; plain
+markers. GUI restart has a client-side durable pending intent and SHA-256
+reconciliation path; real process-kill and multi-platform acceptance remain
+outstanding. A new MODEL Save from a verified archived action is allowed as a durable logical fork; plain
 non-event Save and unverified origins still fail closed.
 
 The GUI History dock is wired to the HTTP cursor and action navigation. It

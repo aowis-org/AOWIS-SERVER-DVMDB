@@ -290,7 +290,7 @@ For an **active draft action selection**, `history-revision`,
 `history-action-position` and `history-archive-operation` are absent,
 `draft-action-position` ranges from 0 through the retained `journal` count,
 and the navigation operation UUID/source generation identify its last atomic
-publication. **V9 suspended draft history** permits an archived revision and
+publication. **Suspended draft history** permits an archived revision and
 archive action position to coexist with a retained journal **only when**
 `draft-action-position` is exactly zero. The journal's acknowledged bytes,
 digest and `last-save` fingerprint remain unchanged while browsing archived

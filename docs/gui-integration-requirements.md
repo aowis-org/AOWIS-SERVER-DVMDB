@@ -54,17 +54,25 @@ checkout and immutable revision bundles exist; whole-project Fetch and
 Publish are not yet operational GUI flows.
 
 `GET /revision-graph` exposes the immutable revision DAG. DVMDB's
-`action-history` and revision events routes expose **archived original MODEL
-actions across local Commit markers**, alongside the bounded live-draft
-journal; readers can page both without changing HEAD or draft state.
-Native code has a persisted V8 cursor for verified archived and active
-single-network action boundaries. Fenced HTTP action navigation and adjacent
-Undo/Redo targets include a draft-position-zero/Commit handoff that retains
-original Redo frames; unborn-base and multi-network active draft replay remain
-deferred. The GUI controller is still missing, so the existing left History
-dock remains **read-only**, with Undo/Redo disabled.
-See [current History](commit-action-archive.md) and
-[remaining History work](history-roadmap.md).
+`action-history` and paged revision events routes expose the **original
+archived MODEL actions** alongside the active draft journal. Fenced HTTP
+`/history/navigate` selects eligible draft or archived action coordinates,
+including crossing Commit markers without rewriting immutable revisions.
+
+A successful navigation returns a verified **sparse `historyDelta`** for the
+selected hydraulic network (canonical source/destination SHA-256, changed
+entity images and membership-order changes). The GUI verifies source digest,
+before-images, and destination digest before changing the editor. It does
+**not** download the complete network for routine Undo/Redo.
+
+On lost acknowledgements the client retries only the original UUID, then
+reconciles against read-only `/history/reconcile` (operation UUID, generation,
+exact cursor and SHA-256) and replays the pinned delta if necessary. The GUI
+also persists its own durable navigation intent **before POST**, permitting
+recovery after process restart when local storage survives. DVMDB itself
+retains its previous native candidate file reference for the latest
+navigation; there is no competing server-side Undo stack. See
+[History transport](history-transport.md) and [History acceptance](history-roadmap.md).
 
 ## Validation and tests
 

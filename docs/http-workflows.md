@@ -85,12 +85,14 @@ branch's committed HEAD. Network summaries are read-only and do not save.
 `GET /working-copies/{id}` exposes a bounded draft event journal. In addition,
 the **permanent local-Commit MODEL action archive** is available through the
 read-only `/action-history` and `/action-history/{revisionId}/events` routes
-below, including real actions across Commit markers. For an **existing single
-hydraulic network in a committed base**, HTTP can select verified active
-journal and archived Commit action positions, including crossing from active
-position zero to the last archived action without discarding Redo. The GUI
-History dock remains read-only pending controller integration. See
-[History](commit-action-archive.md) and [remaining work](history-roadmap.md).
+below, including real actions across Commit markers. For a **verified single hydraulic network**, including eligible actions in an
+initialized unborn first draft, HTTP selects active journal and archived
+Commit action positions. It can cross from active position zero to the last
+archived action without discarding Redo. The GUI History dock uses that
+navigation and verifies sparse MODEL deltas; the read-only reconciliation
+receipt supports same-UUID recovery without a full-model GET. See
+[History](history-contract.md), [transport](history-transport.md) and
+[remaining acceptance](history-roadmap.md).
 
 ## Local Commit and message annotations
 

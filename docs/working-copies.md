@@ -85,7 +85,7 @@ immutable revision content never change. A subsequent normal Save or Commit
 clears the exact-checkpoint cursor. Native `hydraulic::navigateVerifiedHydraulicAction`
 can also select an **individual archived hydraulic action boundary**, once
 complete original MODEL replay and native-record coverage have been verified.
-It publishes the entire replacement overlay and V9 archived-action coordinate together,
+It publishes the entire replacement overlay and archived-action coordinate together,
 with lease/generation/HEAD checks and exact-operation retry. An active journal may cross into archived
 history from its verified zero position without discarding the retained Redo
 frames. Other active positions are refused, and the local Commit must be fully
@@ -232,10 +232,13 @@ or an unsuccessful hydraulic simulation is not prohibited **solely** for
 hydraulic feasibility. No full EPANET solver-success validation is required
 by local Commit. The active draft candidate and event journal are **cleared
 on successful Commit**; its original acknowledged MODEL event frames remain
-in the **durable, indexed local-Commit archive**. This supplies committed
-action history, but not yet general active-draft Undo/Redo. See
-[current History](commit-action-archive.md) and
-[History roadmap](history-roadmap.md).
+in the **durable, indexed local-Commit archive**. These retained actions form a continuous verified History timeline with
+active-draft journal actions and eligible archived Commit boundaries.
+Fenced navigation returns **sparse** changed MODEL images and canonical
+SHA-256 digests rather than requiring full model downloads. See
+[current History](history-contract.md),
+[sparse transport](history-transport.md) and
+[remaining acceptance](history-roadmap.md).
 Actual cross-process recovery acceptance remains work in the
 [remaining integration roadmap](roadmap.md).
 

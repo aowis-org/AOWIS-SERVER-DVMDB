@@ -8,11 +8,13 @@ the draft rebases; archived actions are not.
 
 The backend provides read-only HTTP timelines and fenced HTTP/native
 selection of archived Commit boundaries and retained active journal actions
-for one existing hydraulic network. V9 also supports safe position-zero
-handoff across Commit boundaries while preserving the original Redo journal.
-The GUI dock uses these HTTP operations. A MODEL Save from a verified archived
-coordinate starts a fresh logical action lane; Qt end-to-end acceptance
-remains pending. See the
+for one unambiguous hydraulic network. It supports safe position-zero
+handoff across Commit boundaries while preserving original Redo frames.
+The GUI dock uses these HTTP operations; a MODEL Save from a verified
+archived coordinate starts a fresh logical action path. Sparse navigation,
+SHA-256 reconciliation and the client-side restart intent are explained in
+[History transport](history-transport.md). Full process-kill and cross-platform
+acceptance remain separate. See the
 [History contract](history-contract.md) and [remaining History roadmap](history-roadmap.md).
 
 ## Permanent local-Commit archive
@@ -112,7 +114,7 @@ For action-boundary navigation the service verifies the draft's private
 role, leased session/fencing token, generation and current committed HEAD;
 checks the revision's indexed archive/operation and action coordinate
 under locks; then replaces the **whole** candidate overlay and publishes
-the V9 cursor in the same durable metadata update. Repeating the identical
+the durable cursor in the same durable metadata update. Repeating the identical
 operation UUID/parameters, including after restart, does not increment
 generation twice. A new MODEL Save at a verified archived selection atomically records its
 logical fork source and invalidates abandoned Redo; local Commit preserves
@@ -161,22 +163,20 @@ DVMDB's multi-network storage capability is unchanged.
   Save behind the tip branches the journal: retains the selected prefix,
   replaces the redo tail with new actions, and publishes the model candidate
   and journal metadata together. Commit still refuses a non-tip cursor.
-- Remaining scope: multi-network action navigation is deferred, and unborn
-  member deletions without exact original membership-order provenance are
-  refused. Durable navigation-event provenance and full GUI/HTTP restart
-  acceptance remain outstanding. The
-  existing HTTP History navigation route now also accepts an explicit archived
-  revision ID to select a verified committed action boundary when no active
-  MODEL journal is present. The server now resolves eligible adjacent actions across a Commit marker. The HTTP Save path needs end-to-end Undo → new Save qualification
-  before the feature is considered GUI-ready.
+- The remaining scope is deliberate: multi-network action navigation is
+  deferred, and unborn member deletions without exact original membership
+  order remain ineligible. HTTP active/archived action selection and adjacent
+  cross-Commit coordinates are implemented. End-to-end editor, power-loss
+  and browser storage acceptance are tracked in
+  [History acceptance](history-roadmap.md).
 
-See [working-copy storage](storage-formats.md#private-drafts-aowis-working-copy-8)
+See [working-copy storage](storage-formats.md#private-drafts-aowis-working-copy-10)
 for the persisted cursor fields and [working copies](working-copies.md) for
 the ordinary Save/Commit contract.
 
 ## Historical action forks
 
-V9 private drafts persist an exact `fork-revision`, `fork-action-position`
+Private drafts persist an exact `fork-revision`, `fork-action-position`
 and `fork-archive-operation` when the first new MODEL edit follows an Undo
 into an archived Commit. The old draft journal's abandoned redo tail is
 atomically replaced; old committed revisions and action archives stay
@@ -202,4 +202,7 @@ the existing durable same-UUID sparse navigation replay returns the actual
 change set. If the operation was never published, the GUI retries that same
 UUID only when the entire original source state still agrees. Any other
 state divergence blocks editing. There is no new native storage format.
-Recovery while the GUI process is closed remains a separate capability.
+The GUI now persists a client-side pending navigation intent, allowing
+reconciliation after a GUI process restart if its local queue directory is
+durable. This does not change DVMDB's native storage format; see
+[History transport](history-transport.md).

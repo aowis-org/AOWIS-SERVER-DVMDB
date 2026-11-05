@@ -46,20 +46,27 @@ separate server executable is required for Standalone.
 * **Service.** A multi-project HTTP server with bounded per-project queues,
   transfer staging budgets and explicit 409/413/503 semantics.
 
-DVMDB is **pre-release**. There is no TLS, authentication or authorization;
-keep the server on localhost or a trusted network. HTTP local Commit, saved-draft network summaries/import, permanent local-Commit
-MODEL action archives and read-only first-parent History routes are implemented.
-Native C++ can verify and atomically select certain archived hydraulic action
-boundaries with a durable V8 draft cursor. The MODEL-aware server supports
-fenced HTTP selection of active single-network actions and archived Commit
-actions. A zero-position draft journal can enter committed history without
-losing its Redo tail; the UI is still read-only pending Qt end-to-end
-acceptance and GUI wiring. **Unborn-base draft action replay remains unfinished.**
-Hydraulic solver feasibility is not a Save/Commit precondition. Real external
-GUI and embedded Standalone process-restart acceptance, whole-project
-Clone/Fetch and recoverable Publish also remain open. See the
-[integration roadmap](docs/roadmap.md), [current action history](docs/commit-action-archive.md)
-and [remaining History work](docs/history-roadmap.md).
+DVMDB is **pre-release**. It does not currently supply application-level
+TLS, authentication or authorization; writable endpoints belong on localhost
+or a trusted network. The service implements HTTP local Commit, first draft
+initialization/import, original MODEL action archives, cross-Commit
+Undo/Redo and verified **sparse History navigation**. Only changed typed
+entities and membership moves are returned with canonical SHA-256 digests,
+not a complete `NetworkHydraulic` for every action. DVMDB retains the
+prior candidate reference for idempotent same-UUID replay and exposes a
+small read-only hash/generation/History-cursor reconciliation receipt. The
+GUI also persists a navigation intent so uncertain requests can be
+reconciled across GUI process restart.
+
+The active History navigation contract targets one unambiguous hydraulic
+network, including eligible initialized unborn draft actions. Unprovable
+original membership deletions fail closed; DVMDB native storage can still
+hold multiple networks. Hydraulic solver feasibility is not required for
+Save/Commit. Real external GUI and Standalone power-loss/restart, browser
+persistence and project checkout/Fetch/Publish acceptance remain separate.
+See [documentation](docs/README.md),
+[History transport](docs/history-transport.md) and
+[remaining roadmap](docs/roadmap.md).
 
 ## Quick start
 
