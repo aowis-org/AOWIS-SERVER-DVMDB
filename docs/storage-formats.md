@@ -236,7 +236,7 @@ Hard ceilings: 64 GiB and 1,000,000 objects per bundle, 64 MiB per object;
 callers set lower `BundleLimits`. Import rules:
 [synchronization](offline-repository-synchronization.md).
 
-## Private drafts (`AOWIS-WORKING-COPY-9`)
+## Private drafts (`AOWIS-WORKING-COPY-10`)
 
 Each draft is a directory `working-copies/<draft-uuidv7>/` (mode 0700):
 
@@ -246,7 +246,7 @@ Each draft is a directory `working-copies/<draft-uuidv7>/` (mode 0700):
 * `journal-<uuidv7>` — the MODEL event journal, append-only binary.
 
 ```text
-AOWIS-WORKING-COPY-9
+AOWIS-WORKING-COPY-10
 project\t<project-uuidv7>
 branch\t<branch-uuidv7>
 base\t<revision-uuidv7|->
@@ -258,6 +258,7 @@ lease-session\t<session-uuidv7|->
 lease-token\t<token-uuidv7|->
 lease-expires\t<unix epoch ms, 0 without lease>
 candidate\t<file|->\t<changes>\t<bytes>\t<SHA-256 of the file|->
+history-source-candidate\t<file|->\t<changes>\t<bytes>\t<SHA-256 of the file|->
 journal\t<file|->\t<events>\t<acknowledged bytes>\t<chain digest|->
 last-save\t<SHA-256 fingerprint of the last event Save|->
 history-revision\t<exact checkpoint revision UUIDv7|->
@@ -270,6 +271,15 @@ fork-revision\t<archive revision where new editing path starts|->
 fork-action-position\t<archived source action boundary|->
 fork-archive-operation\t<source local Commit operation UUIDv7|->
 ```
+
+The optional `history-source-candidate` is a second **reference** to the
+previous canonical candidate file (not a second copy of its bytes). It is
+pinned by the same publication that advances History generation and cursor.
+On a retry of the most recent operation UUID/generation, DVMDB reconstructs
+the old MODEL state and regenerates the identical sparse navigation delta.
+After a newer mutation, that source file is unreferenced and safely deleted;
+the offline backup verifier includes it while referenced. This v10 pre-release
+format has no automatic migration from old draft metadata.
 
 Native checkpoint selection uses the existing atomic meta publication to persist
 the full replacement candidate and its checkpoint identity **together**.

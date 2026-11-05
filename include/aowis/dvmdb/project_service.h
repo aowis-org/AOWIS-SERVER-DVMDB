@@ -414,6 +414,11 @@ public:
     // Every draft of the root (offline tools and tests). Like the bounded
     // listing, reads only each draft's small meta record: no candidate
     // changes, no journal.
+    // Recover the pre-navigation overlay for the last published operation.
+    // Rejects stale IDs/generations; the returned source is used only for
+    // server-side sparse delta regeneration, never exposed as native records.
+    WorkingCopyInfo historyNavigationSource(std::string_view draftId,
+        std::string_view operationId, std::uint64_t sourceGeneration) const;
     std::vector<WorkingCopyInfo> listWorkingCopies() const;
     // Bounded listing: at most `limit` (1..1000) drafts after the draft UUID
     // `after`, optionally only those of one project. Reads only the meta

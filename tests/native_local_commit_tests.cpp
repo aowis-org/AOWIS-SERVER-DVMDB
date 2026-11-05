@@ -513,14 +513,33 @@ void testAtomicVerifiedActionNavigationPublication() {
                 forward.historyActionPosition == 1 &&
                 forward.candidateChanges.empty(),
                 "HIST-03c4b did not restore the terminal action boundary");
-        require(restarted.saveWorkingCopyChanges(draftId, session, newToken,
-                    2, {value}).generation == 3,
-                "HIST-03c4b follow-up ordinary Save failed");
-        const WorkingCopyInfo edited = restarted.workingCopy(draftId);
-        require(!edited.historyActionPosition &&
+        // Even at the terminal action of the current HEAD, an archived
+        // cursor must not be erased by a plain, non-reversible Save.
+        expectConflict([&] { (void)restarted.saveWorkingCopyChanges(
+            draftId, session, newToken, 2, {value}); });
+        const WorkingCopyInfo protectedCursor = restarted.workingCopy(draftId);
+        require(protectedCursor.generation == 2 &&
+                protectedCursor.historyActionPosition == 1 &&
+                protectedCursor.historyArchiveCommitOperationId == archiveId,
+                "HIST-03c4b rejected plain Save changed the archived cursor");
+
+        // New edits from a verified archived action boundary must use the
+        // original reversible MODEL transaction path. This creates a durable
+        // logical fork, leaving the immutable source archive untouched.
+        const ModelChange changed = changeWithValue(42);
+        const aowis::dvmdb::Bytes editFrame = aowis::dvmdb::test::editEvent(
+            UuidV7::generate(), changed.key, {41}, {42});
+        const WorkingCopyInfo edited = restarted.saveWorkingCopyTransactions(
+            draftId, session, newToken, 2, {changed}, {editFrame});
+        require(edited.generation == 3 && edited.journalCount == 1 &&
+                edited.historyForkRevisionId == revision.toString() &&
+                edited.historyForkActionPosition == 1 &&
+                edited.historyForkArchiveCommitOperationId == archiveId &&
+                !edited.historyActionPosition &&
                 !edited.historyArchiveCommitOperationId &&
-                !edited.historyCheckpointRevisionId,
-                "HIST-03c4b ordinary Save failed to clear action navigation cursor");
+                !edited.historyCheckpointRevisionId &&
+                restarted.localCommitActionHistory(archiveId).actions.size() == 1,
+                "HIST-03c4b MODEL Save did not preserve the archived fork origin");
     }
 }
 
@@ -615,14 +634,24 @@ void testAtomicHistoryCheckpointNavigation() {
             3, latest, first);
         require(older.generation == 4 && older.historyCheckpointRevisionId == firstId,
                 "HIST-03b navigation failed after lease rotation");
-        require(reopened.saveWorkingCopyChanges(draftId, session, rotatedToken,
-                    4, {unrelated}).generation == 5,
-                "HIST-03b post-navigation normal Save failed");
-        const WorkingCopyInfo edited = reopened.workingCopy(draftId);
-        require(!edited.historyCheckpointRevisionId &&
-                !edited.lastHistoryNavigationOperationId &&
-                !edited.lastHistoryNavigationSourceGeneration,
-                "HIST-03b normal edit left a stale exact-checkpoint cursor");
+        // The native checkpoint navigator has no MODEL action coordinate.
+        // It may inspect/reconstruct a checkpoint but cannot silently turn
+        // it into a new editing lineage via a plain overlay Save.
+        expectConflict([&] { (void)reopened.saveWorkingCopyChanges(
+            draftId, session, rotatedToken, 4, {unrelated}); });
+        const WorkingCopyInfo protectedCheckpoint = reopened.workingCopy(draftId);
+        require(protectedCheckpoint.generation == 4 &&
+                protectedCheckpoint.historyCheckpointRevisionId == firstId &&
+                protectedCheckpoint.lastHistoryNavigationOperationId &&
+                protectedCheckpoint.lastHistoryNavigationSourceGeneration == 3 &&
+                protectedCheckpoint.journalCount == 0,
+                "HIST-03b rejected Save changed the selected checkpoint");
+        const aowis::dvmdb::Bytes checkpointEvent = aowis::dvmdb::test::editEvent(
+            UuidV7::generate(), unrelated.key, {}, {99});
+        expectConflict([&] { (void)reopened.saveWorkingCopyTransactions(
+            draftId, session, rotatedToken, 4, {unrelated}, {checkpointEvent}); });
+        require(reopened.workingCopy(draftId).generation == 4,
+                "HIST-03b checkpoint-only MODEL Save changed the draft");
         expectConflict([&] { (void)reopened.navigateHistoryCheckpoint(
             backOperation, draftId, session, rotatedToken, 2, latest, latest); });
         const std::string journalDraft = reopened.createWorkingCopy(

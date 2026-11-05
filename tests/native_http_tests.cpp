@@ -2898,10 +2898,12 @@ void exerciseHydraulicDraftMembershipHttp() {
           "HDB-03d incremental Redo sent unrelated network content or invalid membership delta");
     const Response sparseReplay = client.call("POST", navigatePath, sparseRedoRequest);
     check(sparseReplay.status == 200 && sparseReplay.json.value("generation") == "5" &&
-          sparseReplay.json.value("deltaRecoveryRequired") == QJsonValue(true) &&
-          !sparseReplay.json.contains("historyDelta") &&
+          !sparseReplay.json.contains("deltaRecoveryRequired") &&
+          sparseReplay.json.value("historyDelta") == QJsonValue(sparseDelta) &&
+          !sparseReplay.json.contains("payloadBase64") &&
+          !sparseReplay.json.contains("changes") &&
           client.call("GET", cursorPath).json.value("generation") == "5",
-          "HDB-03d lost-reply replay advanced the cursor or fabricated a source delta");
+          "HDB-03d lost-acknowledgement retry did not regenerate the same sparse delta");
     check(client.call("POST", navigatePath, navBody(
               QString::fromStdString(native::UuidV7::generate().toString()), "5", "2")).status == 200,
           "HDB-03d HTTP Redo rejected a valid original action boundary");
@@ -2914,6 +2916,8 @@ void exerciseHydraulicDraftMembershipHttp() {
           client.call("GET", cursorPath).json.value("actionPosition") == "2" &&
           service.optionalHead(project.id, "main") == base,
           "HDB-03d HTTP Redo did not recover terminal network without moving HEAD");
+    check(client.call("POST", navigatePath, sparseRedoRequest).status == 409,
+          "HDB-03d stale retry recovered after a newer navigation replaced its receipt");
     check(client.call("POST", navigatePath, navBody(
               QString::fromStdString(native::UuidV7::generate().toString()), "6", "3")).status == 409,
           "HDB-03d HTTP accepted navigation past journal tip");
@@ -3218,6 +3222,12 @@ void exerciseHydraulicDraftMembershipHttp() {
               finalBytes &&
           archivedDelta.value("moves").toArray().isEmpty(),
           "HDB-03f cross-Commit History navigation did not return a sparse MODEL delta");
+    const Response archivedReplay = archiveClient.call("POST", archivedPath, archivedDeltaRequest);
+    check(archivedReplay.status == 200 &&
+          archivedReplay.json.value("historyDelta") == QJsonValue(archivedDelta) &&
+          archivedReplay.json.value("generation") == crossedForward.json.value("generation") &&
+          !archivedReplay.json.contains("payloadBase64"),
+          "HDB-03f archived lost-acknowledgement retry changed the MODEL delta");
     const Response finalNetworkView = archiveClient.call("GET", path + "/networks/" + networkId);
     const std::optional<NetworkHydraulic> finalNetworkState =
         native::ModelCodec<NetworkHydraulic>::decode(QByteArray::fromBase64(

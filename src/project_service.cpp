@@ -471,7 +471,7 @@ ProjectService::Project::Project(ProjectInfo value) : info(std::move(value)) {}
 namespace {
 // Private draft format (see docs/storage-formats.md). Earlier
 // pre-release formats are rejected, never migrated.
-constexpr std::string_view workingCopyMarker = "AOWIS-WORKING-COPY-9\n";
+constexpr std::string_view workingCopyMarker = "AOWIS-WORKING-COPY-10\n";
 constexpr std::size_t workingCopyMaxBytes = 8 * 1024 * 1024;
 constexpr std::size_t workingCopyMaxChanges = 20000;
 constexpr std::size_t workingCopyMaxEvents = 4096;
@@ -608,7 +608,7 @@ std::string saveBatchFingerprint(const std::vector<ModelChange>& changes,
 }
 
 // ---------------------------------------------------------------------------
-// Draft storage (AOWIS-WORKING-COPY-9). One directory per draft:
+// Draft storage (AOWIS-WORKING-COPY-10). One directory per draft:
 //   meta                  small text record, atomically replaced; authoritative
 //   candidate-<uuidv7>    immutable binary candidate overlay (sorted changes)
 //   journal-<uuidv7>      append-only binary MODEL event journal
@@ -630,6 +630,13 @@ struct DraftFiles {
     std::uint64_t candidateCount = 0;
     std::uint64_t candidateBytes = 0;
     std::string candidateDigest = "-";    // SHA-256 of the file, hex
+    // The previous candidate is pinned by the same durable meta publication
+    // as a History navigation. Exact retries can reconstruct the original
+    // source without transferring a full network or copying its overlay.
+    std::string navigationSourceCandidate = "-";
+    std::uint64_t navigationSourceCount = 0;
+    std::uint64_t navigationSourceBytes = 0;
+    std::string navigationSourceDigest = "-";
     std::string journal = "-";            // file name or "-" for an empty journal
     std::uint64_t journalBytes = 0;       // acknowledged prefix length
     std::string journalDigest = "-";      // chained SHA-256 over the frames, hex
@@ -677,6 +684,9 @@ std::string metaBody(const WorkingCopyInfo& draft, const DraftFiles& files) {
         + "lease-expires\t" + std::to_string(draft.leaseExpiresAtMs) + "\n"
         + "candidate\t" + files.candidate + "\t" + std::to_string(files.candidateCount) + "\t"
             + std::to_string(files.candidateBytes) + "\t" + files.candidateDigest + "\n"
+        + "history-source-candidate\t" + files.navigationSourceCandidate + "\t"
+            + std::to_string(files.navigationSourceCount) + "\t"
+            + std::to_string(files.navigationSourceBytes) + "\t" + files.navigationSourceDigest + "\n"
         + "journal\t" + files.journal + "\t" + std::to_string(draft.journalCount) + "\t"
             + std::to_string(files.journalBytes) + "\t" + files.journalDigest + "\n"
         + "last-save\t" + draft.lastSaveFingerprint.value_or("-") + "\n"
@@ -887,6 +897,20 @@ std::optional<StoredDraft> readDraftMeta(const std::filesystem::path& directory)
             stored.files.candidateBytes == 0 && candidate[3] == "-") ||
            (candidate[0] != "-" && stored.files.candidateCount > 0 && hexDigest(candidate[3]))),
           "invalid draft candidate reference");
+    const std::vector<std::string> sourceCandidate = split(nextField("history-source-candidate"));
+    check(sourceCandidate.size() == 4 && fileReference(sourceCandidate[0], "candidate-"),
+          "invalid history source candidate reference");
+    stored.files.navigationSourceCandidate = sourceCandidate[0];
+    stored.files.navigationSourceCount = decimalField(sourceCandidate[1]);
+    stored.files.navigationSourceBytes = decimalField(sourceCandidate[2]);
+    stored.files.navigationSourceDigest = sourceCandidate[3];
+    check(stored.files.navigationSourceCount <= workingCopyMaxChanges &&
+          stored.files.navigationSourceBytes <= workingCopyMaxBytes &&
+          ((sourceCandidate[0] == "-" && stored.files.navigationSourceCount == 0 &&
+            stored.files.navigationSourceBytes == 0 && sourceCandidate[3] == "-") ||
+           (sourceCandidate[0] != "-" && stored.files.navigationSourceCount > 0 &&
+            hexDigest(sourceCandidate[3]))),
+          "invalid history source candidate reference");
     const std::vector<std::string> journal = split(nextField("journal"));
     check(journal.size() == 4 && fileReference(journal[0], "journal-"),
           "invalid draft journal reference");
@@ -962,6 +986,13 @@ std::optional<StoredDraft> readDraftMeta(const std::filesystem::path& directory)
                   (draft.journalCount == 0 && !draft.lastSaveFingerprint)),
               "invalid history navigation generation or journal state");
     }
+    // A source overlay is meaningful only while its exact navigation
+    // operation remains the most recent acknowledged generation transition.
+    check(stored.files.navigationSourceCandidate == "-" ||
+          (draft.lastHistoryNavigationOperationId &&
+           draft.lastHistoryNavigationSourceGeneration &&
+           *draft.lastHistoryNavigationSourceGeneration + 1 == draft.generation),
+          "orphaned history source candidate reference");
     std::string extra;
     check(!std::getline(lines, extra) && lines.eof(), "trailing working-copy record content");
     check((draft.journalCount == 0 && !draft.lastSaveFingerprint) ||
@@ -1144,9 +1175,37 @@ void updateDraft(const std::filesystem::path& directory, StoredDraft& stored,
                  const WorkingCopyInfo& next, const DraftUpdate& update) {
     DraftFiles files = stored.files;
     std::vector<std::filesystem::path> superseded;
+    // Only a fresh, generation-fenced History navigation pins the preceding
+    // candidate. A lease renewal preserves the receipt; any later Save or
+    // Commit invalidates it. The old candidate file is *referenced*, not
+    // duplicated, so large candidates incur no additional write per Undo.
+    const bool navigationPublished = next.lastHistoryNavigationOperationId &&
+        next.lastHistoryNavigationOperationId != stored.info.lastHistoryNavigationOperationId &&
+        next.lastHistoryNavigationSourceGeneration == stored.info.generation &&
+        stored.info.generation != std::numeric_limits<std::uint64_t>::max() &&
+        next.generation == stored.info.generation + 1;
+    const bool sameNavigation = next.lastHistoryNavigationOperationId &&
+        next.lastHistoryNavigationOperationId == stored.info.lastHistoryNavigationOperationId &&
+        next.generation == stored.info.generation;
+    if (files.navigationSourceCandidate != "-" && !sameNavigation)
+        superseded.push_back(directory / files.navigationSourceCandidate);
+    if (navigationPublished) {
+        files.navigationSourceCandidate = stored.files.candidate;
+        files.navigationSourceCount = stored.files.candidateCount;
+        files.navigationSourceBytes = stored.files.candidateBytes;
+        files.navigationSourceDigest = stored.files.candidateDigest;
+    } else if (!sameNavigation) {
+        files.navigationSourceCandidate = "-";
+        files.navigationSourceCount = 0;
+        files.navigationSourceBytes = 0;
+        files.navigationSourceDigest = "-";
+    }
     if (update.candidate) {
         if (stored.files.candidate != "-") superseded.push_back(directory / stored.files.candidate);
-        files = DraftFiles{"-", 0, 0, "-", files.journal, files.journalBytes, files.journalDigest};
+        files.candidate = "-";
+        files.candidateCount = 0;
+        files.candidateBytes = 0;
+        files.candidateDigest = "-";
         if (!update.candidate->empty()) {
             files.candidate = "candidate-" + UuidV7::generate().toString();
             writeNewFile(directory / files.candidate, update.candidateBytes);
@@ -1176,7 +1235,12 @@ void updateDraft(const std::filesystem::path& directory, StoredDraft& stored,
     publishMeta(directory, next, files);
     stored.info = next;
     stored.files = files;
-    for (const std::filesystem::path& path : superseded) (void)::unlink(path.c_str());
+    for (const std::filesystem::path& path : superseded) {
+        const std::string name = path.filename().string();
+        if (name != files.candidate && name != files.navigationSourceCandidate &&
+            name != files.journal)
+            (void)::unlink(path.c_str());
+    }
 }
 
 // Creates a new draft directory with an empty overlay and journal. The
@@ -1231,7 +1295,8 @@ void tidyDraftDirectory(const std::filesystem::path& directory) {
     for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(directory)) {
         const std::string name = entry.path().filename().string();
         const bool unreferenced =
-            (name.starts_with("candidate-") && name != stored->files.candidate) ||
+            (name.starts_with("candidate-") && name != stored->files.candidate &&
+             name != stored->files.navigationSourceCandidate) ||
             (name.starts_with("journal-") && name != stored->files.journal);
         if (!(name.starts_with(".meta-") || unreferenced) || entry.is_symlink() ||
             !entry.is_regular_file())
@@ -2396,6 +2461,43 @@ WorkingCopyInfo ProjectService::workingCopy(std::string_view draftId, bool inclu
     checkHealthy();
     return loadDraft(this->root_, draftId,
                      includeJournal ? DraftLoad::Full : DraftLoad::Candidate).info;
+}
+
+// Rehydrate the exact source candidate of the most recent acknowledged
+// navigation. The source file is retained by its published draft meta, so a
+// lost reply (including one across a process restart) can receive the same
+// sparse delta when the original UUID and generation are resent.
+WorkingCopyInfo ProjectService::historyNavigationSource(
+        std::string_view draftId, std::string_view operationId,
+        std::uint64_t sourceGeneration) const {
+    if (!UuidV7::parse(draftId) || !UuidV7::parse(operationId))
+        throw ProjectError(ProjectErrorKind::InvalidInput,
+                           "invalid history recovery identity");
+    const std::shared_ptr<std::mutex> lock = draftLock(draftId);
+    std::lock_guard<std::mutex> guard(*lock);
+    checkHealthy();
+    const StoredDraft stored = loadDraft(this->root_, draftId, DraftLoad::Meta);
+    if (!stored.info.lastHistoryNavigationOperationId ||
+        *stored.info.lastHistoryNavigationOperationId != operationId ||
+        stored.info.lastHistoryNavigationSourceGeneration != sourceGeneration ||
+        sourceGeneration == std::numeric_limits<std::uint64_t>::max() ||
+        stored.info.generation != sourceGeneration + 1)
+        throw ProjectError(ProjectErrorKind::Conflict,
+                           "history navigation recovery receipt is no longer current");
+    WorkingCopyInfo source = stored.info;
+    source.generation = sourceGeneration;
+    source.candidateChanges.clear();
+    if (stored.files.navigationSourceCandidate != "-") {
+        const std::filesystem::path path = workingCopyDirectory(this->root_) /
+            std::string(draftId) / stored.files.navigationSourceCandidate;
+        const std::optional<Bytes> bytes = readPrefix(path, stored.files.navigationSourceBytes);
+        check(bytes.has_value(), "missing retained history source candidate");
+        const Hash hash = sha256(*bytes);
+        check(hexBytes(hash.data(), hash.size()) == stored.files.navigationSourceDigest,
+              "history source candidate checksum mismatch");
+        source.candidateChanges = decodeCandidate(*bytes, stored.files.navigationSourceCount);
+    }
+    return source;
 }
 
 std::vector<WorkingCopyInfo> ProjectService::listWorkingCopies() const {

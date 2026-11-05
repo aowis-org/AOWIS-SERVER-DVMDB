@@ -1950,9 +1950,15 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             // fence in the native writer proves this was the actual source.
             std::optional<NetworkHydraulic> before;
             if (networkId) {
-                const WorkingCopyInfo source = service.workingCopy(draftId, false);
-                if (source.generation == generation)
+                const WorkingCopyInfo current = service.workingCopy(draftId, false);
+                if (current.generation == generation) {
+                    before = historyNetworkAtDraft(service, current, *networkId);
+                } else if (current.lastHistoryNavigationOperationId == operationId &&
+                           current.lastHistoryNavigationSourceGeneration == generation) {
+                    const WorkingCopyInfo source = service.historyNavigationSource(
+                        draftId, operationId, generation);
                     before = historyNetworkAtDraft(service, source, *networkId);
+                }
             }
             QString reason;
             const std::optional<WorkingCopyInfo> result = archived

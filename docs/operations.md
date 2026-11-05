@@ -98,7 +98,7 @@ move:
 
 Before the first release a new build may reject data written by an older
 pre-release build outright ([format policy](format-compatibility.md)); there
-is no migration. In particular, the current `AOWIS-WORKING-COPY-9` draft
+is no migration. In particular, the current `AOWIS-WORKING-COPY-10` draft
 metadata refuses earlier V8 drafts. When upgrading a disposable development
 root, stop all users and move the outdated `working-copies/` directory aside
 for inspection **only if you are willing to abandon those drafts**. Do not

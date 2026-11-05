@@ -149,9 +149,10 @@ def tracking_metadata(root):
 
 
 def working_copy_records(root):
-    """Verify every published private draft (AOWIS-WORKING-COPY-9).
+    """Verify every published private draft (AOWIS-WORKING-COPY-10).
 
-    Returns {draft id: (meta, candidate bytes, acknowledged journal prefix)}
+    Returns {draft id: (meta, candidate bytes, pinned navigation source,
+    acknowledged journal prefix)}
     so a copy can be compared with its source. Unreferenced files that a
     crash left behind are allowed and ignored, exactly as the service does.
     """
@@ -220,11 +221,11 @@ def working_copy_records(root):
         require("meta" in names and meta_path.stat().st_size <= 4096,
                 f"missing or oversized draft meta: {meta_path}")
         meta = meta_path.read_bytes()
-        require(meta.startswith(b"AOWIS-WORKING-COPY-9\n") and meta.endswith(b"\n"),
+        require(meta.startswith(b"AOWIS-WORKING-COPY-10\n") and meta.endswith(b"\n"),
                 f"invalid working-copy record format: {meta_path}")
         lines = meta.decode("ascii", errors="replace").split("\n")[1:-1]
         fields = ["project", "branch", "base", "session", "generation", "dirty", "validation",
-                  "lease-session", "lease-token", "lease-expires", "candidate", "journal",
+                  "lease-session", "lease-token", "lease-expires", "candidate", "history-source-candidate", "journal",
                   "last-save", "history-revision", "history-operation",
                   "history-source-generation", "history-action-position",
                   "history-archive-operation", "draft-action-position",
@@ -246,14 +247,16 @@ def working_copy_records(root):
                 (uuid(owner) and uuid(token) and expires != 0),
                 f"invalid draft lease state: {meta_path}")
         candidate, changes, candidate_size, candidate_hash = reference(values[10], "candidate-", meta_path)
-        journal, events, journal_size, journal_hash = reference(values[11], "journal-", meta_path)
+        navigation_source, source_count, source_size, source_hash = reference(
+            values[11], "candidate-", meta_path)
+        journal, events, journal_size, journal_hash = reference(values[12], "journal-", meta_path)
         require(changes <= 20000 and events <= 4096 and (values[5] == "1") == (changes != 0),
                 f"invalid draft change/event counts: {meta_path}")
-        last = values[12]
+        last = values[13]
         require((events == 0 and last == "-") or (events > 0 and generation > 0 and digest(last)),
                 f"invalid last-save hash: {meta_path}")
-        revision, operation, source, position, archive, draft_position = values[13:19]
-        fork_revision, fork_position, fork_archive = values[19:22]
+        revision, operation, source, position, archive, draft_position = values[14:20]
+        fork_revision, fork_position, fork_archive = values[20:23]
         fork = ((fork_revision == "-" and fork_position == "-" and fork_archive == "-") or
                 (uuid(fork_revision) and fork_position != "-" and
                  decimal(fork_position) <= 4096 and uuid(fork_archive) and events > 0))
@@ -273,25 +276,35 @@ def working_copy_records(root):
                  position == "-" and archive == "-" and draft_position == "-")
         require(empty or checkpoint or active,
                 f"invalid draft history cursor: {meta_path}")
+        require(navigation_source == "-" or (operation != "-" and source != "-" and
+                    decimal(source) + 1 == generation),
+                f"orphaned navigation source candidate: {meta_path}")
+        require(source_count <= 20000, f"oversized navigation source: {meta_path}")
 
-        candidate_bytes = b""
-        if candidate != "-":
-            candidate_bytes = prefix_of(entry / candidate, candidate_size)
-            require(hashlib.sha256(candidate_bytes).hexdigest() == candidate_hash and
-                    candidate_bytes[:5] == b"AOWC\x01", f"invalid draft candidate file: {entry / candidate}")
+        def verified_candidate(name, count, length, hashed):
+            if name == "-":
+                return b""
+            path = entry / name
+            data = prefix_of(path, length)
+            require(hashlib.sha256(data).hexdigest() == hashed and
+                    data[:5] == b"AOWC\x01", f"invalid draft candidate file: {path}")
             offset, previous = 5, None
-            for _ in range(changes):
-                require(len(candidate_bytes) - offset >= 20, f"truncated draft candidate: {entry / candidate}")
-                key = candidate_bytes[offset:offset + 16]
-                size = int.from_bytes(candidate_bytes[offset + 16:offset + 20], "big")
-                require(previous is None or previous < key, f"unsorted draft candidate: {entry / candidate}")
+            for _ in range(count):
+                require(len(data) - offset >= 20, f"truncated draft candidate: {path}")
+                key = data[offset:offset + 16]
+                size = int.from_bytes(data[offset + 16:offset + 20], "big")
+                require(previous is None or previous < key, f"unsorted draft candidate: {path}")
                 previous, offset = key, offset + 20
                 if size != 0xffffffff:
-                    require(len(candidate_bytes) - offset >= size,
-                            f"truncated draft candidate: {entry / candidate}")
-                    valid_model_record(candidate_bytes[offset:offset + size], entry / candidate)
+                    require(len(data) - offset >= size, f"truncated draft candidate: {path}")
+                    valid_model_record(data[offset:offset + size], path)
                     offset += size
-            require(offset == len(candidate_bytes), f"trailing draft candidate bytes: {entry / candidate}")
+            require(offset == len(data), f"trailing draft candidate bytes: {path}")
+            return data
+
+        candidate_bytes = verified_candidate(candidate, changes, candidate_size, candidate_hash)
+        navigation_source_bytes = verified_candidate(navigation_source, source_count,
+                                                       source_size, source_hash)
 
         journal_bytes = b""
         if journal != "-":
@@ -312,7 +325,7 @@ def working_copy_records(root):
                 offset += 20 + size
             require(len(seen) == events and chain.hex() == journal_hash,
                     f"draft journal count or digest mismatch: {entry / journal}")
-        records[entry.name] = (meta, candidate_bytes, journal_bytes)
+        records[entry.name] = (meta, candidate_bytes, navigation_source_bytes, journal_bytes)
     return records
 
 

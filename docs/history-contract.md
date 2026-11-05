@@ -81,10 +81,14 @@ the canonical source and destination `NetworkHydraulic`, only changed entity
 before/after images (including root metadata), and sparse membership moves.
 Unchanged entities and the complete network are not transmitted. The GUI must
 check the source digest and every before-image, reconstruct a temporary copy,
-verify the destination digest, then publish it locally. A duplicate operation
-acknowledgement can confirm the durable generation but cannot currently
-reproduce the old delta; `deltaRecoveryRequired` demands an explicit reload.
-This is a failure-recovery limitation, not permission to issue a second Undo.
+verify the destination digest, then publish it locally. DVMDB retains the preceding native candidate overlay file as an atomic
+reference in the navigation's working-copy metadata. An identical retry of
+the last operation UUID and source generation reconstructs the exact source,
+then returns the same sparse delta after a lost HTTP acknowledgement or a
+DVMDB restart, without transmitting the full model. A subsequent new Save
+or navigation expires the retained source; a stale replay fails closed.
+`deltaRecoveryRequired` is reserved for requests whose source state cannot
+be proven and must not be treated as permission to issue a different Undo.
 
 Navigation is a server-owned transaction, **not** a pair of separate
 "write model" and "move cursor" requests. Each mutation requires a live
@@ -124,10 +128,12 @@ non-event Save and unverified origins still fail closed.
 
 The GUI History dock is wired to the HTTP cursor and action navigation. It
 must only enable actions that DVMDB offers as verified adjacent coordinates,
-and must reload the authoritative network after successful navigation.
+and must verify and apply the sparse navigation delta against its cached
+canonical model after successful navigation. An initial open/recovery from
+an explicitly inconsistent state may still require model hydration.
 Imported, old and merge checkpoints must be labelled honestly rather than
 shown as sequences of invented edits.
 
 No automatic compatibility migration is provided for pre-release draft
-formats. The current working-copy marker is `AOWIS-WORKING-COPY-9`;
+formats. The current working-copy marker is `AOWIS-WORKING-COPY-10`;
 recreate older disposable drafts. See [storage formats](storage-formats.md).

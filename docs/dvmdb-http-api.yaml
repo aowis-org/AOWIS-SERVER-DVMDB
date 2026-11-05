@@ -274,10 +274,12 @@ paths:
         idempotent. When networkId is provided the first successful response
         includes historyDelta (canonical source/destination SHA-256, changed
         entity before/after images, and sparse membership moves) instead of
-        an entire NetworkHydraulic. A same-operation retry after publication
-        returns the published draft with deltaRecoveryRequired=true, because
-        the previous network image is no longer retained as a response cache;
-        the client must reconcile its state rather than apply a guessed delta.
+        an entire NetworkHydraulic. The preceding native candidate is kept
+        as an atomically pinned file reference with the operation receipt.
+        An identical retry of the most recent operation UUIDv7 and source
+        generation returns the same verified sparse delta, even after a
+        server restart. A later Save/navigation expires the old receipt;
+        stale retries must fail closed, not fabricate a delta.
         Include X-AOWIS-Expected-Repository-Id for repository pinning.
       requestBody:
         required: true
@@ -297,7 +299,7 @@ paths:
                 revisionId: {type: string, format: uuid, description: Optional archived local Commit revision UUIDv7; when supplied expectedHead must be non-null}
                 networkId: {type: string, format: uuid, description: Optional selected hydraulic network UUIDv7; request verified sparse historyDelta with no full model payload}
       responses:
-        '200': {description: Durable working-copy generation and cursor; with networkId, a verified sparse historyDelta or deltaRecoveryRequired on same-operation retry; without networkId, no model payload}
+        '200': {description: Durable working-copy generation and cursor; with networkId, a verified sparse historyDelta including exact idempotent retries; without networkId, no model payload}
         '400': {description: Malformed operation UUID, field type, action position or expected HEAD}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {description: Stale generation/HEAD/lease, conflicting retry, unsupported model shape or incomplete MODEL action proof; no mutation}

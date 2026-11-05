@@ -22,7 +22,7 @@ behavior. This work is part of the [overall DVMDB roadmap](roadmap.md).
 - Native fenced publication of a verified action boundary into a private draft
   with an atomically persisted coordinate, generation CAS, branch-HEAD pin and
   same-operation retry after restart. Draft metadata uses
-  `AOWIS-WORKING-COPY-9`.
+  `AOWIS-WORKING-COPY-10`.
 
 An internal MODEL-aware active-draft adapter now replays and validates all
 retained journal frames for **one existing hydraulic network** from immutable
