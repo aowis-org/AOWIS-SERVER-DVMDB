@@ -271,7 +271,14 @@ paths:
         deferred. Eligible position-zero active journals can cross into the
         archived HEAD and return without losing Redo. Immutable HEAD never moves.
         Retrying an identical operation UUIDv7 and original request is
-        idempotent. Include X-AOWIS-Expected-Repository-Id for repository pinning.
+        idempotent. When networkId is provided the first successful response
+        includes historyDelta (canonical source/destination SHA-256, changed
+        entity before/after images, and sparse membership moves) instead of
+        an entire NetworkHydraulic. A same-operation retry after publication
+        returns the published draft with deltaRecoveryRequired=true, because
+        the previous network image is no longer retained as a response cache;
+        the client must reconcile its state rather than apply a guessed delta.
+        Include X-AOWIS-Expected-Repository-Id for repository pinning.
       requestBody:
         required: true
         content:
@@ -288,8 +295,9 @@ paths:
                 expectedHead: {type: [string, 'null'], format: uuid}
                 actionPosition: {type: string, pattern: '^[0-9]{1,20}$', description: Explicit action boundary, zero to journalCount (draft) or archived actionCount (when revisionId is supplied)}
                 revisionId: {type: string, format: uuid, description: Optional archived local Commit revision UUIDv7; when supplied expectedHead must be non-null}
+                networkId: {type: string, format: uuid, description: Optional selected hydraulic network UUIDv7; request verified sparse historyDelta with no full model payload}
       responses:
-        '200': {description: Durable working copy with generation and draftActionPosition plus nullable archivedRevisionId and archivedActionPosition; reload canonical network from the saved draft}
+        '200': {description: Durable working-copy generation and cursor; with networkId, a verified sparse historyDelta or deltaRecoveryRequired on same-operation retry; without networkId, no model payload}
         '400': {description: Malformed operation UUID, field type, action position or expected HEAD}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {description: Stale generation/HEAD/lease, conflicting retry, unsupported model shape or incomplete MODEL action proof; no mutation}
@@ -886,61 +894,6 @@ paths:
                   originBranchId: {type: [string, 'null'], format: uuid}
                   forkRevisionId: {type: [string, 'null'], format: uuid}
         '404': {$ref: '#/components/responses/NotFound'}
-  /projects/{projectId}/branch-ids/{branchId}/delete:
-    parameters:
-      - {$ref: '#/components/parameters/ProjectId'}
-      - {name: branchId, in: path, required: true, schema: {type: string, format: uuid}}
-    post:
-      operationId: deleteBranchById
-      description: |
-        Delete a branch reference, including unborn HEAD. Require an exact
-        expected HEAD (JSON null for unborn). Revisions still referenced by
-        other branches or merges remain immutable; this operation never prunes
-        their content. Saved working copies block the operation unless discardWorkingCopies
-        is explicitly true. When true, saved draft state and Undo/Redo journals
-        for this branch are discarded before deleting its reference.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [expectedHead]
-              properties:
-                expectedHead: {type: [string, 'null'], format: uuid}
-                discardWorkingCopies: {type: boolean, default: false}
-      responses:
-        '200': {description: '{"deleted":true}'}
-        '409': {$ref: '#/components/responses/Conflict'}
-  /projects/{projectId}/branch-ids/{branchId}/truncate:
-    parameters:
-      - {$ref: '#/components/parameters/ProjectId'}
-      - {name: branchId, in: path, required: true, schema: {type: string, format: uuid}}
-    post:
-      operationId: truncateBranchById
-      description: |
-        Truncate the selected branch's first-parent history starting with
-        firstRemoved, using a strict expected HEAD CAS. A root or first local
-        fork commit deletion removes the branch. Other branches and merge
-        ancestries are preserved. Saved working copies block the write unless
-        discardWorkingCopies is true, which explicitly discards those drafts
-        and their Undo/Redo journals.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [expectedHead, firstRemoved]
-              properties:
-                expectedHead: {type: string, format: uuid}
-                firstRemoved: {type: string, format: uuid}
-                discardWorkingCopies: {type: boolean, default: false}
-      responses:
-        '200': {description: '{"branchDeleted":true|false}'}
-        '409': {$ref: '#/components/responses/Conflict'}
   /projects/{projectId}/branches/{branch}/head:
     parameters:
       - {$ref: '#/components/parameters/ProjectId'}

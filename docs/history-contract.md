@@ -74,6 +74,18 @@ abandoned committed-action suffix. Immutable revision ancestry remains
 first-parent as before: a logical History fork never rewrites it. Active draft Save, navigation and local Commit must form one
 coherent, durable action timeline.
 
+For incremental HTTP navigation, the caller identifies the loaded
+`networkId`. DVMDB still constructs and verifies the complete native candidate
+internally, but the successful reply carries `historyDelta`: SHA-256 digests of
+the canonical source and destination `NetworkHydraulic`, only changed entity
+before/after images (including root metadata), and sparse membership moves.
+Unchanged entities and the complete network are not transmitted. The GUI must
+check the source digest and every before-image, reconstruct a temporary copy,
+verify the destination digest, then publish it locally. A duplicate operation
+acknowledgement can confirm the durable generation but cannot currently
+reproduce the old delta; `deltaRecoveryRequired` demands an explicit reload.
+This is a failure-recovery limitation, not permission to issue a second Undo.
+
 Navigation is a server-owned transaction, **not** a pair of separate
 "write model" and "move cursor" requests. Each mutation requires a live
 private-draft lease/session, expected generation, expected committed HEAD,
@@ -119,37 +131,3 @@ shown as sequences of invented edits.
 No automatic compatibility migration is provided for pre-release draft
 formats. The current working-copy marker is `AOWIS-WORKING-COPY-9`;
 recreate older disposable drafts. See [storage formats](storage-formats.md).
-
-## Branch and revision deletion (UUIDv7 branch references)
-
-An explicit branch deletion unlinks its UUID-keyed reference, with an exact
-expected HEAD UUID CAS (null for an unborn branch). Truncating a committed
-branch rewinds its ref to the first parent of the selected revision; selecting
-the root or first branch-local revision deletes the entire branch. This is not
-an all-DAG recursive deletion: immutable revisions remain in the pack and can
-still be reached through surviving merge parents or other branch references.
-
-A destructive request must explicitly set `discardWorkingCopies=true` if
-saved drafts exist. The confirmation includes those drafts and their journals;
-no separate manual discard is required. Branch deletion and draft creation
-share the project's operation mutex. Deletion takes nonblocking per-draft locks
-while holding that mutex: a concurrent Save/navigation makes deletion fail
-with a retryable busy status, avoiding an inverted-lock deadlock.
-
-The service fsyncs `history-deletions/<branch UUIDv7>` before mutating either
-the branch reference or draft records. The reference is published first; draft
-removal follows. Successful completion removes and syncs the intent. On a
-restart, the exclusive catalogue owner replays remaining intents, regardless
-of whether the previous process stopped before the ref update, after it, or
-during draft removal. This is **roll-forward recovery**, not a multi-file
-filesystem transaction: once the confirmed intent is durable, a crash can
-cause deletion to complete during restart even if the client never received
-a success response. Do not blindly retry an uncertain response; refresh the
-server's authoritative refs and drafts. Immutable revisions/merge ancestry
-are retained and synchronous pack GC is deliberately excluded.
-
-Tests cover restart replay from each persisted interruption state (including
-mid-draft cleanup), preservation of another branch's draft, idempotent reopen,
-HTTP consent/CAS/invalid revision behavior, and optional live GUI-writer →
-HTTP → DVMDB deletion/restart. Simulated interruption-state tests do not replace
-filesystem power-cut qualification on ext4/XFS.

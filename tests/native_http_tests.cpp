@@ -11,6 +11,7 @@
 #include <httplib.h>
 
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QJsonArray>
@@ -2866,9 +2867,42 @@ void exerciseHydraulicDraftMembershipHttp() {
           cursorAtBase.json.value("nextAction").toObject().value("selectionKind") == "draft" &&
           cursorAtBase.json.value("nextAction").toObject().value("actionPosition") == "1",
           "HDB-03d HTTP Undo to the immutable base failed");
+    // The delta-enabled request must return ONLY the newly restored entity,
+    // not the full NetworkHydraulic or the unchanged base member. The source
+    // and destination hashes cover the complete canonical model snapshots.
+    QJsonObject sparseRedoRequest = navBody(
+        QString::fromStdString(native::UuidV7::generate().toString()), "4", "1");
+    sparseRedoRequest.insert("networkId", networkId);
+    const Response sparseRedo = client.call("POST", navigatePath, sparseRedoRequest);
+    const QJsonObject sparseDelta = sparseRedo.json.value("historyDelta").toObject();
+    const QJsonArray sparseEdits = sparseDelta.value("edits").toArray();
+    const QJsonObject sparseInsert = sparseEdits.isEmpty() ? QJsonObject() :
+        sparseEdits.first().toObject();
+    const QString baseDigest = baseAgain ? QString::fromLatin1(QCryptographicHash::hash(
+        native::ModelCodec<NetworkHydraulic>::encode(*baseAgain),
+        QCryptographicHash::Sha256).toHex()) : QString();
+    const QString oneDigest = oneNetwork ? QString::fromLatin1(QCryptographicHash::hash(
+        native::ModelCodec<NetworkHydraulic>::encode(*oneNetwork),
+        QCryptographicHash::Sha256).toHex()) : QString();
+    check(sparseRedo.status == 200 && !sparseRedo.json.contains("payloadBase64") &&
+          !sparseRedo.json.contains("changes") &&
+          sparseDelta.value("version") == QJsonValue(1) &&
+          sparseDelta.value("networkId") == networkId &&
+          sparseDelta.value("fromSha256") == baseDigest &&
+          sparseDelta.value("toSha256") == oneDigest &&
+          sparseEdits.size() == 1 && sparseInsert.value("id") == newId &&
+          sparseInsert.value("type") == "HydraulicNodeJunction" &&
+          sparseInsert.value("beforeBase64").isNull() &&
+          QByteArray::fromBase64(sparseInsert.value("afterBase64").toString().toLatin1()) == encoded &&
+          sparseDelta.value("moves").toArray().isEmpty(),
+          "HDB-03d incremental Redo sent unrelated network content or invalid membership delta");
+    const Response sparseReplay = client.call("POST", navigatePath, sparseRedoRequest);
+    check(sparseReplay.status == 200 && sparseReplay.json.value("generation") == "5" &&
+          sparseReplay.json.value("deltaRecoveryRequired") == QJsonValue(true) &&
+          !sparseReplay.json.contains("historyDelta") &&
+          client.call("GET", cursorPath).json.value("generation") == "5",
+          "HDB-03d lost-reply replay advanced the cursor or fabricated a source delta");
     check(client.call("POST", navigatePath, navBody(
-              QString::fromStdString(native::UuidV7::generate().toString()), "4", "1")).status == 200 &&
-          client.call("POST", navigatePath, navBody(
               QString::fromStdString(native::UuidV7::generate().toString()), "5", "2")).status == 200,
           "HDB-03d HTTP Redo rejected a valid original action boundary");
     const Response restoredView = client.call("GET", path + "/networks/" + networkId);
@@ -3163,9 +3197,27 @@ void exerciseHydraulicDraftMembershipHttp() {
           oldTipCursor.json.value("nextAction").toObject().value("revisionId") == secondRevision &&
           oldTipCursor.json.value("nextAction").toObject().value("actionPosition") == "1",
           "HDB-03f forward movement did not cross the subsequent Commit marker");
-    const Response crossedForward = archiveClient.call("POST", archivedPath,
-        nextArchivedBody(QString::fromStdString(native::UuidV7::generate().toString()),
-                         "17", secondRevision, "1"));
+    QJsonObject archivedDeltaRequest = nextArchivedBody(
+        QString::fromStdString(native::UuidV7::generate().toString()),
+        "17", secondRevision, "1");
+    archivedDeltaRequest.insert("networkId", networkId);
+    const Response crossedForward = archiveClient.call("POST", archivedPath, archivedDeltaRequest);
+    const QJsonObject archivedDelta = crossedForward.json.value("historyDelta").toObject();
+    const QJsonArray archivedEdits = archivedDelta.value("edits").toArray();
+    const QJsonObject archivedUpdate = archivedEdits.isEmpty() ? QJsonObject() :
+        archivedEdits.first().toObject();
+    check(crossedForward.status == 200 &&
+          !crossedForward.json.contains("payloadBase64") &&
+          archivedDelta.value("networkId") == networkId &&
+          archivedEdits.size() == 1 &&
+          archivedUpdate.value("type") == "HydraulicNodeJunction" &&
+          archivedUpdate.value("id") == newId &&
+          QByteArray::fromBase64(archivedUpdate.value("beforeBase64").toString().toLatin1()) ==
+              revisedBytes &&
+          QByteArray::fromBase64(archivedUpdate.value("afterBase64").toString().toLatin1()) ==
+              finalBytes &&
+          archivedDelta.value("moves").toArray().isEmpty(),
+          "HDB-03f cross-Commit History navigation did not return a sparse MODEL delta");
     const Response finalNetworkView = archiveClient.call("GET", path + "/networks/" + networkId);
     const std::optional<NetworkHydraulic> finalNetworkState =
         native::ModelCodec<NetworkHydraulic>::decode(QByteArray::fromBase64(
@@ -3588,82 +3640,6 @@ void exerciseCommitMetadataHttp() {
           "merge revision lost its author or default message");
 }
 
-// Real cpp-httplib route, JSON request and native repository state. A deletion
-// confirmation must discard only the selected branch's persisted draft.
-void exerciseDestructiveHistoryHttp() {
-    namespace native = aowis::dvmdb;
-    TemporaryRoot temp;
-    std::string projectId;
-    std::string survivorDraft;
-    std::string deletedBranch;
-    {
-        native::ProjectService service(temp.root());
-        service.configureRepositoryRole(native::RepositoryRole::Private);
-        const native::ProjectInfo project = service.createProject("HTTP deletion", commitMetadata());
-        projectId = project.id;
-        const native::RevisionId root = service.head(projectId, "main");
-        const native::BranchCreationResult feature = service.createBranchWithIdentity(
-            projectId, "feature", "main");
-        const native::BranchId unborn = service.createUnbornBranch(projectId, "unborn-doomed");
-        deletedBranch = unborn.toString();
-        const native::WorkingCopyInfo doomedDraft = service.createWorkingCopyForBranch(
-            projectId, deletedBranch, std::nullopt,
-            native::UuidV7::generate().toString());
-        survivorDraft = service.createWorkingCopyForBranch(projectId,
-            feature.branchId.toString(), root, native::UuidV7::generate().toString()).id;
-        TestServer server(service, native::BundleLimits{4ULL * 1024ULL * 1024ULL, 10000, 1024ULL * 1024ULL});
-        Client client(server.port());
-        const QString base = QStringLiteral("/dvmdb/v1/projects/") +
-                             QString::fromStdString(projectId) + "/branch-ids/";
-        const QString deletePath = base + QString::fromStdString(deletedBranch) + "/delete";
-        check(client.call("POST", deletePath, QJsonObject{{"expectedHead", QJsonValue(QJsonValue::Null)}})
-                .status == 409, "HTTP deleted a draft without explicit consent");
-        check(service.workingCopy(doomedDraft.id).id == doomedDraft.id,
-              "HTTP refusal discarded a draft");
-        check(client.call("POST", deletePath,
-            QJsonObject{{"expectedHead", QString::fromStdString(root.toString())},
-                        {"discardWorkingCopies", true}}).status == 409,
-              "HTTP stale HEAD accepted destructive confirmation");
-        check(service.workingCopy(doomedDraft.id).id == doomedDraft.id,
-              "stale deletion discarded draft");
-        const Response deleted = client.call("POST", deletePath,
-            QJsonObject{{"expectedHead", QJsonValue(QJsonValue::Null)},
-                        {"discardWorkingCopies", true}});
-        check(deleted.status == 200 && deleted.json.value("deleted").toBool() &&
-              client.call("GET", base + QString::fromStdString(deletedBranch)).status == 404,
-              "HTTP confirmed deletion did not remove branch");
-        check(service.listWorkingCopies().size() == 1 &&
-              service.listWorkingCopies().front().id == survivorDraft,
-              "HTTP deletion damaged another branch's working copy");
-        const QString truncatePath = base + QString::fromStdString(feature.branchId.toString()) +
-                                    "/truncate";
-        const QJsonObject invalid{{"expectedHead", QString::fromStdString(root.toString())},
-            {"firstRemoved", QString::fromStdString(native::RevisionId::generate().toString())},
-            {"discardWorkingCopies", true}};
-        check(client.call("POST", truncatePath, invalid).status == 400,
-              "HTTP invalid truncation selection was accepted");
-        check(service.workingCopy(survivorDraft).id == survivorDraft,
-              "invalid HTTP truncation discarded unrelated draft");
-        const Response truncated = client.call("POST", truncatePath,
-            QJsonObject{{"expectedHead", QString::fromStdString(root.toString())},
-                        {"firstRemoved", QString::fromStdString(root.toString())},
-                        {"discardWorkingCopies", true}});
-        check(truncated.status == 200 && truncated.json.value("branchDeleted").toBool() &&
-              service.listWorkingCopies().empty(),
-              "HTTP truncate did not delete branch and its draft");
-        check(service.optionalHead(projectId, "main") == root,
-              "HTTP branch truncation changed another branch's HEAD");
-        server.stop();
-    }
-    {
-        native::ProjectService reopened(temp.root());
-        check(!reopened.branchById(projectId, deletedBranch) &&
-              reopened.listWorkingCopies().empty() &&
-              reopened.optionalHead(projectId, "main").has_value(),
-              "HTTP deletion was not durable across server restart");
-    }
-}
-
 void exercisePinnedRepositoryMetadataHttp() {
     namespace native = aowis::dvmdb;
     TemporaryRoot temp;
@@ -3724,7 +3700,6 @@ int main(int argc, char** argv) {
         // on these routes is a UUIDv7.
         exerciseTransferStagingBudget();
         exercisePinnedRepositoryMetadataHttp();
-        exerciseDestructiveHistoryHttp();
         exercise();
         exerciseConcurrency();
         exerciseRevisionGraphHttp();

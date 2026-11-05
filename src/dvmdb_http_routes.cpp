@@ -14,6 +14,7 @@
 
 #include <httplib.h>
 
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -729,6 +730,146 @@ QByteArray decodePayload(const QJsonObject& object, const QString& field,
 
 QString encodePayload(const QByteArray& bytes) {
     return QString::fromLatin1(bytes.toBase64());
+}
+
+// A History navigation still constructs and publishes a COMPLETE native draft
+// candidate on the server. The wire response is deliberately a sparse,
+// canonical MODEL delta: it never sends an unchanged hydraulic member or the
+// entire NetworkHydraulic payload. Move operations preserve exact membership
+// order, including the order restored by crossing archived Commit boundaries.
+NetworkHydraulic historyNetworkAtDraft(ProjectService& service,
+                                       const WorkingCopyInfo& draft,
+                                       const QUuid& networkId) {
+    std::map<Key, std::optional<ModelRecord>> overlay;
+    for (const ModelChange& change : draft.candidateChanges)
+        requireInput(overlay.emplace(change.key, change.record).second,
+                     "duplicate native records in History draft candidate");
+    const std::function<std::optional<ModelRecord>(const Key&)> read =
+        [&service, &draft, &overlay](const Key& key) -> std::optional<ModelRecord> {
+            const std::map<Key, std::optional<ModelRecord>>::const_iterator found =
+                overlay.find(key);
+            if (found != overlay.end()) return found->second;
+            if (!draft.baseRevision) return std::nullopt;
+            return service.getModelAtRevision(draft.projectId, *draft.baseRevision, key);
+        };
+    const std::optional<NetworkHydraulic> network =
+        hydraulic::loadDraftHydraulicNetwork(read, networkId);
+    if (!network)
+        throw ProjectError(ProjectErrorKind::Conflict,
+                           "History network is unavailable at the selected candidate");
+    return *network;
+}
+
+QJsonObject historyImageChange(const QString& type, const QUuid& id,
+                               const std::optional<QByteArray>& before,
+                               const std::optional<QByteArray>& after) {
+    return QJsonObject{
+        {"type", type}, {"id", uuidString(id)},
+        {"beforeBase64", before ? QJsonValue(encodePayload(*before))
+                                 : QJsonValue(QJsonValue::Null)},
+        {"afterBase64", after ? QJsonValue(encodePayload(*after))
+                                : QJsonValue(QJsonValue::Null)}};
+}
+
+QString historyNetworkDigest(const NetworkHydraulic& network) {
+    const QByteArray canonical = ModelCodec<NetworkHydraulic>::encode(network);
+    requireInput(!canonical.isEmpty(), "noncanonical History network state");
+    return QString::fromLatin1(QCryptographicHash::hash(
+        canonical, QCryptographicHash::Sha256).toHex());
+}
+
+QJsonObject verifiedHistoryNetworkDelta(const NetworkHydraulic& before,
+                                        const NetworkHydraulic& after) {
+    requireInput(!before.uuid.isNull() && before.uuid == after.uuid,
+                 "History network identity changed during navigation");
+    QJsonArray edits;
+    QJsonArray moves;
+    const QByteArray rootBefore = aowis::model::hydraulicRootImage(before);
+    const QByteArray rootAfter = aowis::model::hydraulicRootImage(after);
+    requireInput(!rootBefore.isEmpty() && !rootAfter.isEmpty(),
+                 "History network metadata is not canonical");
+    if (rootBefore != rootAfter)
+        edits.append(historyImageChange(
+            QString::fromLatin1(aowis::model::hydraulicRootEditType), before.uuid,
+            rootBefore, rootAfter));
+#define HISTORY_COLLECTION_DIFF(name, type, kind) \
+    { \
+        QHash<QUuid, QByteArray> oldImages; \
+        QHash<QUuid, QByteArray> newImages; \
+        QList<QUuid> projected; \
+        QList<QUuid> desired; \
+        for (const type& member : before.name) { \
+            requireInput(!member.uuid.isNull() && !oldImages.contains(member.uuid), \
+                         "duplicate History source entity UUID"); \
+            const QByteArray image = ModelCodec<type>::encode(member); \
+            requireInput(!image.isEmpty(), "invalid History source entity image"); \
+            oldImages.insert(member.uuid, image); \
+            projected.append(member.uuid); \
+        } \
+        for (const type& member : after.name) { \
+            requireInput(!member.uuid.isNull() && !newImages.contains(member.uuid), \
+                         "duplicate History destination entity UUID"); \
+            const QByteArray image = ModelCodec<type>::encode(member); \
+            requireInput(!image.isEmpty(), "invalid History destination entity image"); \
+            newImages.insert(member.uuid, image); \
+            desired.append(member.uuid); \
+        } \
+        for (const type& member : before.name) { \
+            const QHash<QUuid, QByteArray>::const_iterator found = \
+                newImages.constFind(member.uuid); \
+            if (found == newImages.constEnd()) \
+                edits.append(historyImageChange(QStringLiteral(#type), member.uuid, \
+                                                 oldImages.value(member.uuid), std::nullopt)); \
+            else if (found.value() != oldImages.value(member.uuid)) \
+                edits.append(historyImageChange(QStringLiteral(#type), member.uuid, \
+                                                 oldImages.value(member.uuid), found.value())); \
+        } \
+        for (const type& member : after.name) \
+            if (!oldImages.contains(member.uuid)) { \
+                edits.append(historyImageChange(QStringLiteral(#type), member.uuid, \
+                                                 std::nullopt, newImages.value(member.uuid))); \
+                projected.append(member.uuid); \
+            } \
+        for (qsizetype index = projected.size(); index > 0;) { \
+            --index; \
+            if (!newImages.contains(projected.at(index))) projected.removeAt(index); \
+        } \
+        for (qsizetype index = 0; index < desired.size(); ++index) { \
+            if (projected.at(index) == desired.at(index)) continue; \
+            const qsizetype from = projected.indexOf(desired.at(index), index + 1); \
+            requireInput(from >= 0, "History membership ordering is inconsistent"); \
+            projected.move(from, index); \
+            moves.append(QJsonObject{{"type", QStringLiteral(#type)}, \
+                                     {"id", uuidString(desired.at(index))}, \
+                                     {"position", static_cast<int>(index)}}); \
+        } \
+        requireInput(projected == desired, "History membership move verification failed"); \
+    }
+    // Keep in sync with the 18 canonical hydraulic collections used by the
+    // native manifest and the GUI's typed MODEL registry.
+    HISTORY_COLLECTION_DIFF(pipe_materials, HydraulicPipeMaterial, 8)
+    HISTORY_COLLECTION_DIFF(patterns_time, HydraulicPatternTime, 9)
+    HISTORY_COLLECTION_DIFF(curves_tank_volume, HydraulicCurveTankVolume, 10)
+    HISTORY_COLLECTION_DIFF(curves_pump_head, HydraulicCurvePumpHead, 11)
+    HISTORY_COLLECTION_DIFF(curves_pump_efficiency, HydraulicCurvePumpEfficiency, 12)
+    HISTORY_COLLECTION_DIFF(curves_valve_headloss, HydraulicCurveValveHeadloss, 13)
+    HISTORY_COLLECTION_DIFF(curves_valve_characteristic, HydraulicCurveValveCharacteristic, 14)
+    HISTORY_COLLECTION_DIFF(curves_generic, HydraulicCurveGeneric, 15)
+    HISTORY_COLLECTION_DIFF(nodes_reservoirs, HydraulicNodeReservoir, 2)
+    HISTORY_COLLECTION_DIFF(nodes_junctions, HydraulicNodeJunction, 1)
+    HISTORY_COLLECTION_DIFF(nodes_tanks, HydraulicNodeTank, 3)
+    HISTORY_COLLECTION_DIFF(demand_points, HydraulicDemandPoint, 7)
+    HISTORY_COLLECTION_DIFF(links_pipes, HydraulicLinkPipe, 4)
+    HISTORY_COLLECTION_DIFF(links_pumps, HydraulicLinkPump, 5)
+    HISTORY_COLLECTION_DIFF(links_valves, HydraulicLinkValve, 6)
+    HISTORY_COLLECTION_DIFF(controls_simple, HydraulicControlSimple, 16)
+    HISTORY_COLLECTION_DIFF(controls_rules, HydraulicControlRule, 17)
+    HISTORY_COLLECTION_DIFF(map_labels, HydraulicMapLabel, 18)
+#undef HISTORY_COLLECTION_DIFF
+    return QJsonObject{{"version", 1}, {"networkId", uuidString(before.uuid)},
+                       {"fromSha256", historyNetworkDigest(before)},
+                       {"toSha256", historyNetworkDigest(after)},
+                       {"edits", edits}, {"moves", moves}};
 }
 
 template <std::size_t Index = 0>
@@ -1776,7 +1917,7 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             const QJsonObject body = parseBody(request, maxJsonSmallBytes);
             requireKeys(body, {"operationId", "sessionId", "fencingToken",
                                "expectedGeneration", "expectedHead", "actionPosition",
-                               "revisionId"});
+                               "revisionId", "networkId"});
             const std::string operationId = requiredString(body, "operationId");
             requireInput(UuidV7::parse(operationId).has_value(),
                          "history navigation operationId must be UUIDv7");
@@ -1801,6 +1942,18 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             const std::string sessionId = requiredString(body, "sessionId");
             const std::string fencingToken = requiredString(body, "fencingToken");
             const std::uint64_t generation = strictUint64(body, "expectedGeneration");
+            const bool wantsDelta = body.contains("networkId");
+            const std::optional<QUuid> networkId = wantsDelta
+                ? std::optional<QUuid>(parseUuid(requiredString(body, "networkId")))
+                : std::nullopt;
+            // Capture the requested network before publishing. The generation
+            // fence in the native writer proves this was the actual source.
+            std::optional<NetworkHydraulic> before;
+            if (networkId) {
+                const WorkingCopyInfo source = service.workingCopy(draftId, false);
+                if (source.generation == generation)
+                    before = historyNetworkAtDraft(service, source, *networkId);
+            }
             QString reason;
             const std::optional<WorkingCopyInfo> result = archived
                 ? hydraulic::navigateVerifiedHydraulicAction(service, operationId,
@@ -1812,7 +1965,22 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             if (!result)
                 return errorReply(409, QStringLiteral("history_not_navigable"),
                     QStringLiteral("Action navigation is stale, unsupported or failed MODEL verification"));
-            return Reply{200, workingCopyJson(*result, false)};
+            QJsonObject answer = workingCopyJson(*result, false);
+            if (networkId) {
+                // A repeat after a lost reply still returns the durable
+                // publication identity. It must NOT fabricate a zero delta
+                // from the already-advanced candidate; the client recovers
+                // explicitly if it cannot prove its old source image.
+                if (!before) {
+                    answer.insert(QStringLiteral("deltaRecoveryRequired"), true);
+                    return Reply{200, answer};
+                }
+                const NetworkHydraulic after =
+                    historyNetworkAtDraft(service, *result, *networkId);
+                answer.insert(QStringLiteral("historyDelta"),
+                              verifiedHistoryNetworkDelta(*before, after));
+            }
+            return Reply{200, answer};
         });
     });
     // Summarize the SAVED candidate of one specific private draft generation.
@@ -2535,40 +2703,6 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             });
             return Reply{200, QJsonObject{{"name", QString::fromStdString(renamed)},
                                            {"head", revisionIdString(expected)}}};
-        });
-    });
-    // Destructive branch operations use an explicit expected HEAD. They only
-    // rewrite or remove a branch reference, never shared immutable merge nodes.
-    server.Post("/dvmdb/v1/projects/:id/branch-ids/:branchId/delete",
-                [&service](const httplib::Request& request, httplib::Response& response) {
-        guarded(response, [&]() {
-            if (const std::optional<Reply> pin = repositoryPinFailure(request, service))
-                return *pin;
-            const QJsonObject body = parseBody(request, maxJsonSmallBytes);
-            requireKeys(body, {"expectedHead", "discardWorkingCopies"});
-            requireInput(body.contains("expectedHead"), "expectedHead is required, null for unborn");
-            const std::optional<RevisionId> expected = body.value("expectedHead").isNull()
-                ? std::nullopt
-                : std::optional<RevisionId>(parseRevisionId(requiredString(body, "expectedHead")));
-            service.deleteBranch(pathParam(request, "id"), pathParam(request, "branchId"), expected,
-                body.value("discardWorkingCopies").toBool(false));
-            return Reply{200, QJsonObject{{"deleted", true}}};
-        });
-    });
-    server.Post("/dvmdb/v1/projects/:id/branch-ids/:branchId/truncate",
-                [&service](const httplib::Request& request, httplib::Response& response) {
-        guarded(response, [&]() {
-            if (const std::optional<Reply> pin = repositoryPinFailure(request, service))
-                return *pin;
-            const QJsonObject body = parseBody(request, maxJsonSmallBytes);
-            requireKeys(body, {"expectedHead", "firstRemoved", "discardWorkingCopies"});
-            requireInput(body.contains("expectedHead"), "expectedHead is required");
-            const RevisionId expected = parseRevisionId(requiredString(body, "expectedHead"));
-            const RevisionId firstRemoved = parseRevisionId(requiredString(body, "firstRemoved"));
-            const bool deleted = service.truncateBranch(pathParam(request, "id"),
-                pathParam(request, "branchId"), expected, firstRemoved,
-                body.value("discardWorkingCopies").toBool(false));
-            return Reply{200, QJsonObject{{"branchDeleted", deleted}}};
         });
     });
     // Identity-addressed metadata update also supports unborn branches.
