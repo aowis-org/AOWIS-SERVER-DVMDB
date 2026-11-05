@@ -1663,6 +1663,63 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
         });
     });
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
+    // A read-only, small reconciliation receipt for an uncertain History POST.
+    // The digest is of the exact SAVED candidate, never a caller-supplied
+    // model. Generation, last operation UUID and selection are returned from
+    // the SAME draft snapshot; concurrent publication is detected and rejected.
+    // A digest alone cannot establish the History position (two different
+    // positions can have identical MODEL content).
+    server.Get("/dvmdb/v1/working-copies/:draft/history/reconcile",
+               [&service](const httplib::Request& request, httplib::Response& response) {
+        guarded(response, [&]() {
+            for (const httplib::Params::value_type& item : request.params)
+                requireInput(item.first == "networkId", "unknown History reconciliation query parameter");
+            const std::optional<std::string> networkText = queryValue(request, "networkId");
+            requireInput(networkText.has_value(), "missing History reconciliation networkId");
+            const QUuid networkId = parseUuid(*networkText);
+            const std::string draftId = pathParam(request, "draft");
+            const WorkingCopyInfo draft = service.workingCopy(draftId, false);
+            const QString digest = historyNetworkDigest(historyNetworkAtDraft(
+                service, draft, networkId));
+            const WorkingCopyInfo current = service.workingCopy(draftId, false);
+            if (current.generation != draft.generation ||
+                current.baseRevision != draft.baseRevision ||
+                current.lastHistoryNavigationOperationId != draft.lastHistoryNavigationOperationId ||
+                current.historyCheckpointRevisionId != draft.historyCheckpointRevisionId ||
+                current.historyActionPosition != draft.historyActionPosition ||
+                current.draftActionPosition != draft.draftActionPosition ||
+                current.journalCount != draft.journalCount)
+                throw ProjectError(ProjectErrorKind::Conflict,
+                                   "History candidate changed during reconciliation");
+            const bool archived = draft.historyCheckpointRevisionId &&
+                                  draft.historyActionPosition;
+            const QString kind = archived ? QStringLiteral("archived") :
+                draft.historyCheckpointRevisionId ? QStringLiteral("checkpoint") :
+                QStringLiteral("draft");
+            const std::uint64_t position = archived ? *draft.historyActionPosition :
+                draft.draftActionPosition.value_or(draft.journalCount);
+            return Reply{200, QJsonObject{
+                {"draftId", QString::fromStdString(draft.id)},
+                {"sessionId", QString::fromStdString(draft.sessionId)},
+                {"networkId", uuidString(networkId)},
+                {"networkSha256", digest},
+                {"generation", QString::number(static_cast<qulonglong>(draft.generation))},
+                {"baseRevision", optionalRevisionJson(draft.baseRevision)},
+                {"journalCount", QString::number(static_cast<qulonglong>(draft.journalCount))},
+                {"selectionKind", kind},
+                {"revisionId", archived
+                    ? QJsonValue(QString::fromStdString(*draft.historyCheckpointRevisionId))
+                    : QJsonValue(QJsonValue::Null)},
+                {"actionPosition", QString::number(static_cast<qulonglong>(position))},
+                {"lastNavigationOperationId", draft.lastHistoryNavigationOperationId
+                    ? QJsonValue(QString::fromStdString(*draft.lastHistoryNavigationOperationId))
+                    : QJsonValue(QJsonValue::Null)},
+                {"lastNavigationSourceGeneration", draft.lastHistoryNavigationSourceGeneration
+                    ? QJsonValue(QString::number(static_cast<qulonglong>(
+                          *draft.lastHistoryNavigationSourceGeneration)))
+                    : QJsonValue(QJsonValue::Null)}}};
+        });
+    });
     // Resolve neighboring MODEL boundaries on the server, not in the GUI.
     // An archived revision's position zero equals the preceding Commit's
     // tip; crossing that marker skips the duplicate snapshot. Results are

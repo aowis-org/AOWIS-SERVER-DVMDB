@@ -2684,7 +2684,7 @@ void exerciseHydraulicDraftMembershipHttp() {
     const Response leased = client.call("POST", path + "/lease",
                                         QJsonObject{{"sessionId", session}, {"seconds", 60}});
     check(leased.status == 200, "hydraulic draft lease failed");
-    const QString token = leased.json.value("token").toString();
+    QString token = leased.json.value("token").toString();
     HydraulicNodeJunction added;
     added.uuid = newUuid;
     added.id = QStringLiteral("J2");
@@ -2884,6 +2884,29 @@ void exerciseHydraulicDraftMembershipHttp() {
     const QString oneDigest = oneNetwork ? QString::fromLatin1(QCryptographicHash::hash(
         native::ModelCodec<NetworkHydraulic>::encode(*oneNetwork),
         QCryptographicHash::Sha256).toHex()) : QString();
+    // A tiny read-only receipt is enough to identify the exact authoritative
+    // state after a lost navigation reply. A matching digest alone is NOT
+    // proof that the requested History action was accepted: the operation,
+    // generation and action coordinate are equally important.
+    const QString reconcilePath = path + "/history/reconcile?networkId=" + networkId;
+    const Response reconciled = client.call("GET", reconcilePath);
+    const QJsonObject receipt = reconciled.json;
+    check(reconciled.status == 200 && receipt.value("draftId") == created.json.value("id") &&
+          receipt.value("networkId") == networkId &&
+          receipt.value("generation") == "5" &&
+          receipt.value("networkSha256") == oneDigest &&
+          receipt.value("lastNavigationOperationId") ==
+              sparseRedoRequest.value("operationId") &&
+          receipt.value("lastNavigationSourceGeneration") == "4" &&
+          receipt.value("selectionKind") == "draft" &&
+          receipt.value("actionPosition") == "1" &&
+          receipt.value("journalCount") == "2" &&
+          !receipt.contains("payloadBase64") && !receipt.contains("changes") &&
+          !receipt.contains("historyDelta"),
+          "HDB-03d SHA receipt did not pin operation, cursor and generation");
+    check(client.call("GET", path + "/history/reconcile?networkId=invalid").status == 400 &&
+          client.call("GET", path + "/history/reconcile?unexpected=1").status == 400,
+          "HDB-03d accepted malformed History SHA reconciliation parameters");
     check(sparseRedo.status == 200 && !sparseRedo.json.contains("payloadBase64") &&
           !sparseRedo.json.contains("changes") &&
           sparseDelta.value("version") == QJsonValue(1) &&
@@ -2904,6 +2927,23 @@ void exerciseHydraulicDraftMembershipHttp() {
           !sparseReplay.json.contains("changes") &&
           client.call("GET", cursorPath).json.value("generation") == "5",
           "HDB-03d lost-acknowledgement retry did not regenerate the same sparse delta");
+    // A remote GUI can stay disconnected past the old lease expiry. Re-leasing
+    // the SAME session rotates its fencing token without changing generation
+    // or invalidating the durable source candidate for the last navigation.
+    const Response reLeased = client.call("POST", path + "/lease",
+        QJsonObject{{"sessionId", session}, {"seconds", 90}});
+    const QString rotatedToken = reLeased.json.value("token").toString();
+    QJsonObject rotatedReplayRequest = sparseRedoRequest;
+    rotatedReplayRequest.insert("fencingToken", rotatedToken);
+    const Response rotatedReplay = client.call("POST", navigatePath, rotatedReplayRequest);
+    check(reLeased.status == 200 && rotatedToken != token && !rotatedToken.isEmpty() &&
+          reLeased.json.value("generation") == "5" &&
+          rotatedReplay.status == 200 && rotatedReplay.json.value("generation") == "5" &&
+          rotatedReplay.json.value("historyDelta") == QJsonValue(sparseDelta) &&
+          !rotatedReplay.json.contains("payloadBase64") &&
+          client.call("GET", cursorPath).json.value("generation") == "5",
+          "HDB-03d re-lease changed the idempotent sparse History result");
+    token = rotatedToken;
     check(client.call("POST", navigatePath, navBody(
               QString::fromStdString(native::UuidV7::generate().toString()), "5", "2")).status == 200,
           "HDB-03d HTTP Redo rejected a valid original action boundary");

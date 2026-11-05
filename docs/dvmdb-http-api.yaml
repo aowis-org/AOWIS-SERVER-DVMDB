@@ -254,6 +254,54 @@ paths:
                   forkRevisionId: {type: [string, 'null'], format: uuid}
                   forkActionPosition: {type: [string, 'null'], pattern: '^[0-9]{1,20}$'}
         '404': {$ref: '#/components/responses/NotFound'}
+  /working-copies/{draftId}/history/reconcile:
+    parameters:
+      - {name: draftId, in: path, required: true, schema: {type: string, format: uuid}}
+      - {name: networkId, in: query, required: true, schema: {type: string, format: uuid}}
+    get:
+      operationId: reconcileWorkingCopyHistory
+      description: |
+        Read a compact receipt for the exact saved hydraulic network and
+        History selection. Returns canonical ModelCodec NetworkHydraulic SHA-256,
+        working-copy generation, session, original journal count, selected
+        action coordinate, latest accepted navigation UUID and its source
+        generation. No MODEL images, journal frames or complete network are
+        returned. Read-only; does not acquire/rotate the writer lease.
+        The digest is calculated from a consistent candidate generation;
+        concurrent publication returns 409. Clients MUST check the navigation
+        UUID, source/target generation and exact cursor along with SHA-256:
+        distinct History positions may have identical network content.
+        If the requested operation was published but the client's digest
+        differs, replay POST navigate using its ORIGINAL UUID to retrieve the
+        retained sparse delta; do not issue another Undo. If it was not
+        published and the source generation/cursor/digest match, the same
+        UUID can be submitted once a lease is reacquired. This endpoint does
+        not persist recovery intent across a GUI process restart.
+      responses:
+        '200':
+          description: Authoritative hash and navigation receipt (decimal counters are JSON strings)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [draftId, sessionId, networkId, networkSha256, generation, baseRevision, journalCount, selectionKind, revisionId, actionPosition, lastNavigationOperationId, lastNavigationSourceGeneration]
+                additionalProperties: false
+                properties:
+                  draftId: {type: string, format: uuid}
+                  sessionId: {type: string, format: uuid}
+                  networkId: {type: string, format: uuid}
+                  networkSha256: {type: string, pattern: '^[0-9a-f]{64}$'}
+                  generation: {type: string, pattern: '^[0-9]{1,20}$'}
+                  baseRevision: {type: [string, 'null'], format: uuid}
+                  journalCount: {type: string, pattern: '^[0-9]{1,20}$'}
+                  selectionKind: {type: string, enum: [draft, archived, checkpoint]}
+                  revisionId: {type: [string, 'null'], format: uuid}
+                  actionPosition: {type: string, pattern: '^[0-9]{1,20}$'}
+                  lastNavigationOperationId: {type: [string, 'null'], format: uuid}
+                  lastNavigationSourceGeneration: {type: [string, 'null'], pattern: '^[0-9]{1,20}$'}
+        '400': {description: Missing, unexpected or malformed networkId}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {description: Candidate changed while hashing or selected network is unavailable}
   /working-copies/{draftId}/history/navigate:
     parameters:
       - {name: draftId, in: path, required: true, schema: {type: string, format: uuid}}

@@ -185,3 +185,21 @@ sidecar metadata, so the active action reader skips abandoned immutable
 Commit action suffixes while the revision graph still has its original
 first-parent edges. This is a logical editing fork, not a Git-like branch
 operation.
+
+### Reconciliation after a lost History acknowledgement
+
+`GET /working-copies/{draftId}/history/reconcile?networkId={uuid}` reports
+the canonical `NetworkHydraulic` SHA-256, saved generation, session ID,
+active or archived History coordinate, journal count and last successful
+navigation UUID/source generation. It is read-only and returns no network
+frames. A digest match alone does not establish the selected editing
+boundary: different actions may yield byte-identical hydraulic networks.
+The GUI must verify the operation identity, cursor and generation as well.
+
+If the server has already published the requested operation AND its digest
+currently equals the GUI's cached digest, no delta is needed. Otherwise
+the existing durable same-UUID sparse navigation replay returns the actual
+change set. If the operation was never published, the GUI retries that same
+UUID only when the entire original source state still agrees. Any other
+state divergence blocks editing. There is no new native storage format.
+Recovery while the GUI process is closed remains a separate capability.
