@@ -3567,6 +3567,101 @@ void exerciseWorkingCopyListAndDiscardHttp() {
           "HTTP discard removed the wrong number of drafts");
 }
 
+// The GUI uses UUID-addressed destructive routes rather than deleting a
+// working copy and branch in separate non-atomic HTTP requests. Exercise the
+// same paths with real saved drafts, including stale confirmations.
+void exerciseHistoryDeletionHttp() {
+    namespace native = aowis::dvmdb;
+    TemporaryRoot root;
+    native::ProjectService service(root.root());
+    const native::ProjectInfo empty = service.createUnbornProject("HTTP deletion");
+    const std::string projectId = empty.id;
+    const native::BranchId doomed = service.createUnbornBranch(projectId, "doomed");
+    const native::BranchId surviving = service.createUnbornBranch(projectId, "surviving");
+    service.configureRepositoryRole(native::RepositoryRole::Private);
+    const std::string session = native::UuidV7::generate().toString();
+    const native::WorkingCopyInfo doomedDraft =
+        service.createWorkingCopy(projectId, "doomed", std::nullopt, session);
+    const native::WorkingCopyInfo survivingDraft =
+        service.createWorkingCopy(projectId, "surviving", std::nullopt, session);
+    TestServer server(service,
+        native::BundleLimits{4ULL * 1024ULL * 1024ULL, 10000ULL, 1024ULL * 1024ULL});
+    Client client(server.port());
+    const QString prefix = QStringLiteral("/dvmdb/v1/projects/") +
+        QString::fromStdString(projectId) + "/branch-ids/";
+    const QString doomedPath = prefix + QString::fromStdString(doomed.toString());
+    const QString survivingPath = prefix + QString::fromStdString(surviving.toString());
+    const QString doomedDraftPath = QStringLiteral("/dvmdb/v1/working-copies/") +
+        QString::fromStdString(doomedDraft.id);
+    const QString survivingDraftPath = QStringLiteral("/dvmdb/v1/working-copies/") +
+        QString::fromStdString(survivingDraft.id);
+    const QJsonObject stale{{"expectedHead", revisionText(native::RevisionId::generate())},
+                            {"discardWorkingCopies", true}};
+    const QJsonObject withoutDiscard{{"expectedHead", QJsonValue(QJsonValue::Null)},
+                                     {"discardWorkingCopies", false}};
+    const QJsonObject confirmed{{"expectedHead", QJsonValue(QJsonValue::Null)},
+                                {"discardWorkingCopies", true}};
+    check(client.call("POST", doomedPath + "/delete", stale).status == 409 &&
+          client.call("POST", doomedPath + "/delete", withoutDiscard).status == 409 &&
+          client.call("POST", doomedPath + "/delete",
+                      QJsonObject{{"discardWorkingCopies", true}}).status == 400 &&
+          client.call("POST", doomedPath + "/delete",
+                      QJsonObject{{"expectedHead", QJsonValue(QJsonValue::Null)},
+                                  {"discardWorkingCopies", "yes"}}).status == 400 &&
+          client.call("GET", doomedPath).status == 200 &&
+          client.call("GET", doomedDraftPath).status == 200,
+          "HTTP branch delete bypassed confirmation or changed an unconfirmed draft");
+    const Response removed = client.call("POST", doomedPath + "/delete", confirmed);
+    check(removed.status == 200 && removed.json.value("deleted") == QJsonValue(true) &&
+          removed.json.value("branchId").toString() ==
+              QString::fromStdString(doomed.toString()) &&
+          client.call("GET", doomedPath).status == 404 &&
+          client.call("GET", doomedDraftPath).status == 404 &&
+          client.call("GET", survivingPath).status == 200 &&
+          client.call("GET", survivingDraftPath).status == 200,
+          "HTTP delete failed to atomically remove the selected branch and its drafts");
+    check(client.call("POST", doomedPath + "/delete", confirmed).status == 404,
+          "HTTP delete unexpectedly replayed an already completed deletion");
+
+    // Removing the first committed revision deletes its complete branch and
+    // associated drafts. Invalid revision selection must not discard either.
+    const native::ProjectInfo committed = service.createProject(
+        "HTTP root truncation", commitMetadata());
+    const native::RevisionId rootHead = service.head(committed.id, "main");
+    const QString committedPrefix = QStringLiteral("/dvmdb/v1/projects/") +
+        QString::fromStdString(committed.id) + "/branch-ids/";
+    const QString mainPath = committedPrefix + branchIdOf(
+        service, QString::fromStdString(committed.id), "main");
+    const native::WorkingCopyInfo committedDraft = service.createWorkingCopy(
+        committed.id, "main", rootHead, session);
+    const QString committedDraftPath = QStringLiteral("/dvmdb/v1/working-copies/") +
+        QString::fromStdString(committedDraft.id);
+    const QJsonObject truncate{{"expectedHead", revisionText(rootHead)},
+                               {"firstRemoved", revisionText(rootHead)},
+                               {"discardWorkingCopies", true}};
+    check(client.call("POST", mainPath + "/truncate",
+            QJsonObject{{"expectedHead", revisionText(native::RevisionId::generate())},
+                        {"firstRemoved", revisionText(rootHead)},
+                        {"discardWorkingCopies", true}}).status == 409 &&
+          client.call("POST", mainPath + "/truncate",
+            QJsonObject{{"expectedHead", revisionText(rootHead)},
+                        {"firstRemoved", revisionText(native::RevisionId::generate())},
+                        {"discardWorkingCopies", true}}).status != 200 &&
+          client.call("POST", mainPath + "/truncate",
+            QJsonObject{{"expectedHead", revisionText(rootHead)},
+                        {"firstRemoved", revisionText(rootHead)},
+                        {"discardWorkingCopies", false}}).status == 409 &&
+          client.call("GET", committedDraftPath).status == 200 &&
+          client.call("GET", mainPath).status == 200,
+          "HTTP truncation accepted a stale HEAD, bad revision or unconfirmed draft discard");
+    const Response truncated = client.call("POST", mainPath + "/truncate", truncate);
+    check(truncated.status == 200 && truncated.json.value("deleted") == QJsonValue(true) &&
+          truncated.json.value("branchDeleted") == QJsonValue(true) &&
+          client.call("GET", mainPath).status == 404 &&
+          client.call("GET", committedDraftPath).status == 404,
+          "HTTP first-revision truncation failed to remove the branch and draft");
+}
+
 } // namespace
 
 // Every route that creates a revision requires an author and (except merges
@@ -3758,6 +3853,7 @@ int main(int argc, char** argv) {
         exerciseUnbornCheckoutHttp();
         exerciseWorkingCopyHttp();
         exerciseWorkingCopyListAndDiscardHttp();
+        exerciseHistoryDeletionHttp();
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
         exerciseUnbornNetworkInitializationHttp();
         exerciseCompleteNetworkDraftImportHttp();

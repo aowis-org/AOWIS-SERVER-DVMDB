@@ -944,6 +944,62 @@ paths:
                   originBranchId: {type: [string, 'null'], format: uuid}
                   forkRevisionId: {type: [string, 'null'], format: uuid}
         '404': {$ref: '#/components/responses/NotFound'}
+  /projects/{projectId}/branch-ids/{branchId}/delete:
+    parameters:
+      - {$ref: '#/components/parameters/ProjectId'}
+      - {name: branchId, in: path, required: true, schema: {type: string, format: uuid}}
+    post:
+      operationId: deleteBranchById
+      description: |
+        Delete the complete branch by UUIDv7 with an exact expected HEAD (null
+        for an unborn branch). Discarding affected working copies is part of
+        the same crash-atomic native deletion; without explicit confirmation,
+        existing working copies cause a conflict. A stale HEAD never deletes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedHead, discardWorkingCopies]
+              properties:
+                expectedHead: {type: [string, 'null'], format: uuid}
+                discardWorkingCopies: {type: boolean}
+      responses:
+        '200': {description: Branch and confirmed working copies deleted atomically}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /projects/{projectId}/branch-ids/{branchId}/truncate:
+    parameters:
+      - {$ref: '#/components/parameters/ProjectId'}
+      - {name: branchId, in: path, required: true, schema: {type: string, format: uuid}}
+    post:
+      operationId: truncateBranchById
+      description: |
+        Remove the selected revision and all subsequent history on this branch
+        under an exact expected HEAD check. If the first revision is removed,
+        the whole branch is deleted. Working-copy deletion is crash-atomic with
+        the truncation. The response reports whether the branch itself was
+        deleted as branchDeleted.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedHead, firstRemoved, discardWorkingCopies]
+              properties:
+                expectedHead: {type: [string, 'null'], format: uuid}
+                firstRemoved: {type: string, format: uuid}
+                discardWorkingCopies: {type: boolean}
+      responses:
+        '200': {description: Branch history truncated, with branchDeleted flag}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
   /projects/{projectId}/branches/{branch}/head:
     parameters:
       - {$ref: '#/components/parameters/ProjectId'}

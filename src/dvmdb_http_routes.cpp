@@ -70,6 +70,8 @@ const char* const routeWorkingCopyLease = "/dvmdb/v1/working-copies/:draft/lease
 const char* const routeWorkingCopyRelease = "/dvmdb/v1/working-copies/:draft/release";
 const char* const routeWorkingCopyDiscard = "/dvmdb/v1/working-copies/:draft/discard";
 const char* const routeBranches = "/dvmdb/v1/projects/:id/branches";
+const char* const routeBranchDelete = "/dvmdb/v1/projects/:id/branch-ids/:branchId/delete";
+const char* const routeBranchTruncate = "/dvmdb/v1/projects/:id/branch-ids/:branchId/truncate";
 const char* const routeRevisionBundle = "/dvmdb/v1/projects/:id/branches/:branch/bundle";
 const char* const revisionBundleMime = "application/vnd.aowis.revision-bundle-v2";
 const char* const routeNetworks = "/dvmdb/v1/projects/:id/branches/:branch/networks";
@@ -981,6 +983,7 @@ std::optional<std::size_t> jsonBodyLimit(const httplib::Request& request) {
     if (request.method != "POST") return std::nullopt;
     const std::string& route = request.matched_route;
     if (route == routeProjects || route == routeBranches ||
+        route == routeBranchDelete || route == routeBranchTruncate ||
         route == routeRepositoryRole || route == routeWorkingCopies || route == routeWorkingCopyLease ||
         route == routeWorkingCopyInitializeNetwork ||
         route == routeWorkingCopyHistoryNavigate ||
@@ -2786,6 +2789,59 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 {"name", QString::fromStdString(name)},
                 {"description", QString::fromStdString(metadata.description)},
                 {"tags", branchTagsJson(metadata)}}};
+        });
+    });
+    // History deletion uses UUID-addressed branches and an explicit HEAD CAS.
+    // Native ProjectService owns the crash-atomic intent and coordinated draft
+    // discards; the HTTP layer must not implement those as separate requests.
+    server.Post(routeBranchDelete,
+                [&service](const httplib::Request& request, httplib::Response& response) {
+        guarded(response, [&]() {
+            if (const std::optional<Reply> pin = repositoryPinFailure(request, service))
+                return *pin;
+            const QJsonObject body = parseBody(request, maxJsonSmallBytes);
+            requireKeys(body, {"expectedHead", "discardWorkingCopies"});
+            requireInput(body.contains("expectedHead"),
+                         "missing expectedHead (use null for unborn branches)");
+            const QJsonValue head = body.value("expectedHead");
+            requireInput(head.isNull() || head.isString(),
+                         "expectedHead must be a revision UUIDv7 or null");
+            const QJsonValue discard = body.value("discardWorkingCopies");
+            requireInput(discard.isBool(), "discardWorkingCopies must be boolean");
+            const std::optional<RevisionId> expected = head.isString()
+                ? std::optional<RevisionId>(parseRevisionId(head.toString().toStdString()))
+                : std::nullopt;
+            const std::string project = pathParam(request, "id");
+            const std::string branchId = pathParam(request, "branchId");
+            service.deleteBranch(project, branchId, expected, discard.toBool());
+            return Reply{200, QJsonObject{{"deleted", true},
+                {"branchId", QString::fromStdString(branchId)}}};
+        });
+    });
+    server.Post(routeBranchTruncate,
+                [&service](const httplib::Request& request, httplib::Response& response) {
+        guarded(response, [&]() {
+            if (const std::optional<Reply> pin = repositoryPinFailure(request, service))
+                return *pin;
+            const QJsonObject body = parseBody(request, maxJsonSmallBytes);
+            requireKeys(body, {"expectedHead", "firstRemoved", "discardWorkingCopies"});
+            requireInput(body.contains("expectedHead"), "missing expectedHead");
+            const QJsonValue head = body.value("expectedHead");
+            requireInput(head.isNull() || head.isString(),
+                         "expectedHead must be a revision UUIDv7 or null");
+            const QJsonValue discard = body.value("discardWorkingCopies");
+            requireInput(discard.isBool(), "discardWorkingCopies must be boolean");
+            const std::optional<RevisionId> expected = head.isString()
+                ? std::optional<RevisionId>(parseRevisionId(head.toString().toStdString()))
+                : std::nullopt;
+            const RevisionId firstRemoved = parseRevisionId(requiredString(body, "firstRemoved"));
+            const std::string project = pathParam(request, "id");
+            const std::string branchId = pathParam(request, "branchId");
+            const bool branchDeleted = service.truncateBranch(project, branchId, expected,
+                firstRemoved, discard.toBool());
+            return Reply{200, QJsonObject{{"deleted", true},
+                {"branchDeleted", branchDeleted},
+                {"branchId", QString::fromStdString(branchId)}}};
         });
     });
     // A branch by UUIDv7 (DG-01): its current name, HEAD and provenance.
