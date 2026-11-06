@@ -70,6 +70,22 @@ See [documentation](docs/README.md),
 
 ## Quick start
 
+The committed `.gitmodules` uses the canonical HTTPS URL for
+`AOWIS-SERVER-MODEL`, so public clones do not depend on anyone's SSH host
+aliases. If your developer workstation uses the local `github-aowis` SSH
+alias, configure an **untracked, machine-local** Git URL rewrite once:
+
+```bash
+git config --global 'url.git@github-aowis:aowis-org/AOWIS-SERVER-MODEL.git.insteadOf' 'https://github.com/aowis-org/AOWIS-SERVER-MODEL.git'
+```
+
+This rewrite applies only to the MODEL repository URL. It is kept in your
+`~/.gitconfig`, not in the public DVMDB repository, and still works after
+`git submodule sync`. Do not change `.gitmodules` back to your SSH alias.
+Existing checkouts can synchronize the public submodule URL using
+`git submodule sync --recursive`; Git will continue to use the local rewrite
+for network access.
+
 ```bash
 ./git_submodule_init.sh        # once: initialize the AOWIS-SERVER-MODEL submodule
 ./compile_linux.sh             # build Release and start the server in the foreground
