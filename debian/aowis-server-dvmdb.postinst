@@ -1,0 +1,17 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "configure" ]; then
+    if ! getent group aowis-dvmdb >/dev/null; then
+        addgroup --system aowis-dvmdb >/dev/null
+    fi
+    if ! getent passwd aowis-dvmdb >/dev/null; then
+        adduser --system --ingroup aowis-dvmdb --home /nonexistent \
+            --no-create-home --shell /usr/sbin/nologin --disabled-password \
+            --comment 'AOWIS DVMDB Server' aowis-dvmdb >/dev/null
+    fi
+fi
+
+#DEBHELPER#
+
+exit 0

@@ -1,0 +1,46 @@
+[Unit]
+Description=AOWIS native versioned database HTTP server
+After=network.target
+
+[Service]
+Type=simple
+User=aowis-dvmdb
+Group=aowis-dvmdb
+# /var/lib/aowis-dvmdb, created with the right owner; matches [storage] root.
+StateDirectory=aowis-dvmdb
+StateDirectoryMode=0700
+# /var/log/aowis-dvmdb for an optional [logging] file=; journald is the default.
+LogsDirectory=aowis-dvmdb
+# The package installs the INI at /etc/aowis/aowis-server-dvmdb.ini.
+ExecStart=/usr/bin/aowis-server-dvmdb --config /etc/aowis/aowis-server-dvmdb.ini
+Restart=on-failure
+RestartSec=2
+# SIGTERM closes the listener; running requests finish first.
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+# Hardening: the service writes only its state directory.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/aowis-dvmdb
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

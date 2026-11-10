@@ -116,6 +116,16 @@ and project service also build without Qt
 ./compile_linux.sh --build-only   # build only the Release server and dependencies
 ```
 
+To create a Debian 13 `.deb` from an Arch/Linux workstation **without
+installing Debian build dependencies on the host**, use:
+
+```bash
+./compile_deb_docker.sh             # build the .deb into dist/
+./compile_deb_docker.sh --test      # also qualify install, HTTP, upgrade and purge
+```
+
+See [Debian package build and qualification](docs/debian-package-build.md).
+
 `compile_linux.sh` builds **only** `aowis-server-dvmdb` and its transitive
 dependencies, then starts that freshly built server by default. `--build-only`
 skips launching it. Tests, benchmarks and unrelated CLI tools are not built by

@@ -1,0 +1,5 @@
+aowis-server-dvmdb (0.1.0+deb1) stable; urgency=medium
+
+  * Initial Debian package.
+
+ -- AOWIS Project <aowis@aowis.org>  Tue, 10 Nov 2026 12:00:00 +0100

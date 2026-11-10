@@ -1,0 +1,33 @@
+AOWIS DVMDB — Debian installation
+=================================
+
+Binary:        /usr/bin/aowis-server-dvmdb
+Service:       aowis-server-dvmdb.service
+Vendor unit:   /usr/lib/systemd/system/aowis-server-dvmdb.service
+Configuration: /etc/aowis/aowis-server-dvmdb.ini
+Storage root:  /var/lib/aowis-dvmdb
+Listener:      127.0.0.1:8755 (default)
+
+The package creates an unprivileged aowis-dvmdb system account. systemd
+StateDirectory=aowis-dvmdb provisions the persistent storage root with
+mode 0700. The package never removes that data directory during remove or
+purge. The INI is a dpkg-managed conffile: local edits are preserved on
+upgrade/removal and the file is removed by purge.
+
+The packaged vendor unit runs /usr/bin/aowis-server-dvmdb, not the
+/usr/local/bin path used by the manual-install deploy/ example.
+
+Administration:
+
+  sudo systemctl status aowis-server-dvmdb
+  sudo journalctl -u aowis-server-dvmdb -f
+  sudo systemctl edit aowis-server-dvmdb
+
+Ready check:
+
+  curl -fsS http://127.0.0.1:8755/dvmdb/v1/ready
+
+SECURITY: DVMDB currently has no HTTP authentication or authorization and
+does not serve HTTPS directly. Keep its listener loopback-only unless it
+is reachable exclusively over a trusted network and protected separately.
+TLS by itself does not provide user authorization.

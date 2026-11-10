@@ -25,6 +25,7 @@ different claims.
 | Area | Documentation |
 |---|---|
 | HTTP operations and errors | [HTTP workflows](http-workflows.md), [REST guide](rest-api-design.md), [OpenAPI](dvmdb-http-api.yaml) |
+| Debian 13 Docker packaging | [Docker .deb build and qualification](debian-package-build.md) |
 | Server startup, backup and verify | [Service](native-database-service.md), [operations](operations.md), [repository verification](repository-verification.md) |
 | GUI contract | [GUI integration](gui-integration-requirements.md) |
 | Durability and power-loss | [Qualification](durability-qualification.md), [deletion power-cut](vm-deletion-powercut.md) |

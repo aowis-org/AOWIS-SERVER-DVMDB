@@ -1,0 +1,2 @@
+obj-*/aowis-server-dvmdb usr/bin
+deploy/aowis-server-dvmdb.ini etc/aowis

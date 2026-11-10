@@ -1,0 +1,18 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@ --buildsystem=cmake+ninja
+
+override_dh_auto_configure:
+	dh_auto_configure --buildsystem=cmake+ninja -- -DBUILD_TESTING=OFF -DAOWIS_DVMDB_WITH_MODEL_CODEC=ON -DAOWIS_DVMDB_WITH_HTTP_SERVER=ON -DCMAKE_BUILD_TYPE=Release
+
+override_dh_auto_build:
+	dh_auto_build --buildsystem=cmake+ninja -- aowis-server-dvmdb
+
+override_dh_auto_test:
+	# The package build is server-only; run the full suite separately.
+	:
+
+override_dh_auto_install:
+	# MODEL has CMake install rules for a separate SDK, not this server package.
+	:

@@ -1,0 +1,16 @@
+Source: aowis-server-dvmdb
+Section: database
+Priority: optional
+Maintainer: AOWIS Project <aowis@aowis.org>
+Build-Depends: debhelper-compat (= 13), cmake, ninja-build, g++, pkg-config, python3, qt6-base-dev, libssl-dev
+Standards-Version: 4.7.2
+Rules-Requires-Root: no
+Homepage: https://github.com/aowis-org/AOWIS-SERVER-DVMDB
+
+Package: aowis-server-dvmdb
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, adduser, systemd
+Description: AOWIS native versioned database server
+ Native versioned multi-project database with immutable revisions,
+ private working copies, hydraulic model persistence and a REST HTTP API.
+ Installs an unprivileged systemd service and administrator-managed INI.
