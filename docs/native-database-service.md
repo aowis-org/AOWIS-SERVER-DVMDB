@@ -40,7 +40,10 @@ embedded library instance on the same root, fails to start with a conflict.
 ## Configuration
 
 Options on the command line override the INI file (`-c FILE`, default
-`aowis-server-dvmdb.ini` in the working directory).
+`aowis-server-dvmdb.ini` in the working directory). The table shows the
+*executable's fallback* when no INI value or CLI override is provided.
+The shipped deployment INI used by the Debian and manual **systemd units**
+instead sets `[server] bind=0.0.0.0` (all IPv4 interfaces), port 8755.
 
 | INI key | Option | Default | Range / meaning |
 |---|---|---|---|
@@ -79,7 +82,9 @@ timeout 60 s, keep-alive 10 s.
 `deploy/` contains:
 
 * `aowis-server-dvmdb.ini` — production settings (`/var/lib/aowis-dvmdb`);
-  install it as `/etc/aowis/aowis-server-dvmdb.ini`.
+  install it as `/etc/aowis/aowis-server-dvmdb.ini`. This config makes the
+  systemd listener available on `0.0.0.0:8755`; firewall/VPN restrictions
+  are essential because DVMDB does not yet authenticate HTTP clients.
 * `aowis-server-dvmdb.service` — a hardened systemd unit (dedicated user,
   `StateDirectory=aowis-dvmdb`, read-only system, private tmp, `SIGTERM` with
   60 s stop timeout, journald logging).

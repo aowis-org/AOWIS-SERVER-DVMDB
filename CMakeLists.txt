@@ -2,23 +2,70 @@ cmake_minimum_required(VERSION 3.22)
 project(AOWIS_Server_DVMDB VERSION 0.1.0 LANGUAGES CXX)
 
 include(CTest)
-find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 find_package(Threads REQUIRED)
 
-add_library(aowis-dvmdb-store STATIC
+# SHA-256 backend. Linux keeps OpenSSL's hardware-accelerated digest by
+# default. Windows (MinGW under Wine) and macOS (cross toolchain) default to
+# the built-in portable SHA-256, so Standalone needs no target-side OpenSSL.
+# Random bytes always come from the OS CSPRNG. Both backends are bit-identical.
+if(WIN32 OR APPLE)
+    set(_aowis_dvmdb_openssl_default OFF)
+else()
+    set(_aowis_dvmdb_openssl_default ON)
+endif()
+option(AOWIS_DVMDB_WITH_OPENSSL
+    "Use OpenSSL's SHA-256 instead of the built-in implementation"
+    ${_aowis_dvmdb_openssl_default})
+unset(_aowis_dvmdb_openssl_default)
+if(AOWIS_DVMDB_WITH_OPENSSL)
+    find_package(OpenSSL REQUIRED COMPONENTS Crypto)
+endif()
+
+# Sources shared by the production store and the fault-injection store.
+# dvmdb_sys_windows.cpp is the Win32 implementation of the POSIX-style
+# file API declared in src/dvmdb_sys.h (POSIX builds call libc directly).
+set(AOWIS_DVMDB_STORE_SOURCES
     src/native_store.cpp
     src/model_record.cpp
     src/access_policy.cpp
     src/object_id.cpp
     src/revision_record.cpp
     src/revision_resolver.cpp
+    src/dvmdb_crypto.cpp
 )
-target_compile_features(aowis-dvmdb-store PUBLIC cxx_std_20)
-target_include_directories(aowis-dvmdb-store PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_link_libraries(aowis-dvmdb-store PUBLIC OpenSSL::Crypto)
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(aowis-dvmdb-store PRIVATE -Wall -Wextra -Wpedantic -Wconversion)
+if(WIN32)
+    list(APPEND AOWIS_DVMDB_STORE_SOURCES src/dvmdb_sys_windows.cpp)
 endif()
+
+# Every target compiling a DVMDB source that includes src/dvmdb_sys.h.
+# MinGW's off_t is 32 bits unless _FILE_OFFSET_BITS=64 (packs, journals and
+# bundles may exceed 2 GiB); dvmdb_sys.h static_asserts the result. PRIVATE so
+# no definition leaks into GUI/Qt translation units.
+function(aowis_dvmdb_configure_platform target)
+    if(WIN32)
+        target_compile_definitions(${target} PRIVATE _FILE_OFFSET_BITS=64)
+    endif()
+endfunction()
+
+# Applies the platform configuration every store-library flavour needs.
+function(aowis_dvmdb_configure_store target)
+    target_compile_features(${target} PUBLIC cxx_std_20)
+    target_include_directories(${target} PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    if(AOWIS_DVMDB_WITH_OPENSSL)
+        target_compile_definitions(${target} PRIVATE AOWIS_DVMDB_WITH_OPENSSL=1)
+        target_link_libraries(${target} PUBLIC OpenSSL::Crypto)
+    endif()
+    aowis_dvmdb_configure_platform(${target})
+    if(WIN32)
+        target_link_libraries(${target} PUBLIC bcrypt)
+    endif()
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Wconversion)
+    endif()
+endfunction()
+
+add_library(aowis-dvmdb-store STATIC ${AOWIS_DVMDB_STORE_SOURCES})
+aowis_dvmdb_configure_store(aowis-dvmdb-store)
 
 # Project catalogue/lifecycle is a direct, Qt-free C++ API and remains usable
 # by the standalone build independently of network transport.
@@ -33,6 +80,7 @@ if(AOWIS_DVMDB_VM_DELETION_BARRIERS)
 endif()
 target_include_directories(aowis-dvmdb-project-service PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(aowis-dvmdb-project-service PUBLIC aowis-dvmdb-store)
+aowis_dvmdb_configure_platform(aowis-dvmdb-project-service)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(aowis-dvmdb-project-service PRIVATE -Wall -Wextra -Wpedantic -Wconversion)
 endif()
@@ -176,21 +224,9 @@ if(BUILD_TESTING)
     set_tests_properties(aowis-dvmdb-replication-benchmark-phases PROPERTIES LABELS "aowis")
     # Compile the engine a second time exclusively for fault-injection tests.
     # Production targets never contain crash/failure injection hooks.
-    add_library(aowis-dvmdb-store-fault-tests STATIC
-        src/native_store.cpp
-        src/model_record.cpp
-        src/access_policy.cpp
-        src/object_id.cpp
-        src/revision_record.cpp
-    src/revision_resolver.cpp
-    )
-    target_compile_features(aowis-dvmdb-store-fault-tests PUBLIC cxx_std_20)
-    target_include_directories(aowis-dvmdb-store-fault-tests PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-    target_link_libraries(aowis-dvmdb-store-fault-tests PUBLIC OpenSSL::Crypto)
+    add_library(aowis-dvmdb-store-fault-tests STATIC ${AOWIS_DVMDB_STORE_SOURCES})
+    aowis_dvmdb_configure_store(aowis-dvmdb-store-fault-tests)
     target_compile_definitions(aowis-dvmdb-store-fault-tests PRIVATE AOWIS_DVMDB_FAULT_TEST_BUILD)
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(aowis-dvmdb-store-fault-tests PRIVATE -Wall -Wextra -Wpedantic -Wconversion)
-    endif()
     # Docker qualification setup can be validated offline without Docker/QEMU.
     add_test(NAME aowis-dvmdb-vm-powercut-docker-tests
         COMMAND "${Python3_EXECUTABLE}"
@@ -555,6 +591,11 @@ if(AOWIS_DVMDB_WITH_HTTP_SERVER)
     endif()
     target_include_directories(aowis-dvmdb-http PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/model-fingerprint")
     target_link_libraries(aowis-dvmdb-http PUBLIC aowis-dvmdb-project-service aowis-cpp-httplib Qt6::Core)
+    aowis_dvmdb_configure_platform(aowis-dvmdb-http)
+    if(WIN32)
+        # cpp-httplib's Winsock dependency (its #pragma comment is MSVC-only).
+        target_link_libraries(aowis-cpp-httplib INTERFACE ws2_32)
+    endif()
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(aowis-dvmdb-http PRIVATE -Wall -Wextra)
     endif()

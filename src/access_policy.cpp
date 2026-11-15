@@ -5,14 +5,11 @@
 #include <array>
 #include <cerrno>
 #include <cstring>
-#include <fcntl.h>
+#include "dvmdb_sys.h"
 #include <limits>
 #include <set>
 #include <stdexcept>
-#include <sys/file.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#include <openssl/rand.h>
+#include "dvmdb_crypto.h"
 
 namespace aowis::dvmdb {
 namespace {
@@ -27,7 +24,7 @@ void check(bool condition, const char* reason) {
 
 struct Fd {
     explicit Fd(int descriptor) : fd(descriptor) { check(fd >= 0, "access policy file operation failed"); }
-    ~Fd() { if (this->fd >= 0) ::close(this->fd); }
+    ~Fd() { if (this->fd >= 0) sys::close(this->fd); }
     Fd(const Fd&) = delete;
     Fd& operator=(const Fd&) = delete;
     int fd;
@@ -170,8 +167,8 @@ std::filesystem::path policyFile(const std::filesystem::path& directory) {
 }
 
 bool policyExists(const std::filesystem::path& directory) {
-    struct stat state{};
-    if (::lstat(policyFile(directory).c_str(), &state) == -1) {
+    sys::Stat state{};
+    if (sys::lstat(policyFile(directory).c_str(), &state) == -1) {
         if (errno == ENOENT) return false;
         throw std::runtime_error("cannot stat access policy");
     }
@@ -182,9 +179,9 @@ bool policyExists(const std::filesystem::path& directory) {
 }
 
 AccessPolicy readPolicy(const std::filesystem::path& directory) {
-    Fd file(::open(policyFile(directory).c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
-    struct stat state{};
-    check(::fstat(file.fd, &state) == 0 && S_ISREG(state.st_mode) &&
+    Fd file(sys::open(policyFile(directory).c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+    sys::Stat state{};
+    check(sys::fstat(file.fd, &state) == 0 && S_ISREG(state.st_mode) &&
           state.st_size >= 0 && static_cast<std::uint64_t>(state.st_size) <= maxPolicyBytes &&
           (state.st_mode & (S_IWGRP | S_IWOTH)) == 0,
           "invalid or insecure access policy file metadata");
@@ -192,7 +189,7 @@ AccessPolicy readPolicy(const std::filesystem::path& directory) {
     bytes.reserve(static_cast<std::size_t>(state.st_size));
     std::array<std::uint8_t, 8192> buffer{};
     for (;;) {
-        const ssize_t length = ::read(file.fd, buffer.data(), buffer.size());
+        const ssize_t length = sys::read(file.fd, buffer.data(), buffer.size());
         if (length < 0 && errno == EINTR) continue;
         check(length >= 0, "cannot read access policy");
         if (length == 0) break;
@@ -207,31 +204,31 @@ void writePolicy(const std::filesystem::path& directory, const AccessPolicy& pol
     const Bytes bytes = serialize(policy);
     std::string tmp = (directory / "access-policy-tmp-XXXXXXXX").string();
     std::vector<char> filename(tmp.begin(), tmp.end()); filename.push_back('\0');
-    Fd file(::mkstemp(filename.data()));
+    Fd file(sys::mkstemp(filename.data()));
     const std::filesystem::path tempPath = filename.data();
     try {
-        check(::fchmod(file.fd, 0600) == 0, "cannot chmod access policy");
+        check(sys::fchmod(file.fd, 0600) == 0, "cannot chmod access policy");
         std::size_t offset = 0;
         while (offset < bytes.size()) {
-            const ssize_t written = ::write(file.fd, bytes.data() + offset, bytes.size() - offset);
+            const ssize_t written = sys::write(file.fd, bytes.data() + offset, bytes.size() - offset);
             if (written < 0 && errno == EINTR) continue;
             check(written > 0, "cannot write access policy");
             offset += static_cast<std::size_t>(written);
         }
-        check(::fsync(file.fd) == 0, "cannot sync access policy");
-        check(::rename(tempPath.c_str(), policyFile(directory).c_str()) == 0,
+        check(sys::fsync(file.fd) == 0, "cannot sync access policy");
+        check(sys::rename(tempPath.c_str(), policyFile(directory).c_str()) == 0,
               "cannot publish access policy");
-        Fd dir(::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
-        check(::fsync(dir.fd) == 0, "cannot sync access policy directory");
-    } catch (...) { ::unlink(tempPath.c_str()); throw; }
+        Fd dir(sys::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+        check(sys::fsync(dir.fd) == 0, "cannot sync access policy directory");
+    } catch (...) { sys::unlink(tempPath.c_str()); throw; }
 }
 
 class PolicyLock {
 public:
     explicit PolicyLock(const std::filesystem::path& directory)
-        : file_(::open((directory / "access-policy.lock").c_str(),
+        : file_(sys::open((directory / "access-policy.lock").c_str(),
                        O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600)) {
-        check(::flock(this->file_.fd, LOCK_EX) == 0, "cannot lock access policy");
+        check(sys::flock(this->file_.fd, LOCK_EX) == 0, "cannot lock access policy");
     }
 private:
     Fd file_;
@@ -367,7 +364,7 @@ bool AccessPolicyStore::permitsRequired(std::string_view accountName,
 
 Key newAccessUuid() {
     Key value{};
-    check(RAND_bytes(value.data(), static_cast<int>(value.size())) == 1,
+    check(crypto::secureRandomBytes(value.data(), value.size()),
           "cannot generate access UUID");
     value[6] = static_cast<std::uint8_t>((value[6] & 0x0fU) | 0x40U);
     value[8] = static_cast<std::uint8_t>((value[8] & 0x3fU) | 0x80U);

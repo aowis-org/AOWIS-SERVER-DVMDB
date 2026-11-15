@@ -52,8 +52,11 @@ private:
 };
 
 inline StorageErrorKind storageErrorKindForErrno(int error) noexcept {
-    return (error == ENOSPC || error == EDQUOT) ? StorageErrorKind::ResourceExhausted
-                                                : StorageErrorKind::Io;
+#ifdef EDQUOT
+    if (error == EDQUOT) return StorageErrorKind::ResourceExhausted;
+#endif
+    // Windows has no EDQUOT; dvmdb_sys_windows.cpp maps quota errors to ENOSPC.
+    return error == ENOSPC ? StorageErrorKind::ResourceExhausted : StorageErrorKind::Io;
 }
 
 // Throws for the current errno; captures it before building the message.

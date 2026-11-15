@@ -6,10 +6,7 @@
 #include <array>
 #include <cerrno>
 #include <cstring>
-#include <fcntl.h>
-#include <sys/file.h>
-#include <sys/stat.h>
-#include <unistd.h>
+#include "dvmdb_sys.h"
 #include <utility>
 
 namespace aowis::dvmdb {
@@ -24,7 +21,7 @@ void ensure(bool okay, Err kind, const char* reason) {
 class Fd final {
 public:
     explicit Fd(int fd = -1) noexcept : fd_(fd) {}
-    ~Fd() { if (this->fd_ >= 0) (void)::close(this->fd_); }
+    ~Fd() { if (this->fd_ >= 0) (void)sys::close(this->fd_); }
     Fd(const Fd&) = delete;
     Fd& operator=(const Fd&) = delete;
     int get() const noexcept { return this->fd_; }
@@ -36,9 +33,9 @@ private:
 class FileLock final {
 public:
     explicit FileLock(int fd) : fd_(fd) {
-        if (::flock(this->fd_, LOCK_EX) != 0) throwSystemError("lock revision resolver");
+        if (sys::flock(this->fd_, LOCK_EX) != 0) throwSystemError("lock revision resolver");
     }
-    ~FileLock() { (void)::flock(this->fd_, LOCK_UN); }
+    ~FileLock() { (void)sys::flock(this->fd_, LOCK_UN); }
     FileLock(const FileLock&) = delete;
     FileLock& operator=(const FileLock&) = delete;
 private:
@@ -46,37 +43,37 @@ private:
 };
 
 void syncDir(int fd) {
-    if (::fsync(fd) != 0) throwSystemError("sync revision resolver directory");
+    if (sys::fsync(fd) != 0) throwSystemError("sync revision resolver directory");
 }
 
 void writeAll(int fd, const std::uint8_t* bytes, std::size_t size) {
     std::size_t offset = 0;
     while (offset != size) {
-        const ssize_t n = ::write(fd, bytes + offset, size - offset);
+        const ssize_t n = sys::write(fd, bytes + offset, size - offset);
         if (n < 0 && errno == EINTR) continue;
         if (n < 0) throwSystemError("write revision resolver record");
         ensure(n > 0, Err::Io, "short revision resolver write");
         offset += static_cast<std::size_t>(n);
     }
-    if (::fsync(fd) != 0) throwSystemError("sync revision resolver record");
+    if (sys::fsync(fd) != 0) throwSystemError("sync revision resolver record");
 }
 
 // Reading a fixed-size regular file with O_NOFOLLOW also rules out symlink
 // attacks and unbounded/malformed record sizes.
 std::optional<Bytes> readFixed(int dirFd, const std::string& name, std::size_t expected) {
-    Fd file(::openat(dirFd, name.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
+    Fd file(sys::openat(dirFd, name.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
     if (file.get() < 0 && errno == ENOENT) return std::nullopt;
     if (file.get() < 0 && (errno == ELOOP || errno == ENOTDIR))
         throw StorageError(Err::Corruption, "unsafe revision resolver entry");
     if (file.get() < 0) throwSystemError("read revision resolver entry");
-    struct stat st{};
-    if (::fstat(file.get(), &st) != 0) throwSystemError("stat revision resolver entry");
+    sys::Stat st{};
+    if (sys::fstat(file.get(), &st) != 0) throwSystemError("stat revision resolver entry");
     ensure(S_ISREG(st.st_mode) && st.st_size == static_cast<off_t>(expected),
            Err::Corruption, "bad revision resolver entry size or type");
     Bytes bytes(expected);
     std::size_t offset = 0;
     while (offset != bytes.size()) {
-        const ssize_t n = ::read(file.get(), bytes.data() + offset, bytes.size() - offset);
+        const ssize_t n = sys::read(file.get(), bytes.data() + offset, bytes.size() - offset);
         if (n < 0 && errno == EINTR) continue;
         if (n < 0) throwSystemError("read revision resolver entry");
         ensure(n > 0, Err::Corruption, "truncated revision resolver entry");
@@ -88,10 +85,10 @@ std::optional<Bytes> readFixed(int dirFd, const std::string& name, std::size_t e
 // Names in this module are *only* fixed internal tokens or canonical UUIDv7
 // values. No user-facing project/branch/revision label is ever a path segment.
 int openDirectory(int parent, const char* name, bool& created) {
-    created = ::mkdirat(parent, name, 0700) == 0;
+    created = sys::mkdirat(parent, name, 0700) == 0;
     if (!created && errno != EEXIST)
         throwSystemError("create revision resolver directory");
-    const int fd = ::openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    const int fd = sys::openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0 && (errno == ELOOP || errno == ENOTDIR))
         throw StorageError(Err::Corruption, "unsafe revision resolver directory");
     if (fd < 0) throwSystemError("open revision resolver directory");
@@ -103,22 +100,22 @@ int openDirectory(int parent, const char* name, bool& created) {
 // private staging name is inert after crash and may be cleaned independently.
 void publishOnce(int dir, const std::string& destination, const Bytes& payload) {
     const std::string temporary = ".stage-" + UuidV7::generate().toString();
-    Fd staged(::openat(dir, temporary.c_str(), O_CREAT | O_EXCL | O_WRONLY |
+    Fd staged(sys::openat(dir, temporary.c_str(), O_CREAT | O_EXCL | O_WRONLY |
                                    O_NOFOLLOW | O_CLOEXEC, 0600));
     if (staged.get() < 0) throwSystemError("stage revision resolver record");
     try {
         writeAll(staged.get(), payload.data(), payload.size());
-        if (::linkat(dir, temporary.c_str(), dir, destination.c_str(), 0) != 0) {
+        if (sys::linkat(dir, temporary.c_str(), dir, destination.c_str(), 0) != 0) {
             if (errno == EEXIST)
                 throw StorageError(Err::Conflict, "revision UUID binding already exists");
             throwSystemError("publish revision resolver record");
         }
         syncDir(dir);
     } catch (...) {
-        (void)::unlinkat(dir, temporary.c_str(), 0);
+        (void)sys::unlinkat(dir, temporary.c_str(), 0);
         throw;
     }
-    (void)::unlinkat(dir, temporary.c_str(), 0);
+    (void)sys::unlinkat(dir, temporary.c_str(), 0);
 }
 
 // Manifest: 'P','R','J',2 + owning project UUIDv7 = 20 bytes.
@@ -149,7 +146,7 @@ RevisionResolver::RevisionResolver(const std::filesystem::path& repository, Proj
         throw StorageError(Err::Corruption, "symlinked revision repository");
     ensure(ProjectId::parse(this->project_.toString()).has_value(), Err::InvalidInput,
            "invalid project UUIDv7");
-    Fd root(::open(repository.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    Fd root(sys::open(repository.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
     if (root.get() < 0) throwSystemError("open revision repository");
     bool createdNamespace = false;
     Fd namespaceDir(openDirectory(root.get(), "revision-v2", createdNamespace));
@@ -157,10 +154,10 @@ RevisionResolver::RevisionResolver(const std::filesystem::path& repository, Proj
     // of the containing directory entries after a sudden power cut. Only a
     // newly created entry needs the parent sync; lookups never fsync.
     if (createdNamespace) syncDir(root.get());
-    Fd lock(::openat(namespaceDir.get(), "lock", O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0600));
+    Fd lock(sys::openat(namespaceDir.get(), "lock", O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0600));
     if (lock.get() < 0) throwSystemError("open revision resolver lock");
-    struct stat lockStat{};
-    if (::fstat(lock.get(), &lockStat) != 0) throwSystemError("stat revision resolver lock");
+    sys::Stat lockStat{};
+    if (sys::fstat(lock.get(), &lockStat) != 0) throwSystemError("stat revision resolver lock");
     ensure(S_ISREG(lockStat.st_mode), Err::Corruption, "invalid revision resolver lock file");
     FileLock exclusive(lock.get());
     const Bytes expected = manifestBytes(this->project_);
@@ -171,8 +168,8 @@ RevisionResolver::RevisionResolver(const std::filesystem::path& repository, Proj
     } else {
         // This namespace can only lack a manifest during first creation.
         // Never silently rebind an existing UUID index after manifest damage.
-        struct stat orphaned{};
-        if (::fstatat(namespaceDir.get(), "ids", &orphaned, AT_SYMLINK_NOFOLLOW) == 0)
+        sys::Stat orphaned{};
+        if (sys::fstatat(namespaceDir.get(), "ids", &orphaned, AT_SYMLINK_NOFOLLOW) == 0)
             throw StorageError(Err::Corruption, "revision project manifest missing from existing index");
         if (errno != ENOENT) throwSystemError("check revision identity namespace");
         publishOnce(namespaceDir.get(), "project", expected);
@@ -187,9 +184,9 @@ RevisionResolver::RevisionResolver(const std::filesystem::path& repository, Proj
 }
 
 RevisionResolver::~RevisionResolver() {
-    if (this->identitiesFd_ >= 0) (void)::close(this->identitiesFd_);
-    if (this->dirFd_ >= 0) (void)::close(this->dirFd_);
-    if (this->lockFd_ >= 0) (void)::close(this->lockFd_);
+    if (this->identitiesFd_ >= 0) (void)sys::close(this->identitiesFd_);
+    if (this->dirFd_ >= 0) (void)sys::close(this->dirFd_);
+    if (this->lockFd_ >= 0) (void)sys::close(this->lockFd_);
 }
 
 const ProjectId& RevisionResolver::project() const noexcept { return this->project_; }

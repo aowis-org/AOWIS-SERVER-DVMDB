@@ -45,6 +45,10 @@ getent group aowis-dvmdb >/dev/null
 
 grep -Fq 'ExecStart=/usr/bin/aowis-server-dvmdb --config /etc/aowis/aowis-server-dvmdb.ini' "$unit"
 grep -Fxq 'root=/var/lib/aowis-dvmdb' "$config"
+# Production systemd defaults to all interfaces. The Docker qualification
+# itself passes --bind 127.0.0.1 to avoid exposing its unauthenticated test
+# server when the Docker wrapper runs with --test-network host.
+grep -Fxq 'bind=0.0.0.0' "$config"
 grep -Fxq 'StateDirectory=aowis-dvmdb' "$unit"
 systemd-analyze verify "$unit"
 

@@ -33,3 +33,6 @@ __pycache__/
 
 # Transient archive deletion manifest (consumed by apply_patch.sh)
 /.aowis-patch-delete.txt
+
+# Debian package build output
+/dist/

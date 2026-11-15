@@ -96,8 +96,10 @@ the test suite. Run `./compile_linux_tests.sh` separately for CTest coverage.
 | Persistent database | `/var/lib/aowis-dvmdb/` |
 | Service user/group | `aowis-dvmdb:aowis-dvmdb` |
 
-The unit starts with the packaged INI, defaults to loopback port **8755** and
-uses systemd `StateDirectory=aowis-dvmdb` with mode `0700`. `ProtectSystem=strict`
+The unit starts with the packaged INI and listens on **`0.0.0.0:8755`**
+(all IPv4 interfaces) by default; the standalone server without the deployment
+INI still defaults to `127.0.0.1:8755`. The unit uses systemd
+`StateDirectory=aowis-dvmdb` with mode `0700`. `ProtectSystem=strict`
 and other hardening options are inherited from the project's deployment unit.
 The **package-specific** unit calls `/usr/bin/`, not the `/usr/local/bin/`
 path from the manual-install example in `deploy/`. This avoids silently
@@ -121,8 +123,13 @@ upgrade and package removal; **purge removes the INI but preserves
 `/var/lib/aowis-dvmdb/`**. The service account is retained for ownership
 stability. To override the unit, use `sudo systemctl edit aowis-server-dvmdb`.
 
-**Security:** DVMDB currently has no HTTP authentication or authorization and
-no built-in HTTPS. Keep it on `127.0.0.1` unless access is restricted to a
-trusted network with separate access controls. TLS termination alone does not
-provide authorization. See [service configuration](native-database-service.md)
-and [security design](security-permissions-design.md).
+**Security:** The systemd service's `0.0.0.0` default exposes TCP port
+**8755 on every IPv4 network interface**. DVMDB currently has no HTTP
+authentication/authorization or built-in HTTPS. Restrict inbound access with a
+firewall or trusted VPN *before* starting the service. To restore loopback-only
+binding, set `bind=127.0.0.1` under `[server]` in
+`/etc/aowis/aowis-server-dvmdb.ini` and restart the service. TLS termination
+alone does not authorize users. On an existing installation, dpkg may preserve
+a locally modified INI on upgrade, so check its `bind=` value explicitly.
+See [service configuration](native-database-service.md) and
+[security design](security-permissions-design.md).

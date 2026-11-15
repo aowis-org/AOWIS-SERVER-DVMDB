@@ -105,10 +105,21 @@ setting it uses `./aowis-dvmdb-data` if that exists, otherwise
 
 ## Build and test
 
-Linux only. Requirements: a C++20 compiler, CMake, Ninja, OpenSSL, and Qt 6
-Core for the model codec, hydraulic persistence and the HTTP server. The store
-and project service also build without Qt
-(`-DAOWIS_DVMDB_WITH_MODEL_CODEC=OFF`).
+The server, its packaging and the test suite are Linux only. Requirements: a
+C++20 compiler, CMake, Ninja, OpenSSL, and Qt 6 Core for the model codec,
+hydraulic persistence and the HTTP server. The store and project service also
+build without Qt (`-DAOWIS_DVMDB_WITH_MODEL_CODEC=OFF`).
+
+The engine libraries (store, project service, hydraulic persistence and HTTP
+routes) also build for **Windows (MinGW) and macOS**, which is how
+AOWIS-SERVER-Standalone embeds them. Every filesystem primitive goes through
+`src/dvmdb_sys.h`: libc on Linux/macOS (macOS `fsync` uses `F_FULLFSYNC`),
+Win32 handles on Windows (`src/dvmdb_sys_windows.cpp`, which documents the
+exact mapping). A Windows data directory must be on NTFS/ReFS (hard links are
+part of the publication protocol). Windows and macOS default to the built-in
+SHA-256 (`-DAOWIS_DVMDB_WITH_OPENSSL=OFF`), so no target OpenSSL is needed;
+Linux keeps OpenSSL's accelerated digest by default. Both produce identical
+digests, and the Linux suite passes with either setting.
 
 ```bash
 ./compile_linux_tests.sh          # current test build and CTest suite

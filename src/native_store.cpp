@@ -5,14 +5,13 @@
 #include "aowis/dvmdb/storage_error.h"
 #include "native_test_faults.h"
 
-#include <openssl/evp.h>
-#include <openssl/rand.h>
+#include "dvmdb_crypto.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cerrno>
 #include <cstring>
-#include <fcntl.h>
+#include "dvmdb_sys.h"
 #include <fstream>
 #include <functional>
 #include <iterator>
@@ -22,13 +21,9 @@
 #include <memory>
 #include <queue>
 #include <utility>
-#include <sys/mman.h>
 #include <stdexcept>
 #include <unordered_set>
 #include <string>
-#include <sys/file.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 namespace aowis::dvmdb {
 namespace {
@@ -120,19 +115,20 @@ constexpr std::string_view scratchPrefix = "aowis-scratch-";
 
 int createScratchFile(const std::filesystem::path& directory, std::string_view purpose) {
     if (!detail::forceNamedScratchFiles()) {
-        const int anonymous = ::open(directory.c_str(), O_TMPFILE | O_RDWR | O_CLOEXEC, 0600);
+        const int anonymous = sys::openTmpfile(directory.c_str(), O_RDWR | O_CLOEXEC);
         if (anonymous >= 0) return anonymous;
-        // Filesystems without O_TMPFILE support report one of these.
+        // Filesystems without O_TMPFILE support report one of these
+        // (non-Linux systems: always EOPNOTSUPP, see dvmdb_sys.h).
         if (errno != EOPNOTSUPP && errno != EISDIR && errno != EINVAL)
             throwSystemError("create scratch file for " + std::string(purpose));
     }
     std::string name = (directory / (std::string(scratchPrefix) + std::string(purpose) + "-XXXXXX")).string();
-    const int fd = ::mkostemp(name.data(), O_CLOEXEC);
+    const int fd = sys::mkostemp(name.data(), O_CLOEXEC);
     systemCall(fd >= 0, "create scratch file for " + std::string(purpose));
     // ENOENT: a concurrently opening handle already removed the leftover.
-    if (::unlink(name.c_str()) != 0 && errno != ENOENT) {
+    if (sys::unlink(name.c_str()) != 0 && errno != ENOENT) {
         const int saved = errno;
-        ::close(fd);
+        sys::close(fd);
         errno = saved;
         throwSystemError("unlink scratch file for " + std::string(purpose));
     }
@@ -200,7 +196,7 @@ public:
         require(Err::LimitExceeded, bytes <= static_cast<std::uint64_t>(std::numeric_limits<off_t>::max()),
                 "native scratch allocation exceeds file size limit");
         reserve(bytes);
-        const int result = ::posix_fallocate(this->fd_, 0, static_cast<off_t>(bytes));
+        const int result = sys::posix_fallocate(this->fd_, 0, static_cast<off_t>(bytes));
         if (result != 0) {
             errno = result;
             systemCall(false, operation);
@@ -208,7 +204,7 @@ public:
     }
 private:
     void reset() noexcept {
-        if (this->fd_ >= 0) ::close(this->fd_);
+        if (this->fd_ >= 0) sys::close(this->fd_);
         this->fd_ = -1;
         if (this->extent_ != 0) {
             InternalScratchAccounting& accounting = scratchAccounting();
@@ -232,15 +228,15 @@ public:
         // repo.lock is held, release our shared lock, attempt exclusivity,
         // and restore SH on failure. Other constructors may acquire SH in
         // the gap, but then compaction safely refuses to proceed.
-        systemCall(::flock(this->fd_, LOCK_UN) == 0, "release maintenance shared lock");
-        if (::flock(this->fd_, LOCK_EX | LOCK_NB) != 0) {
-            systemCall(::flock(this->fd_, LOCK_SH) == 0,
+        systemCall(sys::flock(this->fd_, LOCK_UN) == 0, "release maintenance shared lock");
+        if (sys::flock(this->fd_, LOCK_EX | LOCK_NB) != 0) {
+            systemCall(sys::flock(this->fd_, LOCK_SH) == 0,
                        "restore maintenance shared lock after refused compaction");
             throw StorageError(Err::Conflict,
                 "compaction requires all other repository handles to be closed");
         }
     }
-    ~ScopedMaintenanceExclusive() { ::flock(this->fd_, LOCK_SH); }
+    ~ScopedMaintenanceExclusive() { sys::flock(this->fd_, LOCK_SH); }
     ScopedMaintenanceExclusive(const ScopedMaintenanceExclusive&) = delete;
     ScopedMaintenanceExclusive& operator=(const ScopedMaintenanceExclusive&) = delete;
 private:
@@ -250,9 +246,9 @@ private:
 class ScopedFileLock {
 public:
     explicit ScopedFileLock(int fd) : fd_(fd) {
-        systemCall(::flock(this->fd_, LOCK_EX) == 0, "flock");
+        systemCall(sys::flock(this->fd_, LOCK_EX) == 0, "flock");
     }
-    ~ScopedFileLock() { ::flock(this->fd_, LOCK_UN); }
+    ~ScopedFileLock() { sys::flock(this->fd_, LOCK_UN); }
     ScopedFileLock(const ScopedFileLock&) = delete;
     ScopedFileLock& operator=(const ScopedFileLock&) = delete;
 private:
@@ -381,7 +377,7 @@ std::uint64_t readU64(const std::uint8_t* source) {
 void readExact(int fd, std::uint8_t* out, std::size_t size, std::uint64_t offset) {
     std::size_t done = 0;
     while (done != size) {
-        ssize_t count = ::pread(fd, out + done, size - done,
+        ssize_t count = sys::pread(fd, out + done, size - done,
                                 static_cast<off_t>(offset + done));
         if (count < 0 && errno == EINTR) {
             continue;
@@ -395,7 +391,7 @@ void readExact(int fd, std::uint8_t* out, std::size_t size, std::uint64_t offset
 void writeExact(int fd, const std::uint8_t* bytes, std::size_t size, std::uint64_t offset) {
     std::size_t done = 0;
     while (done != size) {
-        ssize_t count = ::pwrite(fd, bytes + done, size - done,
+        ssize_t count = sys::pwrite(fd, bytes + done, size - done,
                                  static_cast<off_t>(offset + done));
         if (count < 0 && errno == EINTR) {
             continue;
@@ -486,7 +482,7 @@ private:
                 "temporary export hash table exceeds file size limit");
         AccountedScratchFile replacement(this->scratch_, "export-visited-grow");
         replacement.reserve(newCapacity * sizeof(Hash));
-        systemCall(::ftruncate(replacement.fd(), static_cast<off_t>(newCapacity * sizeof(Hash))) == 0,
+        systemCall(sys::ftruncate(replacement.fd(), static_cast<off_t>(newCapacity * sizeof(Hash))) == 0,
                    "size export visited table");
         if (this->capacity_ != 0) {
             this->forEach([&](const Hash& value) {
@@ -615,7 +611,7 @@ public:
 
     ~BundleLocationIndex() {
         if (this->mapped_ != nullptr)
-            ::munmap(this->mapped_, this->count_ * bundleLocationRecordBytes);
+            sys::munmap(this->mapped_, this->count_ * bundleLocationRecordBytes);
     }
 
     BundleLocationIndex(const BundleLocationIndex&) = delete;
@@ -634,7 +630,7 @@ public:
 
     void finalize() {
         if (this->count_ == 0) return;
-        void* const mapped = ::mmap(nullptr, this->count_ * bundleLocationRecordBytes,
+        void* const mapped = sys::mmap(nullptr, this->count_ * bundleLocationRecordBytes,
                                     PROT_READ, MAP_SHARED, this->fd_.fd(), 0);
         systemCall(mapped != MAP_FAILED, "map temporary replication index");
         this->mapped_ = mapped;
@@ -698,7 +694,7 @@ public:
             // SIGBUS under ENOSPC. Reserve the temporary storage now so a
             // full disk produces a catchable import error before publication.
             this->fd_.allocate(count, "reserve temporary verification marks");
-            void* const mapped = ::mmap(nullptr, count, PROT_READ | PROT_WRITE,
+            void* const mapped = sys::mmap(nullptr, count, PROT_READ | PROT_WRITE,
                                         MAP_SHARED, this->fd_.fd(), 0);
             systemCall(mapped != MAP_FAILED, "map temporary verification marks");
             this->mapped_ = static_cast<std::uint8_t*>(mapped);
@@ -708,7 +704,7 @@ public:
     }
 
     ~BundleVisitMarks() {
-        if (this->mapped_ != nullptr) ::munmap(this->mapped_, this->count_);
+        if (this->mapped_ != nullptr) sys::munmap(this->mapped_, this->count_);
     }
     BundleVisitMarks(const BundleVisitMarks&) = delete;
     BundleVisitMarks& operator=(const BundleVisitMarks&) = delete;
@@ -764,7 +760,7 @@ public:
             // A sparse mapped file can SIGBUS on first access under ENOSPC.
             // Reserve its blocks up front and fail the import cleanly instead.
             this->fd_.allocate(bytes, "reserve temporary trie summary table");
-            void* const mapped = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
+            void* const mapped = sys::mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
                                         MAP_SHARED, this->fd_.fd(), 0);
             systemCall(mapped != MAP_FAILED, "map temporary trie summary table");
             this->mapped_ = static_cast<std::uint8_t*>(mapped);
@@ -774,7 +770,7 @@ public:
     }
 
     ~BundleTreeSummaries() {
-        if (this->mapped_ != nullptr) ::munmap(this->mapped_, this->count_ * entryBytes);
+        if (this->mapped_ != nullptr) sys::munmap(this->mapped_, this->count_ * entryBytes);
     }
     BundleTreeSummaries(const BundleTreeSummaries&) = delete;
     BundleTreeSummaries& operator=(const BundleTreeSummaries&) = delete;
@@ -832,7 +828,7 @@ public:
         this->buffer_.reserve(chunkEdges);
     }
     ~SortedReferenceEdges() {
-        if (this->mapped_ != nullptr) ::munmap(this->mapped_, this->records_ * sizeof(Edge));
+        if (this->mapped_ != nullptr) sys::munmap(this->mapped_, this->records_ * sizeof(Edge));
     }
     SortedReferenceEdges(const SortedReferenceEdges&) = delete;
     SortedReferenceEdges& operator=(const SortedReferenceEdges&) = delete;
@@ -856,7 +852,7 @@ public:
         flush();
         require(Err::LimitExceeded, this->records_ <= std::numeric_limits<std::size_t>::max() / sizeof(Edge),
                 "sorted references exceed addressable memory");
-        void* const mapped = ::mmap(nullptr, this->records_ * sizeof(Edge),
+        void* const mapped = sys::mmap(nullptr, this->records_ * sizeof(Edge),
                                     PROT_READ, MAP_SHARED, this->fd_.fd(), 0);
         systemCall(mapped != MAP_FAILED, "map sorted model references");
         this->mapped_ = mapped;
@@ -935,25 +931,17 @@ private:
 // contains a large value object. Typed graph validation still decodes those
 // objects later; the first pass never needs to materialize their payloads.
 Hash sha256FileRegion(int fd, std::uint64_t offset, std::uint64_t length) {
-    using DigestContext = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>;
-    DigestContext context(EVP_MD_CTX_new(), &EVP_MD_CTX_free);
-    require(Err::Internal, context != nullptr && EVP_DigestInit_ex(context.get(), EVP_sha256(), nullptr) == 1,
-            "initialize bundle SHA-256 failed");
+    crypto::Sha256 digest;
     std::array<std::uint8_t, 64 * 1024> buffer{};
     while (length != 0) {
         const std::size_t chunk = static_cast<std::size_t>(
             std::min<std::uint64_t>(length, buffer.size()));
         readExact(fd, buffer.data(), chunk, offset);
-        require(Err::Internal, EVP_DigestUpdate(context.get(), buffer.data(), chunk) == 1,
-                "update bundle SHA-256 failed");
+        digest.update(buffer.data(), chunk);
         offset += chunk;
         length -= chunk;
     }
-    Hash result{};
-    unsigned int digestSize = 0;
-    require(Err::Internal, EVP_DigestFinal_ex(context.get(), result.data(), &digestSize) == 1 &&
-            digestSize == result.size(), "finalize bundle SHA-256 failed");
-    return result;
+    return digest.finish();
 }
 
 constexpr std::array<std::uint8_t, 5> packRecordMagic{'A', 'O', 'B', 'J', 1};
@@ -1014,11 +1002,11 @@ bool isLowerHexToken(std::string_view text) {
 }
 
 void syncDirectory(const std::filesystem::path& directory) {
-    int fd = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int fd = sys::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     systemCall(fd >= 0, "open directory for sync");
-    int status = ::fsync(fd);
+    int status = sys::fsync(fd);
     int saved = errno;
-    ::close(fd);
+    sys::close(fd);
     errno = saved;
     systemCall(status == 0, "fsync directory");
 }
@@ -1032,7 +1020,7 @@ void removeStageRemnants(const std::filesystem::path& directory) {
             std::filesystem::directory_iterator(directory)) {
         const std::string name = entry.path().filename().string();
         if (!name.starts_with(".stage-") || entry.is_symlink() || !entry.is_regular_file()) continue;
-        if (::unlink(entry.path().c_str()) != 0 && errno != ENOENT)
+        if (sys::unlink(entry.path().c_str()) != 0 && errno != ENOENT)
             throwSystemError("remove leftover staged record " + name);
         removed = true;
     }
@@ -1142,26 +1130,26 @@ std::vector<StoredBranch> readStoredBranches(const std::filesystem::path& reposi
                 "unsupported branch-ref format: expected UUIDv7 filename");
         require(Err::Corruption, !entry.is_symlink() && entry.is_regular_file(),
                 "symlink or special UUID branch record");
-        const int fd = ::open(entry.path().c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        const int fd = sys::open(entry.path().c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
         if (fd < 0 && errno == ELOOP) throw StorageError(Err::Corruption, "symlinked UUID branch record");
         if (fd < 0) throwSystemError("open UUID branch record");
         std::string bytes;
         try {
-            struct stat st{};
-            systemCall(::fstat(fd, &st) == 0, "stat UUID branch record");
+            sys::Stat st{};
+            systemCall(sys::fstat(fd, &st) == 0, "stat UUID branch record");
             require(Err::Corruption, S_ISREG(st.st_mode) && st.st_size >= 21 && st.st_size <= 4096,
                     "invalid UUID branch record file type or length");
             bytes.resize(static_cast<std::size_t>(st.st_size));
             std::size_t offset = 0;
             while (offset != bytes.size()) {
-                const ssize_t n = ::read(fd, bytes.data()+offset, bytes.size()-offset);
+                const ssize_t n = sys::read(fd, bytes.data()+offset, bytes.size()-offset);
                 if (n < 0 && errno == EINTR) continue;
                 systemCall(n >= 0, "read UUID branch record");
                 require(Err::Corruption, n > 0, "truncated UUID branch record");
                 offset += static_cast<std::size_t>(n);
             }
-            systemCall(::close(fd) == 0, "close UUID branch record");
-        } catch (...) { ::close(fd); throw; }
+            systemCall(sys::close(fd) == 0, "close UUID branch record");
+        } catch (...) { sys::close(fd); throw; }
         // BRANCH-2 committed HEAD, BRANCH-3 plus origin, BRANCH-4 unborn,
         // BRANCH-5 plus origin and fork revision.
         constexpr std::string_view committedPrefix = "AOWIS-BRANCH-2\n";
@@ -1292,21 +1280,21 @@ std::optional<std::string> readRevisionDisplayNote(const std::filesystem::path& 
                                                     const RevisionId& revision) {
     const std::filesystem::path path = repository / "refs" / "revision-messages" / revision.toString();
     if (!std::filesystem::exists(path)) return std::nullopt;
-    const int fd = ::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    const int fd = sys::open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     systemCall(fd >= 0, "open revision display note");
-    struct stat st{};
-    const bool regular = ::fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+    sys::Stat st{};
+    const bool regular = sys::fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
                          st.st_size > 0 && st.st_size <= static_cast<off_t>(maxCommitMessageBytes);
-    if (!regular) { ::close(fd); throw StorageError(Err::Corruption, "invalid revision note"); }
+    if (!regular) { sys::close(fd); throw StorageError(Err::Corruption, "invalid revision note"); }
     std::string value(static_cast<std::size_t>(st.st_size), '\0');
     std::size_t offset = 0;
     while (offset < value.size()) {
-        const ssize_t count = ::read(fd, value.data() + offset, value.size() - offset);
+        const ssize_t count = sys::read(fd, value.data() + offset, value.size() - offset);
         if (count < 0 && errno == EINTR) continue;
-        if (count <= 0) { ::close(fd); throw StorageError(Err::Corruption, "truncated revision note"); }
+        if (count <= 0) { sys::close(fd); throw StorageError(Err::Corruption, "truncated revision note"); }
         offset += static_cast<std::size_t>(count);
     }
-    ::close(fd);
+    sys::close(fd);
     return value;
 }
 
@@ -1315,7 +1303,7 @@ void publishRevisionDisplayNote(const std::filesystem::path& repository,
     const std::filesystem::path refs = repository / "refs";
     const std::filesystem::path notes = refs / "revision-messages";
     if (!std::filesystem::exists(notes)) {
-        systemCall(::mkdir(notes.c_str(), 0700) == 0 || errno == EEXIST,
+        systemCall(sys::mkdir(notes.c_str(), 0700) == 0 || errno == EEXIST,
                    "create revision note directory");
         syncDirectory(refs);
     }
@@ -1323,21 +1311,21 @@ void publishRevisionDisplayNote(const std::filesystem::path& repository,
                 std::filesystem::is_directory(notes), "unsafe revision note directory");
     const std::filesystem::path target = notes / revision.toString();
     const std::filesystem::path stage = notes / (".stage-" + RevisionId::generate().toString());
-    const int fd = ::open(stage.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    const int fd = sys::open(stage.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
     systemCall(fd >= 0, "create revision note stage");
     try {
         std::size_t offset = 0;
         while (offset < message.size()) {
-            const ssize_t count = ::write(fd, message.data() + offset, message.size() - offset);
+            const ssize_t count = sys::write(fd, message.data() + offset, message.size() - offset);
             if (count < 0 && errno == EINTR) continue;
             systemCall(count > 0, "write revision note");
             offset += static_cast<std::size_t>(count);
         }
-        systemCall(::fsync(fd) == 0, "sync revision note");
-        systemCall(::close(fd) == 0, "close revision note");
-    } catch (...) { ::close(fd); ::unlink(stage.c_str()); throw; }
-    if (::rename(stage.c_str(), target.c_str()) != 0) {
-        ::unlink(stage.c_str()); throwSystemError("publish revision note");
+        systemCall(sys::fsync(fd) == 0, "sync revision note");
+        systemCall(sys::close(fd) == 0, "close revision note");
+    } catch (...) { sys::close(fd); sys::unlink(stage.c_str()); throw; }
+    if (sys::rename(stage.c_str(), target.c_str()) != 0) {
+        sys::unlink(stage.c_str()); throwSystemError("publish revision note");
     }
     syncDirectory(notes);
 }
@@ -1391,7 +1379,7 @@ void publishStoredBranch(const std::filesystem::path& repository,
             branch.revision->toString() + "\n" + toHex(branch.head) + "\n";
     const BranchId stagingId = BranchId::generate();
     const std::filesystem::path temporary = heads / (".stage-" + stagingId.toString());
-    int fd = ::open(temporary.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0600);
+    int fd = sys::open(temporary.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0600);
     systemCall(fd >= 0, "create UUID branch staging record");
     bool published = false;
     try {
@@ -1399,20 +1387,20 @@ void publishStoredBranch(const std::filesystem::path& repository,
                                   payload.size(), 0, "ref.partial.temp");
         writeExact(fd, reinterpret_cast<const std::uint8_t*>(payload.data()), payload.size(), 0);
         detail::faultCheckpoint("ref.before.fsync");
-        systemCall(::fsync(fd) == 0, "sync UUID branch staging record");
+        systemCall(sys::fsync(fd) == 0, "sync UUID branch staging record");
         detail::faultCheckpoint("ref.after.fsync");
-        systemCall(::close(fd) == 0, "close UUID branch staging record");
+        systemCall(sys::close(fd) == 0, "close UUID branch staging record");
         fd = -1;
         detail::faultCheckpoint("ref.before.rename");
         if (create) {
-            systemCall(::link(temporary.c_str(), destination.c_str()) == 0,
+            systemCall(sys::link(temporary.c_str(), destination.c_str()) == 0,
                        "publish new UUID branch record without replacement");
         } else {
             // Do not follow a maliciously swapped symlink at the destination.
-            struct stat st{};
-            systemCall(::lstat(destination.c_str(), &st) == 0 && S_ISREG(st.st_mode),
+            sys::Stat st{};
+            systemCall(sys::lstat(destination.c_str(), &st) == 0 && S_ISREG(st.st_mode),
                        "validate UUID branch record before replace");
-            systemCall(::rename(temporary.c_str(), destination.c_str()) == 0,
+            systemCall(sys::rename(temporary.c_str(), destination.c_str()) == 0,
                        "atomically update UUID branch record");
         }
         published = true;
@@ -1420,11 +1408,11 @@ void publishStoredBranch(const std::filesystem::path& repository,
         syncDirectory(heads);
         detail::faultCheckpoint("ref.after.dirsync");
     } catch (...) {
-        if (fd >= 0) ::close(fd);
-        (void)::unlink(temporary.c_str());
+        if (fd >= 0) sys::close(fd);
+        (void)sys::unlink(temporary.c_str());
         throw;
     }
-    if (published) (void)::unlink(temporary.c_str());
+    if (published) (void)sys::unlink(temporary.c_str());
 }
 
 // Shared immutable logical verifier for untrusted bundle objects AND objects
@@ -2114,33 +2102,28 @@ Hash fromHex(std::string_view value) {
 }
 
 Hash sha256(const Bytes& value) {
-    Hash output{};
-    unsigned length = 0;
-    require(Err::Internal, EVP_Digest(value.data(), value.size(), output.data(), &length,
-                       EVP_sha256(), nullptr) == 1 && length == output.size(),
-            "OpenSSL SHA-256 failed");
-    return output;
+    return crypto::sha256(value.data(), value.size());
 }
 
 Repository::Repository(std::filesystem::path directory)
     : directory_(std::move(directory)), scratch_(this->directory_ / "tmp") {
     std::filesystem::create_directories(this->directory_ / "refs" / "heads");
-    this->lifetimeFd_ = ::open((this->directory_ / "maintenance.lock").c_str(),
+    this->lifetimeFd_ = sys::open((this->directory_ / "maintenance.lock").c_str(),
                                O_CREAT | O_RDWR | O_CLOEXEC, 0644);
     systemCall(this->lifetimeFd_ >= 0, "open maintenance lock");
     try {
-        systemCall(::flock(this->lifetimeFd_, LOCK_SH) == 0, "lock repository lifetime");
-        this->lockFd_ = ::open((this->directory_ / "repo.lock").c_str(),
+        systemCall(sys::flock(this->lifetimeFd_, LOCK_SH) == 0, "lock repository lifetime");
+        this->lockFd_ = sys::open((this->directory_ / "repo.lock").c_str(),
                                O_CREAT | O_RDWR | O_CLOEXEC, 0644);
         systemCall(this->lockFd_ >= 0, "open repository lock");
         ScopedFileLock locked(this->lockFd_);
         prepareScratchDirectory();
         this->packToken_ = activePackToken(this->directory_);
         const int flags = O_RDWR | O_CLOEXEC | (this->packToken_.empty() ? O_CREAT : 0);
-        this->packFd_ = ::open(packPath(this->directory_, this->packToken_, false).c_str(),
+        this->packFd_ = sys::open(packPath(this->directory_, this->packToken_, false).c_str(),
                                flags, 0644);
         systemCall(this->packFd_ >= 0, "open active content pack");
-        this->indexFd_ = ::open(packPath(this->directory_, this->packToken_, true).c_str(),
+        this->indexFd_ = sys::open(packPath(this->directory_, this->packToken_, true).c_str(),
                                 flags | O_CREAT, 0644);
         systemCall(this->indexFd_ >= 0, "open active content index");
         refreshIndex();
@@ -2152,10 +2135,10 @@ Repository::Repository(std::filesystem::path directory)
         syncDirectory(this->directory_);
         syncDirectory(this->directory_ / "refs");
     } catch (...) {
-        if (this->indexFd_ >= 0) ::close(this->indexFd_);
-        if (this->packFd_ >= 0) ::close(this->packFd_);
-        if (this->lockFd_ >= 0) ::close(this->lockFd_);
-        ::close(this->lifetimeFd_);
+        if (this->indexFd_ >= 0) sys::close(this->indexFd_);
+        if (this->packFd_ >= 0) sys::close(this->packFd_);
+        if (this->lockFd_ >= 0) sys::close(this->lockFd_);
+        sys::close(this->lifetimeFd_);
         throw;
     }
 }
@@ -2174,7 +2157,7 @@ void Repository::prepareScratchDirectory() {
             std::filesystem::directory_iterator(this->scratch_)) {
         const std::string name = entry.path().filename().string();
         if (!name.starts_with(scratchPrefix) || entry.is_symlink() || !entry.is_regular_file()) continue;
-        if (::unlink(entry.path().c_str()) != 0 && errno != ENOENT)
+        if (sys::unlink(entry.path().c_str()) != 0 && errno != ENOENT)
             throwSystemError("remove leftover scratch file " + name);
     }
 }
@@ -2189,12 +2172,12 @@ const std::filesystem::path& Repository::scratchDirectory() const noexcept {
 
 ScratchFile::ScratchFile(int fd) noexcept : fd_(fd) {}
 ScratchFile::~ScratchFile() {
-    if (this->fd_ >= 0) ::close(this->fd_);
+    if (this->fd_ >= 0) sys::close(this->fd_);
 }
 ScratchFile::ScratchFile(ScratchFile&& other) noexcept : fd_(other.fd_) { other.fd_ = -1; }
 ScratchFile& ScratchFile::operator=(ScratchFile&& other) noexcept {
     if (this != &other) {
-        if (this->fd_ >= 0) ::close(this->fd_);
+        if (this->fd_ >= 0) sys::close(this->fd_);
         this->fd_ = other.fd_;
         other.fd_ = -1;
     }
@@ -2208,15 +2191,15 @@ int ScratchFile::release() noexcept {
 }
 
 Repository::~Repository() {
-    if (this->indexFd_ >= 0) ::close(this->indexFd_);
-    if (this->packFd_ >= 0) ::close(this->packFd_);
-    if (this->lockFd_ >= 0) ::close(this->lockFd_);
-    if (this->lifetimeFd_ >= 0) ::close(this->lifetimeFd_);
+    if (this->indexFd_ >= 0) sys::close(this->indexFd_);
+    if (this->packFd_ >= 0) sys::close(this->packFd_);
+    if (this->lockFd_ >= 0) sys::close(this->lockFd_);
+    if (this->lifetimeFd_ >= 0) sys::close(this->lifetimeFd_);
 }
 
 void Repository::scanPackTail() {
-    struct stat data{};
-    systemCall(::fstat(this->packFd_, &data) == 0, "stat content pack");
+    sys::Stat data{};
+    systemCall(sys::fstat(this->packFd_, &data) == 0, "stat content pack");
     require(Err::Corruption, data.st_size >= 0, "invalid negative pack size");
     const std::uint64_t size = static_cast<std::uint64_t>(data.st_size);
     require(Err::Corruption, size >= this->scanOffset_, "content pack shrank while repository was open");
@@ -2260,7 +2243,7 @@ void Repository::discardTornPackTail(std::uint64_t position, std::uint64_t size)
                 std::to_string(position));
     }
     preserveDiscardedPackBytes(position, size);
-    systemCall(::ftruncate(this->packFd_, static_cast<off_t>(position)) == 0,
+    systemCall(sys::ftruncate(this->packFd_, static_cast<off_t>(position)) == 0,
                "discard torn trailing pack records");
     this->recoveredPackTailBytes_ += size - position;
 }
@@ -2279,7 +2262,7 @@ void Repository::preserveDiscardedPackBytes(std::uint64_t position, std::uint64_
         require(Err::Internal, attempt < 1000, "too many preserved copies of one torn pack tail");
         target = directory / (stem + (attempt == 0 ? std::string() :
                                       "-" + std::to_string(attempt)) + ".bin");
-        fd = ::open(target.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        fd = sys::open(target.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
         if (fd < 0 && errno != EEXIST) systemCall(false, "create torn pack tail copy");
     }
     try {
@@ -2292,14 +2275,14 @@ void Repository::preserveDiscardedPackBytes(std::uint64_t position, std::uint64_
             writeExact(fd, buffer.data(), chunk, done);
             done += chunk;
         }
-        systemCall(::fsync(fd) == 0, "sync torn pack tail copy");
+        systemCall(sys::fsync(fd) == 0, "sync torn pack tail copy");
         const int closing = fd;
         fd = -1;
-        systemCall(::close(closing) == 0, "close torn pack tail copy");
+        systemCall(sys::close(closing) == 0, "close torn pack tail copy");
         // The copy must be durable before the original bytes are truncated.
         syncDirectory(directory);
     } catch (...) {
-        if (fd >= 0) ::close(fd);
+        if (fd >= 0) sys::close(fd);
         std::error_code ignored;
         std::filesystem::remove(target, ignored);
         throw;
@@ -2339,7 +2322,7 @@ std::uint64_t Repository::removeStalePackGenerations() {
         if (remove) stale.push_back(entry.path());
     }
     for (const std::filesystem::path& path : stale)
-        systemCall(::unlink(path.c_str()) == 0, "remove stale pack generation file");
+        systemCall(sys::unlink(path.c_str()) == 0, "remove stale pack generation file");
     if (!stale.empty()) syncDirectory(this->directory_);
     return static_cast<std::uint64_t>(stale.size());
 }
@@ -2474,11 +2457,11 @@ void Repository::rebuildIndex() {
     this->pendingIndex_.clear();
     this->scanOffset_ = 0;
     this->indexReadOffset_ = indexHeaderSize;
-    systemCall(::ftruncate(this->indexFd_, 0) == 0, "truncate damaged pack index");
+    systemCall(sys::ftruncate(this->indexFd_, 0) == 0, "truncate damaged pack index");
     writeExact(this->indexFd_, indexMagic.data(), indexMagic.size(), 0);
     scanPackTail();
     // Also persist an empty index (no objects => no pending entries).
-    systemCall(::fsync(this->indexFd_) == 0, "sync rebuilt pack index");
+    systemCall(sys::fsync(this->indexFd_) == 0, "sync rebuilt pack index");
 }
 
 void Repository::refreshIndex() {
@@ -2486,10 +2469,10 @@ void Repository::refreshIndex() {
     // A preceding operation could have written objects before throwing;
     // make its orphan records discoverable by other processes too.
     if (!this->pendingIndex_.empty()) syncPack();
-    struct stat packData{};
-    struct stat indexData{};
-    systemCall(::fstat(this->packFd_, &packData) == 0, "stat content pack");
-    systemCall(::fstat(this->indexFd_, &indexData) == 0, "stat content index");
+    sys::Stat packData{};
+    sys::Stat indexData{};
+    systemCall(sys::fstat(this->packFd_, &packData) == 0, "stat content pack");
+    systemCall(sys::fstat(this->indexFd_, &indexData) == 0, "stat content index");
     require(Err::Corruption, packData.st_size >= 0 && indexData.st_size >= 0, "invalid storage size");
     const std::uint64_t packBytes = static_cast<std::uint64_t>(packData.st_size);
     const std::uint64_t indexBytes = static_cast<std::uint64_t>(indexData.st_size);
@@ -2544,7 +2527,7 @@ void Repository::refreshIndex() {
     this->indexReadOffset_ = position;
     if (position != indexBytes) {
         // Incomplete sidecar tail (for instance interrupted index flush).
-        systemCall(::ftruncate(this->indexFd_, static_cast<off_t>(position)) == 0,
+        systemCall(sys::ftruncate(this->indexFd_, static_cast<off_t>(position)) == 0,
                    "truncate incomplete index entry");
     }
     // A crash between writing pack and index may leave a valid pack suffix.
@@ -2599,7 +2582,7 @@ void Repository::syncPack() {
     // sidecar. The index may lag across a crash; refreshIndex hashes the
     // uncovered durable pack suffix to rebuild it on the next open.
     detail::faultCheckpoint("pack.before.fsync");
-    systemCall(::fsync(this->packFd_) == 0, "fsync content pack");
+    systemCall(sys::fsync(this->packFd_) == 0, "fsync content pack");
     detail::faultCheckpoint("pack.after.fsync");
     if (!this->pendingIndex_.empty()) {
         writeExact(this->indexFd_, this->pendingIndex_.data(),
@@ -4009,10 +3992,10 @@ void Repository::deleteBranch(const ProjectId& project, const BranchId& branch,
     if (selected->revision) (void)branchRevisionLocked(project, selected->name);
     const std::filesystem::path heads = this->directory_ / "refs" / "heads";
     const std::filesystem::path target = heads / branch.toString();
-    struct stat st{};
-    systemCall(::lstat(target.c_str(), &st) == 0 && S_ISREG(st.st_mode),
+    sys::Stat st{};
+    systemCall(sys::lstat(target.c_str(), &st) == 0 && S_ISREG(st.st_mode),
                "validate branch ref before removal");
-    systemCall(::unlink(target.c_str()) == 0, "delete branch ref");
+    systemCall(sys::unlink(target.c_str()) == 0, "delete branch ref");
     syncDirectory(heads);
 }
 
@@ -4055,10 +4038,10 @@ bool Repository::truncateBranch(const ProjectId& project, const BranchId& branch
     if (deleteEntireBranch) {
         const std::filesystem::path heads = this->directory_ / "refs" / "heads";
         const std::filesystem::path target = heads / branch.toString();
-        struct stat st{};
-        systemCall(::lstat(target.c_str(), &st) == 0 && S_ISREG(st.st_mode),
+        sys::Stat st{};
+        systemCall(sys::lstat(target.c_str(), &st) == 0 && S_ISREG(st.st_mode),
                    "validate branch ref before removal");
-        systemCall(::unlink(target.c_str()) == 0, "delete branch ref");
+        systemCall(sys::unlink(target.c_str()) == 0, "delete branch ref");
         syncDirectory(heads);
         return true;
     }
@@ -4474,7 +4457,7 @@ std::optional<ProjectId> persistedProject(const std::filesystem::path& directory
     require(Err::Corruption, !std::filesystem::is_symlink(namespacePath) &&
             std::filesystem::is_directory(namespacePath), "unsafe revision directory");
     const std::filesystem::path manifest = namespacePath / "project";
-    const int fd = ::open(manifest.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    const int fd = sys::open(manifest.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
     if (fd < 0 && errno == ENOENT) {
         require(Err::Corruption, !std::filesystem::exists(namespacePath / "ids"),
                 "missing project identity manifest");
@@ -4482,13 +4465,13 @@ std::optional<ProjectId> persistedProject(const std::filesystem::path& directory
     }
     if (fd < 0) throwSystemError("open project identity manifest");
     std::array<std::uint8_t, 20> bytes{};
-    struct stat st{};
-    const bool valid = ::fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size == 20;
+    sys::Stat st{};
+    const bool valid = sys::fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size == 20;
     if (valid) {
         try { readExact(fd, bytes.data(), bytes.size(), 0); }
-        catch (...) { (void)::close(fd); throw; }
+        catch (...) { (void)sys::close(fd); throw; }
     }
-    (void)::close(fd);
+    (void)sys::close(fd);
     require(Err::Corruption, valid && bytes[0] == 'P' && bytes[1] == 'R' &&
             bytes[2] == 'J' && bytes[3] == 2, "invalid project identity manifest");
     UuidV7 uuid{};
@@ -4725,20 +4708,20 @@ void publishBundleFile(const std::filesystem::path& path, Write&& write) {
     const std::string destinationName = path.filename().string();
     require(Err::InvalidInput, !destinationName.empty() && destinationName != "." &&
             destinationName != "..", "invalid replication bundle destination");
-    int directoryFd = ::open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int directoryFd = sys::open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     systemCall(directoryFd >= 0, "open replication bundle destination directory");
     int fd = -1;
     std::string temporaryName; // empty for an anonymous O_TMPFILE file
     try {
         if (!detail::forceNamedScratchFiles()) {
-            fd = ::openat(directoryFd, ".", O_TMPFILE | O_RDWR | O_CLOEXEC, 0600);
+            fd = sys::openatTmpfile(directoryFd, O_RDWR | O_CLOEXEC);
             if (fd < 0 && errno != EOPNOTSUPP && errno != EISDIR &&
                 errno != EINVAL && errno != ENOTSUP)
                 throwSystemError("create anonymous replication bundle");
         }
         if (fd < 0) {
             std::string name = (parent / ".aowis-export-XXXXXX").string();
-            fd = ::mkostemp(name.data(), O_CLOEXEC);
+            fd = sys::mkostemp(name.data(), O_CLOEXEC);
             systemCall(fd >= 0, "create private replication bundle");
             temporaryName = std::filesystem::path(name).filename().string();
         }
@@ -4749,10 +4732,10 @@ void publishBundleFile(const std::filesystem::path& path, Write&& write) {
         int linked = 0;
         if (temporaryName.empty()) {
             const std::string self = "/proc/self/fd/" + std::to_string(fd);
-            linked = ::linkat(AT_FDCWD, self.c_str(), directoryFd, destinationName.c_str(),
+            linked = sys::linkat(AT_FDCWD, self.c_str(), directoryFd, destinationName.c_str(),
                               AT_SYMLINK_FOLLOW);
         } else {
-            linked = ::linkat(directoryFd, temporaryName.c_str(), directoryFd,
+            linked = sys::linkat(directoryFd, temporaryName.c_str(), directoryFd,
                               destinationName.c_str(), 0);
         }
         if (linked != 0 && errno == EEXIST)
@@ -4760,25 +4743,25 @@ void publishBundleFile(const std::filesystem::path& path, Write&& write) {
         systemCall(linked == 0, "publish replication bundle");
         detail::faultCheckpoint("export.after.publish");
         if (!temporaryName.empty()) {
-            systemCall(::unlinkat(directoryFd, temporaryName.c_str(), 0) == 0,
+            systemCall(sys::unlinkat(directoryFd, temporaryName.c_str(), 0) == 0,
                        "remove private replication bundle name");
             temporaryName.clear();
         }
-        systemCall(::fsync(directoryFd) == 0, "sync replication bundle directory");
+        systemCall(sys::fsync(directoryFd) == 0, "sync replication bundle directory");
         detail::faultCheckpoint("export.after.dirsync");
         // Close only after publication. A close failure does not remove the
         // already completed and published file.
         const int closing = fd;
         fd = -1;
-        systemCall(::close(closing) == 0, "close replication bundle");
+        systemCall(sys::close(closing) == 0, "close replication bundle");
         const int closingDirectory = directoryFd;
         directoryFd = -1;
-        systemCall(::close(closingDirectory) == 0, "close replication bundle directory");
+        systemCall(sys::close(closingDirectory) == 0, "close replication bundle directory");
     } catch (...) {
-        if (fd >= 0) ::close(fd);
+        if (fd >= 0) sys::close(fd);
         if (directoryFd >= 0) {
-            if (!temporaryName.empty()) (void)::unlinkat(directoryFd, temporaryName.c_str(), 0);
-            ::close(directoryFd);
+            if (!temporaryName.empty()) (void)sys::unlinkat(directoryFd, temporaryName.c_str(), 0);
+            sys::close(directoryFd);
         }
         throw;
     }
@@ -4826,8 +4809,8 @@ void Repository::exportIncrementalRevisionBundle(const ProjectId& project,
 void Repository::exportRevisionBundleLocked(const ProjectId& project,
         std::string_view branch, std::optional<RevisionId> base, int fd,
         BundleLimits limits) {
-    struct stat destination{};
-    systemCall(fd >= 0 && ::fstat(fd, &destination) == 0, "stat bundle output");
+    sys::Stat destination{};
+    systemCall(fd >= 0 && sys::fstat(fd, &destination) == 0, "stat bundle output");
     require(Err::InvalidInput, S_ISREG(destination.st_mode) && destination.st_size == 0,
             "bundle export requires an empty regular file");
     const std::optional<StoredBranch> ref = findStoredBranch(this->directory_, branch);
@@ -4975,9 +4958,9 @@ void Repository::exportRevisionBundleLocked(const ProjectId& project,
                 offset += bytes.size();
             }
         }
-        systemCall(::fsync(fd) == 0, "sync UUIDv7 revision bundle");
+        systemCall(sys::fsync(fd) == 0, "sync UUIDv7 revision bundle");
     } catch (...) {
-        if (::ftruncate(fd, 0) != 0) {
+        if (sys::ftruncate(fd, 0) != 0) {
             // Best effort: the caller still owns and discards the descriptor.
         }
         throw;
@@ -5014,8 +4997,8 @@ RevisionBundleImport Repository::importRevisionBundle(const ProjectId& expectedP
         profile->totalMs = elapsedImportMs(importStart, ImportClock::now());
     };
     checkBranch(localBranch);
-    struct stat source{};
-    systemCall(fd >= 0 && ::fstat(fd, &source) == 0, "stat revision bundle");
+    sys::Stat source{};
+    systemCall(fd >= 0 && sys::fstat(fd, &source) == 0, "stat revision bundle");
     require(Err::InvalidInput, S_ISREG(source.st_mode) && source.st_size >= 0 &&
             static_cast<std::uint64_t>(source.st_size) >= revisionBundleHeader,
             "invalid replication bundle file");
@@ -5553,8 +5536,8 @@ CompactionStats Repository::compact() {
     stats.staleFilesRemoved = removeStalePackGenerations();
     stats.objectsBefore = static_cast<std::uint64_t>(this->indexCount_);
     stats.packBytesBefore = this->scanOffset_;
-    struct stat oldIndex{};
-    systemCall(::fstat(this->indexFd_, &oldIndex) == 0, "stat content index");
+    sys::Stat oldIndex{};
+    systemCall(sys::fstat(this->indexFd_, &oldIndex) == 0, "stat content index");
     require(Err::Corruption, oldIndex.st_size >= 0, "invalid index size");
     stats.indexBytesBefore = static_cast<std::uint64_t>(oldIndex.st_size);
 
@@ -5609,7 +5592,7 @@ CompactionStats Repository::compact() {
     }
     require(Err::Corruption, reachable.size() <= stats.objectsBefore, "invalid reachable object count");
     std::array<std::uint8_t, 16> random{};
-    require(Err::Internal, RAND_bytes(random.data(), static_cast<int>(random.size())) == 1,
+    require(Err::Internal, crypto::secureRandomBytes(random.data(), random.size()),
             "failed to generate pack generation identifier");
     constexpr char digits[] = "0123456789abcdef";
     std::string nextToken;
@@ -5627,9 +5610,9 @@ CompactionStats Repository::compact() {
     int markerFd = -1;
     bool published = false;
     try {
-        newPackFd = ::open(nextPack.c_str(), O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0644);
+        newPackFd = sys::open(nextPack.c_str(), O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0644);
         systemCall(newPackFd >= 0, "create compacted pack");
-        newIndexFd = ::open(nextIndex.c_str(), O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0644);
+        newIndexFd = sys::open(nextIndex.c_str(), O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0644);
         systemCall(newIndexFd >= 0, "create compacted index");
         writeExact(newIndexFd, indexMagic.data(), indexMagic.size(), 0);
         std::uint64_t oldPosition = 0;
@@ -5671,20 +5654,20 @@ CompactionStats Repository::compact() {
                 "not all reachable objects were found in the pack");
         stats.packBytesAfter = newPosition;
         stats.indexBytesAfter = indexPosition;
-        systemCall(::fsync(newPackFd) == 0, "sync compacted pack");
-        systemCall(::fsync(newIndexFd) == 0, "sync compacted index");
+        systemCall(sys::fsync(newPackFd) == 0, "sync compacted pack");
+        systemCall(sys::fsync(newIndexFd) == 0, "sync compacted index");
         syncDirectory(this->directory_);
         detail::faultCheckpoint("compact.pack.before.pointer");
 
-        markerFd = ::open(markerTemp.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0644);
+        markerFd = sys::open(markerTemp.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0644);
         systemCall(markerFd >= 0, "create temporary active-pack marker");
         const std::string marker = "PACK1 " + nextToken + "\n";
         writeExact(markerFd, reinterpret_cast<const std::uint8_t*>(marker.data()),
                    marker.size(), 0);
-        systemCall(::fsync(markerFd) == 0, "sync active-pack marker");
-        systemCall(::close(markerFd) == 0, "close active-pack marker");
+        systemCall(sys::fsync(markerFd) == 0, "sync active-pack marker");
+        systemCall(sys::close(markerFd) == 0, "close active-pack marker");
         markerFd = -1;
-        systemCall(::rename(markerTemp.c_str(),
+        systemCall(sys::rename(markerTemp.c_str(),
                             (this->directory_ / "objects.current").c_str()) == 0,
                    "publish active-pack marker");
         published = true;
@@ -5695,8 +5678,8 @@ CompactionStats Repository::compact() {
             packPath(this->directory_, this->packToken_, false);
         const std::filesystem::path oldSidecar =
             packPath(this->directory_, this->packToken_, true);
-        ::close(this->packFd_);
-        ::close(this->indexFd_);
+        sys::close(this->packFd_);
+        sys::close(this->indexFd_);
         this->packFd_ = newPackFd;
         this->indexFd_ = newIndexFd;
         newPackFd = -1;
@@ -5707,17 +5690,17 @@ CompactionStats Repository::compact() {
         this->scanOffset_ = 0;
         this->indexReadOffset_ = 0;
         refreshIndex();
-        systemCall(::unlink(oldPack.c_str()) == 0, "retire previous pack");
-        systemCall(::unlink(oldSidecar.c_str()) == 0, "retire previous index");
+        systemCall(sys::unlink(oldPack.c_str()) == 0, "retire previous pack");
+        systemCall(sys::unlink(oldSidecar.c_str()) == 0, "retire previous index");
         syncDirectory(this->directory_);
     } catch (...) {
-        if (markerFd >= 0) ::close(markerFd);
-        if (newPackFd >= 0) ::close(newPackFd);
-        if (newIndexFd >= 0) ::close(newIndexFd);
+        if (markerFd >= 0) sys::close(markerFd);
+        if (newPackFd >= 0) sys::close(newPackFd);
+        if (newIndexFd >= 0) sys::close(newIndexFd);
         if (!published) {
-            (void)::unlink(markerTemp.c_str());
-            (void)::unlink(nextPack.c_str());
-            (void)::unlink(nextIndex.c_str());
+            (void)sys::unlink(markerTemp.c_str());
+            (void)sys::unlink(nextPack.c_str());
+            (void)sys::unlink(nextIndex.c_str());
         } else {
             // The active pointer may now select a different immutable pack.
             // Continuing on the previous open descriptors could commit refs

@@ -42,9 +42,8 @@
 #include <set>
 #include <stdexcept>
 #include <string>
-#include <sys/stat.h>
+#include "dvmdb_sys.h"
 #include <unordered_map>
-#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -698,8 +697,8 @@ std::optional<std::uint64_t> declaredLength(const httplib::Request& request) {
 }
 
 std::uint64_t descriptorSize(int fd) {
-    struct stat data{};
-    if (::fstat(fd, &data) != 0) throwSystemError("stat exported bundle");
+    sys::Stat data{};
+    if (sys::fstat(fd, &data) != 0) throwSystemError("stat exported bundle");
     return static_cast<std::uint64_t>(data.st_size);
 }
 
@@ -1104,7 +1103,7 @@ void registerBundleRoutes(httplib::Server& server, ProjectService& service, Bund
                     (void)reservation;
                     std::array<char, 64 * 1024> buffer{};
                     const std::size_t chunk = std::min(length, buffer.size());
-                    const ssize_t count = ::pread(exported->fd(), buffer.data(), chunk,
+                    const ssize_t count = sys::pread(exported->fd(), buffer.data(), chunk,
                                                   static_cast<off_t>(offset));
                     if (count <= 0) return false;
                     return sink.write(buffer.data(), static_cast<std::size_t>(count));
@@ -1151,7 +1150,7 @@ void registerBundleRoutes(httplib::Server& server, ProjectService& service, Bund
                 }
                 std::size_t done = 0;
                 while (done < size) {
-                    const ssize_t written = ::pwrite(spool.fd(), data + done, size - done,
+                    const ssize_t written = sys::pwrite(spool.fd(), data + done, size - done,
                                                      static_cast<off_t>(received + done));
                     if (written < 0 && errno == EINTR) continue;
                     if (written <= 0) {

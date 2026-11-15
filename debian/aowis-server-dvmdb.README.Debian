@@ -6,7 +6,7 @@ Service:       aowis-server-dvmdb.service
 Vendor unit:   /usr/lib/systemd/system/aowis-server-dvmdb.service
 Configuration: /etc/aowis/aowis-server-dvmdb.ini
 Storage root:  /var/lib/aowis-dvmdb
-Listener:      127.0.0.1:8755 (default)
+Listener:      0.0.0.0:8755 (packaged systemd default)
 
 The package creates an unprivileged aowis-dvmdb system account. systemd
 StateDirectory=aowis-dvmdb provisions the persistent storage root with
@@ -27,7 +27,14 @@ Ready check:
 
   curl -fsS http://127.0.0.1:8755/dvmdb/v1/ready
 
-SECURITY: DVMDB currently has no HTTP authentication or authorization and
-does not serve HTTPS directly. Keep its listener loopback-only unless it
-is reachable exclusively over a trusted network and protected separately.
-TLS by itself does not provide user authorization.
+SECURITY: The packaged service listens on ALL IPv4 interfaces by default.
+DVMDB currently has NO HTTP authentication or authorization and does not
+serve HTTPS directly. Block untrusted access to TCP port 8755 using a
+firewall or private VPN/network before starting this service. To restrict
+the listener to localhost, set bind=127.0.0.1 in
+/etc/aowis/aowis-server-dvmdb.ini and restart the service. TLS alone does
+not provide authorization.
+
+The configuration is a dpkg conffile: if it was modified locally, an
+upgrade may preserve the previous bind address rather than adopting the
+new default. Inspect /etc/aowis/aowis-server-dvmdb.ini after upgrading.

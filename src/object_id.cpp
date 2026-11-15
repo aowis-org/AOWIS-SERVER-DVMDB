@@ -1,11 +1,11 @@
 #include "aowis/dvmdb/object_id.h"
 
-#include <openssl/rand.h>
+#include "dvmdb_crypto.h"
 
 #include <chrono>
 #include <stdexcept>
 #include <utility>
-#include <unistd.h>
+#include "dvmdb_sys.h"
 
 namespace aowis::dvmdb {
 namespace {
@@ -78,10 +78,10 @@ UuidV7 UuidV7Generator::generate() {
     if (milliseconds > MaxTimestamp) throw std::runtime_error("UUIDv7 timestamp overflow");
     // A fork duplicates the in-process counter and random state. Reseed the
     // child rather than returning the same next UUID in both processes.
-    const std::uint64_t processId = static_cast<std::uint64_t>(::getpid());
+    const std::uint64_t processId = static_cast<std::uint64_t>(sys::getpid());
     if (!this->started_ || processId != this->lastProcessId_ || milliseconds > this->lastMs_) {
         unsigned char random[10]{};
-        if (RAND_bytes(random, sizeof(random)) != 1)
+        if (!crypto::secureRandomBytes(random, sizeof(random)))
             throw std::runtime_error("cryptographic UUIDv7 randomness unavailable");
         this->randomA_ = static_cast<std::uint16_t>(
             ((static_cast<std::uint16_t>(random[0]) << 8) | random[1]) & 0x0fffU);

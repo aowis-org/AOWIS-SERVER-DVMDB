@@ -12,8 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <cstdint>
-#include <sys/types.h>
-#include <unistd.h>
+#include "dvmdb_sys.h"
 #endif
 
 namespace aowis::dvmdb::detail {
@@ -41,7 +40,7 @@ inline void faultPartialWrite(int fd, const std::uint8_t* bytes, std::size_t siz
     const std::size_t half = size / 2U;
     std::size_t done = 0;
     while (done < half) {
-        const ssize_t amount = ::pwrite(fd, bytes + done, half - done,
+        const ssize_t amount = sys::pwrite(fd, bytes + done, half - done,
                                         static_cast<off_t>(offset + done));
         if (amount < 0 && errno == EINTR) continue;
         if (amount <= 0) throw std::runtime_error("injected partial-write preparation failed");

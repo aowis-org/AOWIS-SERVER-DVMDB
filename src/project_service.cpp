@@ -11,7 +11,7 @@
 #include <map>
 #include <cstring>
 #include <cstdlib>
-#include <fcntl.h>
+#include "dvmdb_sys.h"
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -21,9 +21,6 @@
 #include <tuple>
 #include <memory>
 #include <optional>
-#include <sys/file.h>
-#include <sys/stat.h>
-#include <unistd.h>
 #include <utility>
 
 namespace aowis::dvmdb {
@@ -98,11 +95,11 @@ std::string decodeName(const std::string& encoded) {
 }
 
 void syncDirectory(const std::filesystem::path& path) {
-    const int fd = ::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    const int fd = sys::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     syscallChecked(fd >= 0, "open directory for sync");
-    const int status = ::fsync(fd);
+    const int status = sys::fsync(fd);
     const int savedErrno = errno;
-    ::close(fd);
+    sys::close(fd);
     errno = savedErrno;
     syscallChecked(status == 0, "sync project directory");
 }
@@ -125,7 +122,7 @@ bool removePrefixed(const std::filesystem::path& directory,
             if (!directories) continue;
             std::filesystem::remove_all(entry.path());
         } else {
-            syscallChecked(::unlink(entry.path().c_str()) == 0 || errno == ENOENT,
+            syscallChecked(sys::unlink(entry.path().c_str()) == 0 || errno == ENOENT,
                            "remove staged catalogue entry");
         }
         removed = true;
@@ -159,22 +156,22 @@ void writeManifest(const std::filesystem::path& path, const ProjectInfo& info) {
     const std::string body = "AOWIS-PROJECT-1\n" + info.id + "\n" +
         "pack\n" +
         encodeName(info.name) + "\n";
-    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    const int fd = sys::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
     syscallChecked(fd >= 0, "create project manifest");
     try {
         std::size_t written = 0;
         while (written < body.size()) {
-            const ssize_t amount = ::write(fd, body.data() + written, body.size() - written);
+            const ssize_t amount = sys::write(fd, body.data() + written, body.size() - written);
             if (amount < 0 && errno == EINTR) continue;
             syscallChecked(amount > 0, "write project manifest");
             written += static_cast<std::size_t>(amount);
         }
-        syscallChecked(::fsync(fd) == 0, "sync project manifest");
+        syscallChecked(sys::fsync(fd) == 0, "sync project manifest");
     } catch (...) {
-        ::close(fd);
+        sys::close(fd);
         throw;
     }
-    syscallChecked(::close(fd) == 0, "close project manifest");
+    syscallChecked(sys::close(fd) == 0, "close project manifest");
 }
 
 // Persistent service-root identity is independent of project and branch IDs.
@@ -207,26 +204,26 @@ std::string loadRepositoryIdentity(const std::filesystem::path& root) {
     // Prepare on the same filesystem and publish only fully synchronized bytes.
     // A crash before link() cannot expose a partial authoritative identity.
     const std::filesystem::path staging = root / (".repository-id-creating-" + id);
-    const int fd = ::open(staging.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    const int fd = sys::open(staging.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
     syscallChecked(fd >= 0, "stage DVMDB repository identity");
     try {
         std::size_t written = 0;
         while (written < body.size()) {
-            const ssize_t amount = ::write(fd, body.data() + written, body.size() - written);
+            const ssize_t amount = sys::write(fd, body.data() + written, body.size() - written);
             if (amount < 0 && errno == EINTR) continue;
             syscallChecked(amount > 0, "write DVMDB repository identity");
             written += static_cast<std::size_t>(amount);
         }
-        syscallChecked(::fsync(fd) == 0, "sync DVMDB repository identity");
+        syscallChecked(sys::fsync(fd) == 0, "sync DVMDB repository identity");
     } catch (...) {
-        ::close(fd);
+        sys::close(fd);
         throw;
     }
-    syscallChecked(::close(fd) == 0, "close DVMDB repository identity");
-    syscallChecked(::link(staging.c_str(), path.c_str()) == 0,
+    syscallChecked(sys::close(fd) == 0, "close DVMDB repository identity");
+    syscallChecked(sys::link(staging.c_str(), path.c_str()) == 0,
                    "publish DVMDB repository identity");
     syncDirectory(root);
-    syscallChecked(::unlink(staging.c_str()) == 0, "remove DVMDB identity staging file");
+    syscallChecked(sys::unlink(staging.c_str()) == 0, "remove DVMDB identity staging file");
     syncDirectory(root);
     return id;
 }
@@ -307,7 +304,7 @@ TrackingStateOnDisk loadTrackingState(const std::filesystem::path& root,
     if (std::filesystem::exists(stage) || std::filesystem::is_symlink(stage)) {
         check(!std::filesystem::is_symlink(stage) && std::filesystem::is_regular_file(stage),
               "unsafe stale tracking staging file");
-        syscallChecked(::unlink(stage.c_str()) == 0, "discard unpublished tracking staging file");
+        syscallChecked(sys::unlink(stage.c_str()) == 0, "discard unpublished tracking staging file");
         syncDirectory(root);
     }
     TrackingStateOnDisk result;
@@ -375,25 +372,25 @@ void storeTrackingState(const std::filesystem::path& root, const TrackingStateOn
           StorageErrorKind::InvalidInput);
     const std::filesystem::path stage = root / "repository.tracking.tmp";
     const std::filesystem::path path = root / "repository.tracking";
-    const int fd = ::open(stage.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    const int fd = sys::open(stage.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
     syscallChecked(fd >= 0, "stage repository tracking metadata");
     try {
         std::size_t offset = 0;
         while (offset < body.size()) {
-            const ssize_t written = ::write(fd, body.data() + offset, body.size() - offset);
+            const ssize_t written = sys::write(fd, body.data() + offset, body.size() - offset);
             if (written < 0 && errno == EINTR) continue;
             syscallChecked(written > 0, "write repository tracking metadata");
             offset += static_cast<std::size_t>(written);
         }
-        syscallChecked(::fsync(fd) == 0, "sync repository tracking metadata");
+        syscallChecked(sys::fsync(fd) == 0, "sync repository tracking metadata");
     } catch (...) {
-        ::close(fd);
+        sys::close(fd);
         std::error_code ignored;
         std::filesystem::remove(stage, ignored);
         throw;
     }
-    syscallChecked(::close(fd) == 0, "close repository tracking metadata");
-    if (::rename(stage.c_str(), path.c_str()) != 0) {
+    syscallChecked(sys::close(fd) == 0, "close repository tracking metadata");
+    if (sys::rename(stage.c_str(), path.c_str()) != 0) {
         std::error_code ignored;
         std::filesystem::remove(stage, ignored);
         throwSystemError("publish repository tracking metadata");
@@ -787,26 +784,26 @@ Hash digestFromHex(std::string_view value) {
 // Reads exactly `size` bytes from the start of `path`; nullopt if the file
 // vanished (a concurrent writer replaced it).
 std::optional<Bytes> readPrefix(const std::filesystem::path& path, std::uint64_t size) {
-    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    const int fd = sys::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0 && errno == ENOENT) return std::nullopt;
     syscallChecked(fd >= 0, "open draft file");
     Bytes bytes(static_cast<std::size_t>(size));
     std::size_t done = 0;
     try {
-        struct stat st{};
-        syscallChecked(::fstat(fd, &st) == 0, "stat draft file");
+        sys::Stat st{};
+        syscallChecked(sys::fstat(fd, &st) == 0, "stat draft file");
         check(S_ISREG(st.st_mode) && static_cast<std::uint64_t>(st.st_size) >= size,
               "draft file is shorter than its meta record");
         while (done < bytes.size()) {
-            const ssize_t amount = ::pread(fd, bytes.data() + done, bytes.size() - done,
+            const ssize_t amount = sys::pread(fd, bytes.data() + done, bytes.size() - done,
                                            static_cast<off_t>(done));
             if (amount < 0 && errno == EINTR) continue;
             syscallChecked(amount >= 0, "read draft file");
             check(amount > 0, "truncated draft file");
             done += static_cast<std::size_t>(amount);
         }
-    } catch (...) { ::close(fd); throw; }
-    ::close(fd);
+    } catch (...) { sys::close(fd); throw; }
+    sys::close(fd);
     return bytes;
 }
 
@@ -819,27 +816,27 @@ std::optional<StoredDraft> readDraftMeta(const std::filesystem::path& directory)
     check(!std::filesystem::is_symlink(directory) && std::filesystem::is_directory(directory),
           "unsupported working-copy record (expected a draft directory): " + directory.string());
     const std::filesystem::path path = directory / draftMetaName;
-    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    const int fd = sys::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0 && errno == ENOENT) return std::nullopt;
     syscallChecked(fd >= 0, "open working-copy meta");
     std::string body;
     try {
-        struct stat st{};
-        syscallChecked(::fstat(fd, &st) == 0, "stat working-copy meta");
+        sys::Stat st{};
+        syscallChecked(sys::fstat(fd, &st) == 0, "stat working-copy meta");
         check(S_ISREG(st.st_mode) && st.st_size > 0 && st.st_size <= 4096,
               "invalid working-copy meta file");
         body.resize(static_cast<std::size_t>(st.st_size));
         std::size_t done = 0;
         while (done < body.size()) {
-            const ssize_t amount = ::pread(fd, body.data() + done, body.size() - done,
+            const ssize_t amount = sys::pread(fd, body.data() + done, body.size() - done,
                                            static_cast<off_t>(done));
             if (amount < 0 && errno == EINTR) continue;
             syscallChecked(amount >= 0, "read working-copy meta");
             check(amount > 0, "truncated working-copy meta");
             done += static_cast<std::size_t>(amount);
         }
-    } catch (...) { ::close(fd); throw; }
-    ::close(fd);
+    } catch (...) { sys::close(fd); throw; }
+    sys::close(fd);
     check(body.starts_with(workingCopyMarker) && body.back() == '\n',
           "invalid working-copy record marker");
     std::istringstream lines(body.substr(workingCopyMarker.size()));
@@ -1088,23 +1085,23 @@ WorkingCopyInfo readWorkingCopy(const std::filesystem::path& directory,
 
 // Writes `bytes` to a new file and fsyncs it.
 void writeNewFile(const std::filesystem::path& path, const Bytes& bytes) {
-    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    const int fd = sys::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
     syscallChecked(fd >= 0, "create draft file");
     try {
         std::size_t done = 0;
         while (done < bytes.size()) {
-            const ssize_t amount = ::write(fd, bytes.data() + done, bytes.size() - done);
+            const ssize_t amount = sys::write(fd, bytes.data() + done, bytes.size() - done);
             if (amount < 0 && errno == EINTR) continue;
             syscallChecked(amount > 0, "write draft file");
             done += static_cast<std::size_t>(amount);
         }
-        syscallChecked(::fsync(fd) == 0, "sync draft file");
+        syscallChecked(sys::fsync(fd) == 0, "sync draft file");
     } catch (...) {
-        ::close(fd);
-        ::unlink(path.c_str());
+        sys::close(fd);
+        sys::unlink(path.c_str());
         throw;
     }
-    syscallChecked(::close(fd) == 0, "close draft file");
+    syscallChecked(sys::close(fd) == 0, "close draft file");
 }
 
 void publishMeta(const std::filesystem::path& directory, const WorkingCopyInfo& draft,
@@ -1113,13 +1110,13 @@ void publishMeta(const std::filesystem::path& directory, const WorkingCopyInfo& 
     const std::filesystem::path stage = directory / (".meta-" + UuidV7::generate().toString());
     writeNewFile(stage, Bytes(body.begin(), body.end()));
     try {
-        syscallChecked(::rename(stage.c_str(), (directory / draftMetaName).c_str()) == 0,
+        syscallChecked(sys::rename(stage.c_str(), (directory / draftMetaName).c_str()) == 0,
                        "publish draft meta");
         syncDirectory(directory);
     } catch (...) {
         // The rename may have happened even if the directory fsync failed.
         // Callers mark publication uncertain and require a restart.
-        (void)::unlink(stage.c_str());
+        (void)sys::unlink(stage.c_str());
         throw;
     }
 }
@@ -1148,24 +1145,24 @@ void prepareDraftUpdate(const StoredDraft& stored, DraftUpdate& update) {
 }
 
 void appendJournal(const std::filesystem::path& path, std::uint64_t committed, const Bytes& frames) {
-    const int fd = ::open(path.c_str(), O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+    const int fd = sys::open(path.c_str(), O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
     syscallChecked(fd >= 0, "open draft journal");
     try {
         // Bytes past the acknowledged length belong to an interrupted, never
         // acknowledged append; they are overwritten.
-        syscallChecked(::ftruncate(fd, static_cast<off_t>(committed)) == 0,
+        syscallChecked(sys::ftruncate(fd, static_cast<off_t>(committed)) == 0,
                        "truncate draft journal tail");
         std::size_t done = 0;
         while (done < frames.size()) {
-            const ssize_t amount = ::pwrite(fd, frames.data() + done, frames.size() - done,
+            const ssize_t amount = sys::pwrite(fd, frames.data() + done, frames.size() - done,
                                             static_cast<off_t>(committed + done));
             if (amount < 0 && errno == EINTR) continue;
             syscallChecked(amount > 0, "append draft journal");
             done += static_cast<std::size_t>(amount);
         }
-        syscallChecked(::fsync(fd) == 0, "sync draft journal");
-    } catch (...) { ::close(fd); throw; }
-    syscallChecked(::close(fd) == 0, "close draft journal");
+        syscallChecked(sys::fsync(fd) == 0, "sync draft journal");
+    } catch (...) { sys::close(fd); throw; }
+    syscallChecked(sys::close(fd) == 0, "close draft journal");
 }
 
 // Publishes `next` (whose journalCount the caller has set) after
@@ -1239,7 +1236,7 @@ void updateDraft(const std::filesystem::path& directory, StoredDraft& stored,
         const std::string name = path.filename().string();
         if (name != files.candidate && name != files.navigationSourceCandidate &&
             name != files.journal)
-            (void)::unlink(path.c_str());
+            (void)sys::unlink(path.c_str());
     }
 }
 
@@ -1258,14 +1255,14 @@ void createDraft(const std::filesystem::path& root, const WorkingCopyInfo& draft
     const std::filesystem::path staging = directory / (".creating-" + draft.id);
     std::error_code ignored;
     std::filesystem::remove_all(staging, ignored);
-    syscallChecked(::mkdir(staging.c_str(), 0700) == 0, "stage working-copy directory");
+    syscallChecked(sys::mkdir(staging.c_str(), 0700) == 0, "stage working-copy directory");
     try {
         const std::string body = metaBody(draft, DraftFiles{});
         writeNewFile(staging / draftMetaName, Bytes(body.begin(), body.end()));
         syncDirectory(staging);
         // A published draft directory always contains meta, so renaming onto
         // an existing draft fails (ENOTEMPTY/EEXIST) instead of replacing it.
-        syscallChecked(::rename(staging.c_str(), published.c_str()) == 0,
+        syscallChecked(sys::rename(staging.c_str(), published.c_str()) == 0,
                        "publish working-copy record");
         syncDirectory(directory);
     } catch (...) {
@@ -1279,7 +1276,7 @@ void createDraft(const std::filesystem::path& root, const WorkingCopyInfo& draft
 void deleteDraft(const std::filesystem::path& root, std::string_view draftId) {
     const std::filesystem::path directory = workingCopyDirectory(root);
     const std::filesystem::path doomed = directory / (".deleting-" + UuidV7::generate().toString());
-    syscallChecked(::rename((directory / std::string(draftId)).c_str(), doomed.c_str()) == 0,
+    syscallChecked(sys::rename((directory / std::string(draftId)).c_str(), doomed.c_str()) == 0,
                    "discard working-copy record");
     syncDirectory(directory);
     std::error_code ignored;
@@ -1301,7 +1298,7 @@ void tidyDraftDirectory(const std::filesystem::path& directory) {
         if (!(name.starts_with(".meta-") || unreferenced) || entry.is_symlink() ||
             !entry.is_regular_file())
             continue;
-        syscallChecked(::unlink(entry.path().c_str()) == 0 || errno == ENOENT,
+        syscallChecked(sys::unlink(entry.path().c_str()) == 0 || errno == ENOENT,
                        "remove stale draft file");
         removed = true;
     }
@@ -1330,7 +1327,7 @@ void vmDeletionBarrier(std::string_view point) {
     const char* selected = ::getenv("AOWIS_VM_DELETE_POINT");
     if (selected == nullptr || point != selected) return;
     const std::string marker = "BARRIER " + std::string(point) + "\n";
-    syscallChecked(::write(STDOUT_FILENO, marker.data(), marker.size()) ==
+    syscallChecked(sys::write(STDOUT_FILENO, marker.data(), marker.size()) ==
                    static_cast<ssize_t>(marker.size()), "emit VM deletion barrier");
     for (;;) ::pause();
 }
@@ -1371,16 +1368,16 @@ void persistHistoryDeletion(const std::filesystem::path& root,
     const std::filesystem::path published = directory / intent.branch;
     writeNewFile(staging, Bytes(content.begin(), content.end()));
     // link() never replaces an existing confirmed deletion, unlike rename().
-    syscallChecked(::link(staging.c_str(), published.c_str()) == 0,
+    syscallChecked(sys::link(staging.c_str(), published.c_str()) == 0,
                    "publish history deletion intent");
     syncDirectory(directory);
-    syscallChecked(::unlink(staging.c_str()) == 0, "remove staged history deletion intent");
+    syscallChecked(sys::unlink(staging.c_str()) == 0, "remove staged history deletion intent");
     syncDirectory(directory);
 }
 
 void finishHistoryDeletion(const std::filesystem::path& root, std::string_view branch) {
     const std::filesystem::path directory = historyDeletionDirectory(root);
-    syscallChecked(::unlink((directory / std::string(branch)).c_str()) == 0,
+    syscallChecked(sys::unlink((directory / std::string(branch)).c_str()) == 0,
                    "finish history deletion intent");
     syncDirectory(directory);
 }
@@ -1811,33 +1808,33 @@ void persistLocalRevisionIndex(const std::filesystem::path& root,
     }
     const std::filesystem::path staging = directory /
         (".creating-" + UuidV7::generate().toString());
-    const int fd = ::open(staging.c_str(),
+    const int fd = sys::open(staging.c_str(),
         O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
     syscallChecked(fd >= 0, "stage local revision index");
     try {
         std::size_t written = 0;
         while (written < body.size()) {
-            const ssize_t amount = ::write(fd, body.data() + written, body.size() - written);
+            const ssize_t amount = sys::write(fd, body.data() + written, body.size() - written);
             if (amount < 0 && errno == EINTR) continue;
             syscallChecked(amount > 0, "write local revision index");
             written += static_cast<std::size_t>(amount);
         }
-        syscallChecked(::fsync(fd) == 0, "sync local revision index");
+        syscallChecked(sys::fsync(fd) == 0, "sync local revision index");
     } catch (...) {
-        ::close(fd);
-        (void)::unlink(staging.c_str());
+        sys::close(fd);
+        (void)sys::unlink(staging.c_str());
         throw;
     }
-    syscallChecked(::close(fd) == 0, "close local revision index");
+    syscallChecked(sys::close(fd) == 0, "close local revision index");
     try {
-        syscallChecked(::link(staging.c_str(), published.c_str()) == 0,
+        syscallChecked(sys::link(staging.c_str(), published.c_str()) == 0,
                        "publish local revision index");
         syncDirectory(directory);
-        syscallChecked(::unlink(staging.c_str()) == 0,
+        syscallChecked(sys::unlink(staging.c_str()) == 0,
                        "remove local revision index staging");
         syncDirectory(directory);
     } catch (...) {
-        (void)::unlink(staging.c_str());
+        (void)sys::unlink(staging.c_str());
         throw;
     }
 }
@@ -1880,38 +1877,38 @@ void persistLocalCommit(const std::filesystem::path& root,
         (std::string(initial ? ".creating-" : ".updating-") +
          UuidV7::generate().toString());
     const std::string body = localCommitBody(operation);
-    const int fd = ::open(staging.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    const int fd = sys::open(staging.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
     syscallChecked(fd >= 0, "stage local commit operation");
     try {
         std::size_t written = 0;
         while (written < body.size()) {
-            const ssize_t amount = ::write(fd, body.data() + written, body.size() - written);
+            const ssize_t amount = sys::write(fd, body.data() + written, body.size() - written);
             if (amount < 0 && errno == EINTR) continue;
             syscallChecked(amount > 0, "write local commit operation");
             written += static_cast<std::size_t>(amount);
         }
-        syscallChecked(::fsync(fd) == 0, "sync local commit operation");
+        syscallChecked(sys::fsync(fd) == 0, "sync local commit operation");
     } catch (...) {
-        ::close(fd);
-        (void)::unlink(staging.c_str());
+        sys::close(fd);
+        (void)sys::unlink(staging.c_str());
         throw;
     }
-    syscallChecked(::close(fd) == 0, "close local commit operation");
+    syscallChecked(sys::close(fd) == 0, "close local commit operation");
     try {
         if (initial) {
-            syscallChecked(::link(staging.c_str(), published.c_str()) == 0,
+            syscallChecked(sys::link(staging.c_str(), published.c_str()) == 0,
                            "publish new local commit operation");
             syncDirectory(directory);
-            syscallChecked(::unlink(staging.c_str()) == 0,
+            syscallChecked(sys::unlink(staging.c_str()) == 0,
                            "remove local commit staging record");
             syncDirectory(directory);
         } else {
-            syscallChecked(::rename(staging.c_str(), published.c_str()) == 0,
+            syscallChecked(sys::rename(staging.c_str(), published.c_str()) == 0,
                            "publish local commit operation outcome");
             syncDirectory(directory);
         }
     } catch (...) {
-        (void)::unlink(staging.c_str());
+        (void)sys::unlink(staging.c_str());
         throw;
     }
 }
@@ -1955,11 +1952,11 @@ ProjectService::ProjectService(std::filesystem::path root, std::size_t maxPendin
     std::filesystem::create_directories(this->projects_);
     // Persist the newly created projects/ entry before project publication.
     syncDirectory(this->root_);
-    this->lockFd_ = ::open((this->root_ / "catalogue.lock").c_str(),
+    this->lockFd_ = sys::open((this->root_ / "catalogue.lock").c_str(),
                            O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
     syscallChecked(this->lockFd_ >= 0, "open project catalogue lock");
-    if (::flock(this->lockFd_, LOCK_EX | LOCK_NB) != 0) {
-        ::close(this->lockFd_);
+    if (sys::flock(this->lockFd_, LOCK_EX | LOCK_NB) != 0) {
+        sys::close(this->lockFd_);
         this->lockFd_ = -1;
         throw ProjectError(ProjectErrorKind::Conflict,
                            "another database server owns this project root");
@@ -1996,8 +1993,8 @@ ProjectService::ProjectService(std::filesystem::path root, std::size_t maxPendin
             }
         }
     } catch (...) {
-        ::flock(this->lockFd_, LOCK_UN);
-        ::close(this->lockFd_);
+        sys::flock(this->lockFd_, LOCK_UN);
+        sys::close(this->lockFd_);
         this->lockFd_ = -1;
         throw;
     }
@@ -2006,8 +2003,8 @@ ProjectService::ProjectService(std::filesystem::path root, std::size_t maxPendin
 ProjectService::~ProjectService() {
     this->entries_.clear();
     if (this->lockFd_ >= 0) {
-        ::flock(this->lockFd_, LOCK_UN);
-        ::close(this->lockFd_);
+        sys::flock(this->lockFd_, LOCK_UN);
+        sys::close(this->lockFd_);
     }
 }
 
@@ -2226,7 +2223,7 @@ ProjectInfo ProjectService::renameProject(std::string_view projectId,
     bool published = false;
     try {
         writeManifest(staged, updated);
-        syscallChecked(::rename(staged.c_str(), (directory / "project.meta").c_str()) == 0,
+        syscallChecked(sys::rename(staged.c_str(), (directory / "project.meta").c_str()) == 0,
                        "publish renamed project manifest");
         published = true;
         syncDirectory(directory);
@@ -2348,7 +2345,7 @@ ProjectInfo ProjectService::createProjectImpl(std::string_view name, bool unborn
         syncDirectory(staging / "repository" / "refs");
         syncDirectory(staging / "repository");
         syncDirectory(staging);
-        syscallChecked(::rename(staging.c_str(), published.c_str()) == 0,
+        syscallChecked(sys::rename(staging.c_str(), published.c_str()) == 0,
                        "publish project directory");
         renamed = true;
         syncDirectory(this->projects_);
