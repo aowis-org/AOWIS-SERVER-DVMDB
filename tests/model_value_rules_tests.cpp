@@ -408,6 +408,26 @@ void testRuleTable() {
          ".multi_species.patterns[0].multipliers[0]"},
         {"backdrop offset 400", network([](NetworkHydraulic& n) { n.map_backdrop.offset_longitude_deg = 400; }),
          ".map_backdrop.offset_longitude_deg"},
+        {"project units unknown unit", network([](NetworkHydraulic& n) {
+             NetworkPresentationUnits units; units.name = QStringLiteral("Bad");
+             units.units.append(NetworkPresentationUnit{QStringLiteral("volumetric_flow_rate"), QStringLiteral("parsec/s")});
+             n.presentation_units = units; }), ".presentation_units.units[0].unit"},
+        {"project units unknown quantity", network([](NetworkHydraulic& n) {
+             NetworkPresentationUnits units; units.name = QStringLiteral("Bad");
+             units.units.append(NetworkPresentationUnit{QStringLiteral("no_such_quantity"), QStringLiteral("m")});
+             n.presentation_units = units; }), ".presentation_units.units[0].quantity"},
+        {"project units unsorted", network([](NetworkHydraulic& n) {
+             NetworkPresentationUnits units; units.name = QStringLiteral("Bad");
+             units.units.append(NetworkPresentationUnit{QStringLiteral("volumetric_flow_rate"), QStringLiteral("L/s")});
+             units.units.append(NetworkPresentationUnit{QStringLiteral("pressure_head"), QStringLiteral("bar")});
+             n.presentation_units = units; }), ".presentation_units.units[1].quantity"},
+        {"project units valid", network([](NetworkHydraulic& n) {
+             NetworkPresentationUnits units; units.name = QStringLiteral("LPS");
+             units.units.append(NetworkPresentationUnit{QStringLiteral("pressure_head"), QStringLiteral("bar")});
+             units.units.append(NetworkPresentationUnit{QStringLiteral("volumetric_flow_rate"), QStringLiteral("L/s")});
+             n.presentation_units = units; }), nullptr},
+        {"project units unnamed", network([](NetworkHydraulic& n) {
+             n.presentation_units = NetworkPresentationUnits{}; }), ".presentation_units.name"},
         {"entity inside network", network([](NetworkHydraulic& n) {
              n.links_pipes.append(HydraulicLinkPipe{}); n.links_pipes[0].diameter_mm = -1; }), ".diameter_mm"},
     };

@@ -122,6 +122,12 @@ NetworkHydraulic completeNetwork() {
     n.map_labels.append(item<HydraulicMapLabel>(28));
     n.map_labels[0].anchor_node_uuid = uuid(20);
     n.map_labels[0].text = QStringLiteral("Well Ω");
+    NetworkPresentationUnits units;
+    units.name = QStringLiteral("Projekt-Einheiten µ");
+    units.derived_from_profile = QStringLiteral("LPS");
+    units.units.append(NetworkPresentationUnit{QStringLiteral("pressure_head"), QStringLiteral("bar")});
+    units.units.append(NetworkPresentationUnit{QStringLiteral("volumetric_flow_rate"), QStringLiteral("L/s")});
+    n.presentation_units = units;
     return n;
 }
 
@@ -133,6 +139,10 @@ void compareNetworks(const NetworkHydraulic& source, const NetworkHydraulic& res
             result.title_line_1 == source.title_line_1 &&
             result.duration_s == source.duration_s &&
             result.map_backdrop.file == source.map_backdrop.file &&
+            result.presentation_units.has_value() == source.presentation_units.has_value() &&
+            (!source.presentation_units ||
+             (result.presentation_units->name == source.presentation_units->name &&
+              result.presentation_units->units.size() == source.presentation_units->units.size())) &&
             aowis::dvmdb::ModelCodec<NetworkMultiSpecies>::encode(result.multi_species) ==
             aowis::dvmdb::ModelCodec<NetworkMultiSpecies>::encode(source.multi_species),
             "network metadata changed on reload");
@@ -1772,6 +1782,14 @@ void exerciseAtomicRootMetadataEdit() {
     changed.options_energy.currency_iso4217 = QStringLiteral("EUR");
     changed.options_report.summary = false;
     changed.map_backdrop.file = QStringLiteral("int05-backdrop.png");
+    // Project units are root metadata: a unit change is a root edit that the
+    // draft persists and the next Commit records.
+    NetworkPresentationUnits changedUnits;
+    changedUnits.name = QStringLiteral("US customary");
+    changedUnits.derived_from_profile = QStringLiteral("GPM");
+    changedUnits.units.append(NetworkPresentationUnit{QStringLiteral("pressure_head"), QStringLiteral("psi")});
+    changedUnits.units.append(NetworkPresentationUnit{QStringLiteral("volumetric_flow_rate"), QStringLiteral("US gal/min")});
+    changed.presentation_units = changedUnits;
     changed.multi_species.species[0].note = QStringLiteral("Updated MSX root note");
     aowis::model::ModelEntityEdit edit;
     edit.entityId = before.uuid;
@@ -1791,6 +1809,10 @@ void exerciseAtomicRootMetadataEdit() {
             saved->options_hydraulic.headloss_formula == HydraulicHeadlossFormula::DarcyWeisbach &&
             saved->title_line_2 == changed.title_line_2 &&
             saved->id == changed.id &&
+            saved->presentation_units.has_value() &&
+            saved->presentation_units->name == QStringLiteral("US customary") &&
+            saved->presentation_units->units.size() == 2 &&
+            saved->presentation_units->units.at(1).unit == QStringLiteral("US gal/min") &&
             saved->nodes_junctions.size() == before.nodes_junctions.size() &&
             saved->links_pipes.size() == before.links_pipes.size(),
             "root edit updates saved options without changing entity collections");

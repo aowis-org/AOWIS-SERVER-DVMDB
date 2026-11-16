@@ -14,7 +14,7 @@ it is in [hydraulic persistence](native-hydraulic-network.md).
 | Bridge from typed hydraulic networks to records (`aowis/dvmdb/hydraulic_network_persistence.h`) | DVMDB, using MODEL's codec |
 
 DVMDB never builds a second serializer: its adapter aliases point at the MODEL
-implementation. The MODEL target checks its 68-structure field manifest and
+implementation. The MODEL target checks its 70-structure field manifest and
 its enum and value rules at configure time. The encoding is deterministic
 binary with strict enumerator and value checks; the REST API carries the same
 bytes as base64 inside JSON. Qt Core is needed only for this typed layer; with

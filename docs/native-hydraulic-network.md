@@ -10,8 +10,9 @@ validation. It needs Qt Core and the MODEL submodule. Merging is described in
 
 ## How a network is stored
 
-* One **network root** record: network metadata and the ordered list of
-  membership-chunk UUIDs per collection.
+* One **network root** record: network metadata (including the optional
+  project units, `presentation_units`, a display-only unit set) and the
+  ordered list of membership-chunk UUIDs per collection.
 * **Membership chunks** of at most 256 ordered member UUIDs.
 * One independently addressed **entity record** per top-level entity.
 * The reverse-reference index answers "who refers to this entity" for
