@@ -89,6 +89,19 @@ remain conflicts. A resulting chunk exceeding 256 entries is also a conflict,
 not silently truncated. Complex overlapping chunk deletions may still require
 manual structural resolution.
 
+**Network-root metadata merges field by field.** When both branches changed
+the network root, MODEL's `hydraulic.network_root` field merge combines
+independent changes: each scalar root field, each field of the option groups
+and the map backdrop (`options_hydraulic.accuracy`, `map_backdrop.file`, …),
+`multi_species` as a whole, and the project units by name, source profile and
+**per quantity** (`presentation_units.units.volumetric_flow_rate`). Only a
+field changed differently on both sides conflicts; the conflict reason lists
+those field names, and a field choice with the **network UUID** and that exact
+name resolves it. Adding or removing the whole project-unit set while the
+other branch changed it is the single field `presentation_units`. Choices for
+root fields that do not conflict are rejected. The merged network is
+revalidated as a whole before publication.
+
 Field selections still only resolve true same-field conflicts of existing
 entities with unchanged kinds and outgoing UUID-reference sets. Structural
 selections are whole-record decisions; they do not merge different fields.

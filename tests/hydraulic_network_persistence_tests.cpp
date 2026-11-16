@@ -875,6 +875,102 @@ void exerciseUuidV7IndexedMembership() {
     std::filesystem::remove_all(folder, ignored);
 }
 
+// Network-root metadata merges field by field and project units per
+// quantity: independent changes on two branches combine without a conflict;
+// the same quantity changed differently is a named, resolvable conflict.
+void exerciseRootFieldMerges() {
+    const std::filesystem::path folder = tempDir();
+    const native::ProjectId project = native::ProjectId::generate();
+    try {
+        native::Repository repository(folder);
+        const NetworkHydraulic baseline = completeNetwork();
+        require(baseline.presentation_units.has_value() &&
+                baseline.presentation_units->units.size() == 2,
+                "root merge fixture lacks project units");
+        const native::RevisionId root = repository.createRootBranch(project, "main", commitMetadata());
+        const native::RevisionId base = hydraulic::saveHydraulicNetwork(
+            repository, project, "main", baseline, root, commitMetadata());
+        require(repository.createBranch(project, "feature", "main") == base,
+                "root merge fork generated an extra revision");
+        require(repository.createBranch(project, "rival", "main") == base,
+                "root merge rival fork generated an extra revision");
+
+        NetworkHydraulic ours = baseline;
+        ours.title_line_2 = QStringLiteral("Main title");
+        ours.presentation_units->units[1].unit = QStringLiteral("m3/h");    // flow
+        const native::RevisionId target = hydraulic::saveHydraulicNetwork(
+            repository, project, "main", ours, base, commitMetadata());
+        NetworkHydraulic theirs = baseline;
+        theirs.duration_s = 7200;
+        theirs.options_hydraulic.maximum_trials = 77;
+        theirs.presentation_units->units[0].unit = QStringLiteral("psi");   // pressure head
+        const native::RevisionId source = hydraulic::saveHydraulicNetwork(
+            repository, project, "feature", theirs, base, commitMetadata());
+
+        const native::MergeResult combined = hydraulic::mergeHydraulicBranches(
+            repository, project, "main", "feature",
+            hydraulic::HydraulicMergeSelections{target, source, {}, {}}, commitMetadata());
+        require(combined.status == native::MergeStatus::Merged && combined.resultHead,
+                "independent root-field and per-quantity changes did not merge");
+        const std::optional<NetworkHydraulic> merged = hydraulic::loadHydraulicNetworkAtRevision(
+            repository, project, *combined.resultHead, baseline.uuid);
+        require(merged && merged->title_line_2 == QStringLiteral("Main title") &&
+                merged->duration_s == 7200 && merged->options_hydraulic.maximum_trials == 77 &&
+                merged->presentation_units &&
+                merged->presentation_units->units.at(0).unit == QStringLiteral("psi") &&
+                merged->presentation_units->units.at(1).unit == QStringLiteral("m3/h") &&
+                merged->nodes_junctions.size() == baseline.nodes_junctions.size(),
+                "merged root lost a branch's field or quantity");
+
+        // Same quantity, different units: one named conflict, both HEADs kept.
+        NetworkHydraulic rival = baseline;
+        rival.presentation_units->units[1].unit = QStringLiteral("ML/d");
+        const native::RevisionId rivalHead = hydraulic::saveHydraulicNetwork(
+            repository, project, "rival", rival, base, commitMetadata());
+        const native::RevisionId mainHead = *combined.resultHead;
+        hydraulic::HydraulicMergeSelections selections{mainHead, rivalHead, {}, {}};
+        const native::MergeResult clash = hydraulic::mergeHydraulicBranches(
+            repository, project, "main", "rival", selections, commitMetadata());
+        const std::string flowField = "presentation_units.units.volumetric_flow_rate";
+        require(clash.status == native::MergeStatus::Conflicts && clash.conflicts.size() == 1 &&
+                clash.conflicts.front().reason.find(flowField) != std::string::npos &&
+                repository.head(project, "main") == mainHead &&
+                repository.head(project, "rival") == rivalHead,
+                "per-quantity conflict was not reported by quantity");
+
+        // A choice for a field that does not conflict is rejected.
+        hydraulic::HydraulicMergeSelections stray = selections;
+        stray.fields.push_back(hydraulic::HydraulicFieldChoice{
+            baseline.uuid, QStringLiteral("presentation_units.units.pressure_head"),
+            hydraulic::HydraulicMergeSide::Source});
+        require(throwsStorageError(native::StorageErrorKind::InvalidInput, [&] {
+            (void)hydraulic::mergeHydraulicBranches(repository, project,
+                "main", "rival", stray, commitMetadata());
+        }), "choice for a non-conflicting root field was accepted");
+
+        selections.fields.push_back(hydraulic::HydraulicFieldChoice{
+            baseline.uuid, QString::fromStdString(flowField), hydraulic::HydraulicMergeSide::Source});
+        const native::MergeResult resolved = hydraulic::mergeHydraulicBranches(
+            repository, project, "main", "rival", selections, commitMetadata());
+        require(resolved.status == native::MergeStatus::Merged && resolved.resultHead,
+                "explicit per-quantity choice did not resolve the conflict");
+        const std::optional<NetworkHydraulic> finalNetwork = hydraulic::loadHydraulicNetworkAtRevision(
+            repository, project, *resolved.resultHead, baseline.uuid);
+        require(finalNetwork && finalNetwork->presentation_units &&
+                finalNetwork->presentation_units->units.at(1).unit == QStringLiteral("ML/d") &&
+                finalNetwork->presentation_units->units.at(0).unit == QStringLiteral("psi") &&
+                finalNetwork->title_line_2 == QStringLiteral("Main title"),
+                "per-quantity choice applied the wrong side");
+        (void)repository.verifyRepository();
+    } catch (...) {
+        std::error_code ignored;
+        std::filesystem::remove_all(folder, ignored);
+        throw;
+    }
+    std::error_code ignored;
+    std::filesystem::remove_all(folder, ignored);
+}
+
 void exerciseUuidV7HydraulicMerges() {
     const std::filesystem::path folder = tempDir();
     const native::ProjectId project = native::ProjectId::generate();
@@ -3091,6 +3187,7 @@ int main(int argc, char** argv) {
         exerciseUuidV7IndexedReferences();
         exerciseUuidV7IndexedMembership();
         exerciseUuidV7HydraulicMerges();
+        exerciseRootFieldMerges();
         exerciseUuidV7CoordinatedMembershipMerges();
         exerciseUuidV7MergeChoiceQualification();
         exerciseUuidV7CallerPinnedWrites();

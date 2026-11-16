@@ -1307,7 +1307,10 @@ paths:
         the entire candidate hydraulic network before publication, including
         fast-forward merges. A 409 conflict leaves both branch HEADs intact.
         Field/object choices may target only actual conflicts; unknown,
-        duplicated, unused or stale choices are rejected.
+        duplicated, unused or stale choices are rejected. Network-root
+        metadata merges field by field and project units per quantity; a
+        root field choice uses the network UUID and the reported field name
+        (e.g. presentation_units.units.volumetric_flow_rate).
       requestBody:
         required: true
         content:

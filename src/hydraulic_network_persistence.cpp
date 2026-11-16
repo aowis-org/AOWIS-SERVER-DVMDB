@@ -2929,8 +2929,14 @@ QList<QUuid> mergeOrderedMembers(const QList<QUuid>& base, const QList<QUuid>& t
     return output;
 }
 
+// Root metadata merges field by field (MODEL's "hydraulic.network_root"
+// merge: scalar fields, option-group fields, project units per quantity).
+// Unresolved field conflicts are reported in *conflictingFields; explicit
+// fieldChoices for exactly those names resolve them.
 std::optional<ModelRecord> mergeHydraulicMembershipRecord(
-    const ModelRecord& base, const ModelRecord& target, const ModelRecord& source) {
+    const ModelRecord& base, const ModelRecord& target, const ModelRecord& source,
+    const QMap<QString, bool>& fieldChoices = {},
+    std::vector<std::string>* conflictingFields = nullptr) {
     if (base.kind != target.kind || base.kind != source.kind) return std::nullopt;
     if (base.kind == chunkKind) {
         // Read only enough of the envelope to determine the expected owner;
@@ -2957,12 +2963,31 @@ std::optional<ModelRecord> mergeHydraulicMembershipRecord(
         const Manifest right = decodeManifest(qByteArrayFromBytes(source.payload));
         if (ancestor.metadata.uuid != left.metadata.uuid ||
             ancestor.metadata.uuid != right.metadata.uuid) return std::nullopt;
-        const QByteArray baseMetadata = ModelCodec<NetworkHydraulic>::encode(ancestor.metadata);
-        const QByteArray leftMetadata = ModelCodec<NetworkHydraulic>::encode(left.metadata);
-        const QByteArray rightMetadata = ModelCodec<NetworkHydraulic>::encode(right.metadata);
-        if (leftMetadata != rightMetadata && leftMetadata != baseMetadata &&
-            rightMetadata != baseMetadata) return std::nullopt;
+        const QByteArray baseMetadata = aowis::model::hydraulicRootImage(ancestor.metadata);
+        const QByteArray leftMetadata = aowis::model::hydraulicRootImage(left.metadata);
+        const QByteArray rightMetadata = aowis::model::hydraulicRootImage(right.metadata);
+        if (baseMetadata.isEmpty() || leftMetadata.isEmpty() || rightMetadata.isEmpty())
+            return std::nullopt;
         Manifest merged = leftMetadata == baseMetadata ? right : left;
+        if (leftMetadata != rightMetadata && leftMetadata != baseMetadata &&
+            rightMetadata != baseMetadata) {
+            const std::optional<aowis::dvmdb::ModelFieldMerge> fields =
+                aowis::dvmdb::mergeModelFields(ancestor.metadata.uuid,
+                    QStringLiteral("hydraulic.network_root"),
+                    baseMetadata, leftMetadata, rightMetadata, fieldChoices);
+            if (!fields) return std::nullopt;
+            if (!fields->conflicting_fields.isEmpty()) {
+                if (conflictingFields != nullptr)
+                    for (const QString& field : fields->conflicting_fields)
+                        conflictingFields->push_back(field.toStdString());
+                return std::nullopt;
+            }
+            const std::optional<NetworkHydraulic> metadata =
+                aowis::model::decodeHydraulicRootImage(fields->content);
+            if (!metadata || metadata->uuid != ancestor.metadata.uuid) return std::nullopt;
+            merged = left;
+            merged.metadata = *metadata;
+        }
         for (std::size_t i = 0; i < collectionCount; ++i) {
             merged.chunks[i] = mergeOrderedMembers(ancestor.chunks[i],
                                                    left.chunks[i], right.chunks[i]);
@@ -3111,12 +3136,39 @@ MergeResolution resolveHydraulicRecord(const Key& key, const ModelRecord& base,
                                         const ModelRecord& target, const ModelRecord& source,
                                         const QMap<QString, bool>& fieldChoices) {
     MergeResolution rejected{};
-    if (base.kind == chunkKind || base.kind == hydraulicNetworkKind) {
+    if (base.kind == chunkKind) {
         try {
             const std::optional<ModelRecord> merged =
                 mergeHydraulicMembershipRecord(base, target, source);
             if (merged) return MergeResolution{*merged, {}};
         } catch (const std::exception&) { /* conservative conflict */ }
+        return rejected;
+    }
+    if (base.kind == hydraulicNetworkKind) {
+        if (target.kind != base.kind || source.kind != base.kind) return rejected;
+        // Field choices may only resolve root fields that actually conflict.
+        if (!fieldChoices.isEmpty()) {
+            std::vector<std::string> preview;
+            try {
+                (void)mergeHydraulicMembershipRecord(base, target, source, {}, &preview);
+            } catch (const std::exception&) {
+                throw StorageError(StorageErrorKind::Corruption,
+                                   "cannot resolve fields of an invalid network root");
+            }
+            for (QMap<QString, bool>::const_iterator choice = fieldChoices.cbegin();
+                 choice != fieldChoices.cend(); ++choice) {
+                if (std::find(preview.begin(), preview.end(), choice.key().toStdString()) == preview.end())
+                    throw StorageError(StorageErrorKind::InvalidInput,
+                        "merge selection is not a conflicting field: " + choice.key().toStdString());
+            }
+        }
+        try {
+            const std::optional<ModelRecord> merged = mergeHydraulicMembershipRecord(
+                base, target, source, fieldChoices, &rejected.conflictingFields);
+            if (merged) return MergeResolution{*merged, {}};
+        } catch (const std::exception&) {
+            return MergeResolution{}; // conservative conflict
+        }
         return rejected;
     }
     if (base.kind != target.kind || target.kind != source.kind ||
