@@ -55,7 +55,7 @@ def parse_metrics(output, pipes, edits, topology):
     if any(key not in values for key in REQUIRED):
         raise ValueError("missing benchmark metrics: " + ", ".join(
             key for key in REQUIRED if key not in values))
-    if values["engine"] != "pack" or values["fixture"] != "canonical-hydraulic-network":
+    if values["engine"] != "pack" or values["fixture"] != "canonical-hydraulic-distribution-network":
         raise ValueError("benchmark did not use the canonical native pack fixture")
     for key in REQUIRED:
         if key in {"engine", "fixture"}:

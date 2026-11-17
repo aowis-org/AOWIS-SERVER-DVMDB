@@ -4,10 +4,10 @@
 #include "aowis/dvmdb/revision_record.h"
 
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
-#include "aowis/dvmdb/hydraulic_network_persistence.h"
+#include "aowis/dvmdb/hydraulic_distribution_network_persistence.h"
 #include <QByteArray>
 #include <aowis/model/edit/model_edit_transaction.h>
-#include <aowis/model/edit/hydraulic_root_edit.h>
+#include <aowis/model/edit/hydraulic_distribution_root_edit.h>
 #include <variant>
 #include <type_traits>
 #endif
@@ -736,9 +736,9 @@ QString encodePayload(const QByteArray& bytes) {
 // A History navigation still constructs and publishes a COMPLETE native draft
 // candidate on the server. The wire response is deliberately a sparse,
 // canonical MODEL delta: it never sends an unchanged hydraulic member or the
-// entire NetworkHydraulic payload. Move operations preserve exact membership
+// entire NetworkHydraulicDistribution payload. Move operations preserve exact membership
 // order, including the order restored by crossing archived Commit boundaries.
-NetworkHydraulic historyNetworkAtDraft(ProjectService& service,
+NetworkHydraulicDistribution historyNetworkAtDraft(ProjectService& service,
                                        const WorkingCopyInfo& draft,
                                        const QUuid& networkId) {
     std::map<Key, std::optional<ModelRecord>> overlay;
@@ -753,8 +753,8 @@ NetworkHydraulic historyNetworkAtDraft(ProjectService& service,
             if (!draft.baseRevision) return std::nullopt;
             return service.getModelAtRevision(draft.projectId, *draft.baseRevision, key);
         };
-    const std::optional<NetworkHydraulic> network =
-        hydraulic::loadDraftHydraulicNetwork(read, networkId);
+    const std::optional<NetworkHydraulicDistribution> network =
+        hydraulic::loadDraftHydraulicDistributionNetwork(read, networkId);
     if (!network)
         throw ProjectError(ProjectErrorKind::Conflict,
                            "History network is unavailable at the selected candidate");
@@ -772,26 +772,26 @@ QJsonObject historyImageChange(const QString& type, const QUuid& id,
                                 : QJsonValue(QJsonValue::Null)}};
 }
 
-QString historyNetworkDigest(const NetworkHydraulic& network) {
-    const QByteArray canonical = ModelCodec<NetworkHydraulic>::encode(network);
+QString historyNetworkDigest(const NetworkHydraulicDistribution& network) {
+    const QByteArray canonical = ModelCodec<NetworkHydraulicDistribution>::encode(network);
     requireInput(!canonical.isEmpty(), "noncanonical History network state");
     return QString::fromLatin1(QCryptographicHash::hash(
         canonical, QCryptographicHash::Sha256).toHex());
 }
 
-QJsonObject verifiedHistoryNetworkDelta(const NetworkHydraulic& before,
-                                        const NetworkHydraulic& after) {
+QJsonObject verifiedHistoryNetworkDelta(const NetworkHydraulicDistribution& before,
+                                        const NetworkHydraulicDistribution& after) {
     requireInput(!before.uuid.isNull() && before.uuid == after.uuid,
                  "History network identity changed during navigation");
     QJsonArray edits;
     QJsonArray moves;
-    const QByteArray rootBefore = aowis::model::hydraulicRootImage(before);
-    const QByteArray rootAfter = aowis::model::hydraulicRootImage(after);
+    const QByteArray rootBefore = aowis::model::hydraulicDistributionRootImage(before);
+    const QByteArray rootAfter = aowis::model::hydraulicDistributionRootImage(after);
     requireInput(!rootBefore.isEmpty() && !rootAfter.isEmpty(),
                  "History network metadata is not canonical");
     if (rootBefore != rootAfter)
         edits.append(historyImageChange(
-            QString::fromLatin1(aowis::model::hydraulicRootEditType), before.uuid,
+            QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType), before.uuid,
             rootBefore, rootAfter));
 #define HISTORY_COLLECTION_DIFF(name, type, kind) \
     { \
@@ -912,7 +912,7 @@ hydraulic::HydraulicMergeSide mergeSide(const QJsonValue& value) {
 #endif
 
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
-// Pin a branch at one UUIDv7 revision for all hydraulic network reads. A
+// Pin a branch at one UUIDv7 revision for all hydraulic distribution network reads. A
 // historical revision must be an ancestor through either merge parent.
 RevisionId revisionForRead(Repository& repository, const ProjectId& project,
                              const std::string& branch, const httplib::Request& request) {
@@ -1022,7 +1022,7 @@ void verifyEditImages(ProjectService& service, const WorkingCopyInfo& draft,
             // The native root record is a server-owned manifest, not the
             // MODEL metadata image. A separate materializer verifies its
             // before-image and creates the matching manifest change.
-            if (edit.entityType == QString::fromLatin1(aowis::model::hydraulicRootEditType))
+            if (edit.entityType == QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType))
                 continue;
             const Key key = hydraulic::keyFromUuid(edit.entityId);
             const std::map<Key, std::optional<Bytes>>::const_iterator known = state.find(key);
@@ -1201,7 +1201,7 @@ void registerBundleRoutes(httplib::Server& server, ProjectService& service, Bund
 // Both immutable-revision and private-draft summaries use the same entity
 // inventory. Keep the counts derived from the hydrated canonical MODEL object,
 // not from native membership records (which are implementation details).
-QJsonObject hydraulicNetworkSummaryJson(const NetworkHydraulic& network) {
+QJsonObject hydraulicDistributionNetworkSummaryJson(const NetworkHydraulicDistribution& network) {
     const QJsonObject counts{
         {"junctions", network.nodes_junctions.size()},
         {"pipes", network.links_pipes.size()},
@@ -1304,7 +1304,7 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
                     return;
                 }
                 const RevisionId revision = revisionForRead(repository, project, branch, request);
-                requireModelIndexed(repository, project, revision, "hydraulic network not found");
+                requireModelIndexed(repository, project, revision, "hydraulic distribution network not found");
                 QJsonArray networks;
                 // Only canonical network roots (kind 100), never membership
                 // chunks or standalone hydraulic entities, contribute entries.
@@ -1312,14 +1312,14 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
                     repository.scanAtRevision(project, revision);
                 for (const std::pair<Key, Bytes>& item : records) {
                     const ModelRecord record = decodeModelRecord(item.second);
-                    if (record.kind != hydraulic::hydraulicNetworkKind) continue;
+                    if (record.kind != hydraulic::hydraulicDistributionNetworkKind) continue;
                     const QUuid id = hydraulic::uuidFromKey(item.first);
-                    const std::optional<NetworkHydraulic> network =
-                        hydraulic::loadHydraulicNetworkAtRevision(repository, project, revision, id);
+                    const std::optional<NetworkHydraulicDistribution> network =
+                        hydraulic::loadHydraulicDistributionNetworkAtRevision(repository, project, revision, id);
                     if (!network)
                         throw ProjectError(ProjectErrorKind::Unavailable,
-                                           "hydraulic network root could not be loaded");
-                    networks.append(hydraulicNetworkSummaryJson(*network));
+                                           "hydraulic distribution network root could not be loaded");
+                    networks.append(hydraulicDistributionNetworkSummaryJson(*network));
                 }
                 result = QJsonObject{{"scope", "committed"},
                                      {"revision", revisionIdString(revision)},
@@ -1340,13 +1340,13 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
             service.withRepository(pathParam(request, "id"), [&](Repository& repository) {
                 const RevisionId revision = revisionForRead(repository, project,
                                                                pathParam(request, "branch"), request);
-                requireModelIndexed(repository, project, revision, "hydraulic network not found");
-                const std::optional<NetworkHydraulic> network =
-                    hydraulic::loadHydraulicNetworkAtRevision(repository, project, revision, networkUuid);
-                if (!network) throw ProjectError(ProjectErrorKind::NotFound, "hydraulic network not found");
+                requireModelIndexed(repository, project, revision, "hydraulic distribution network not found");
+                const std::optional<NetworkHydraulicDistribution> network =
+                    hydraulic::loadHydraulicDistributionNetworkAtRevision(repository, project, revision, networkUuid);
+                if (!network) throw ProjectError(ProjectErrorKind::NotFound, "hydraulic distribution network not found");
                 result = QJsonObject{{"revision", revisionIdString(revision)},
                                      {"uuid", uuidString(networkUuid)},
-                                     {"payloadBase64", encodePayload(ModelCodec<NetworkHydraulic>::encode(*network))}};
+                                     {"payloadBase64", encodePayload(ModelCodec<NetworkHydraulicDistribution>::encode(*network))}};
             });
             return Reply{200, result};
         });
@@ -1359,16 +1359,16 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
             const RevisionId expected = parseRevisionId(requiredString(object, "expectedHead"));
             const CommitMetadata metadata = parseCommitMetadata(object);
             QString error;
-            const std::optional<NetworkHydraulic> network = ModelCodec<NetworkHydraulic>::decode(
+            const std::optional<NetworkHydraulicDistribution> network = ModelCodec<NetworkHydraulicDistribution>::decode(
                 decodePayload(object, "payloadBase64"), &error);
             if (!network) throw ProjectError(ProjectErrorKind::InvalidInput,
-                "invalid canonical hydraulic network payload: " + error.toStdString());
-            requireInput(!network->uuid.isNull(), "hydraulic network UUID is null");
+                "invalid canonical hydraulic distribution network payload: " + error.toStdString());
+            requireInput(!network->uuid.isNull(), "hydraulic distribution network UUID is null");
             RevisionId committed = expected;
             service.withRepository(pathParam(request, "id"), [&](Repository& repository) {
                 const std::string branch = pathParam(request, "branch");
                 requireBranch(repository, branch);
-                committed = hydraulic::saveHydraulicNetwork(repository, project, branch, *network,
+                committed = hydraulic::saveHydraulicDistributionNetwork(repository, project, branch, *network,
                                                             expected, metadata);
             });
             return Reply{201, QJsonObject{{"id", revisionIdString(committed)}}};
@@ -1387,11 +1387,11 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
             service.withRepository(pathParam(request, "id"), [&](Repository& repository) {
                 const RevisionId revision = revisionForRead(repository, project,
                                                                pathParam(request, "branch"), request);
-                requireModelIndexed(repository, project, revision, "hydraulic network not found");
+                requireModelIndexed(repository, project, revision, "hydraulic distribution network not found");
                 const std::optional<QList<QUuid>> ids = hydraulic::listHydraulicEntityIdsAtRevisionLimited(
                     repository, project, revision, networkUuid,
                     static_cast<hydraulic::HydraulicEntityType>(type), maxHttpEntityIds);
-                if (!ids) throw ProjectError(ProjectErrorKind::NotFound, "hydraulic network not found");
+                if (!ids) throw ProjectError(ProjectErrorKind::NotFound, "hydraulic distribution network not found");
                 QJsonArray entries;
                 for (const QUuid& uuid : *ids) entries.append(uuidString(uuid));
                 result = QJsonObject{{"revision", revisionIdString(revision)},
@@ -1410,7 +1410,7 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
             service.withRepository(pathParam(request, "id"), [&](Repository& repository) {
                 const RevisionId revision = revisionForRead(repository, project,
                                                                pathParam(request, "branch"), request);
-                requireModelIndexed(repository, project, revision, "hydraulic network not found");
+                requireModelIndexed(repository, project, revision, "hydraulic distribution network not found");
                 const std::optional<HydraulicEntity> item = hydraulic::loadHydraulicEntityAtRevision(
                     repository, project, revision, networkUuid, entity);
                 if (!item) throw ProjectError(ProjectErrorKind::NotFound, "hydraulic entity not found");
@@ -1433,7 +1433,7 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
             service.withRepository(pathParam(request, "id"), [&](Repository& repository) {
                 const std::string branch = pathParam(request, "branch");
                 requireBranch(repository, branch);
-                committed = hydraulic::editHydraulicNetwork(repository, project, branch, networkUuid,
+                committed = hydraulic::editHydraulicDistributionNetwork(repository, project, branch, networkUuid,
                                                                changes, expected, metadata);
             });
             return Reply{200, QJsonObject{{"id", revisionIdString(committed)}}};
@@ -2007,7 +2007,7 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 : std::nullopt;
             // Capture the requested network before publishing. The generation
             // fence in the native writer proves this was the actual source.
-            std::optional<NetworkHydraulic> before;
+            std::optional<NetworkHydraulicDistribution> before;
             if (networkId) {
                 const WorkingCopyInfo current = service.workingCopy(draftId, false);
                 if (current.generation == generation) {
@@ -2040,7 +2040,7 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                     answer.insert(QStringLiteral("deltaRecoveryRequired"), true);
                     return Reply{200, answer};
                 }
-                const NetworkHydraulic after =
+                const NetworkHydraulicDistribution after =
                     historyNetworkAtDraft(service, *result, *networkId);
                 answer.insert(QStringLiteral("historyDelta"),
                               verifiedHistoryNetworkDelta(*before, after));
@@ -2067,12 +2067,12 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                     const std::vector<std::pair<Key, Bytes>> records =
                         repository.scanAtRevision(*project, *draft.baseRevision);
                     for (const std::pair<Key, Bytes>& item : records)
-                        if (decodeModelRecord(item.second).kind == hydraulic::hydraulicNetworkKind)
+                        if (decodeModelRecord(item.second).kind == hydraulic::hydraulicDistributionNetworkKind)
                             roots.insert(item.first);
                 });
             }
             for (const std::pair<const Key, std::optional<ModelRecord>>& item : overlay) {
-                if (item.second && item.second->kind == hydraulic::hydraulicNetworkKind)
+                if (item.second && item.second->kind == hydraulic::hydraulicDistributionNetworkKind)
                     roots.insert(item.first);
                 else
                     roots.erase(item.first);
@@ -2087,12 +2087,12 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             QJsonArray networks;
             for (const Key& key : roots) {
                 const QUuid id = hydraulic::uuidFromKey(key);
-                const std::optional<NetworkHydraulic> network =
-                    hydraulic::loadDraftHydraulicNetwork(reader, id);
+                const std::optional<NetworkHydraulicDistribution> network =
+                    hydraulic::loadDraftHydraulicDistributionNetwork(reader, id);
                 if (!network)
                     throw ProjectError(ProjectErrorKind::Unavailable,
-                                       "saved draft hydraulic network could not be loaded");
-                networks.append(hydraulicNetworkSummaryJson(*network));
+                                       "saved draft hydraulic distribution network could not be loaded");
+                networks.append(hydraulicDistributionNetworkSummaryJson(*network));
             }
             return Reply{200, QJsonObject{
                 {"scope", "working-copy"},
@@ -2125,14 +2125,14 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 if (!draft.baseRevision) return std::nullopt;
                 return service.getModelAtRevision(draft.projectId, *draft.baseRevision, key);
             };
-            const std::optional<NetworkHydraulic> result =
-                hydraulic::loadDraftHydraulicNetwork(reader, network);
+            const std::optional<NetworkHydraulicDistribution> result =
+                hydraulic::loadDraftHydraulicDistributionNetwork(reader, network);
             if (!result)
-                throw ProjectError(ProjectErrorKind::NotFound, "hydraulic network not found in draft");
-            const QByteArray payload = ModelCodec<NetworkHydraulic>::encode(*result);
+                throw ProjectError(ProjectErrorKind::NotFound, "hydraulic distribution network not found in draft");
+            const QByteArray payload = ModelCodec<NetworkHydraulicDistribution>::encode(*result);
             if (payload.size() > static_cast<qsizetype>(8 * 1024 * 1024))
                 throw StorageError(StorageErrorKind::LimitExceeded,
-                                   "draft hydraulic network exceeds HTTP payload limit");
+                                   "draft hydraulic distribution network exceeds HTTP payload limit");
             return Reply{200, QJsonObject{
                 {"draftId", QString::fromStdString(draft.id)},
                 {"generation", QString::number(static_cast<qulonglong>(draft.generation))},
@@ -2216,7 +2216,7 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
             for (const ModelChange& change : changes)
                 requireInput(!change.record ||
-                             (change.record->kind != hydraulic::hydraulicNetworkKind &&
+                             (change.record->kind != hydraulic::hydraulicDistributionNetworkKind &&
                               change.record->kind != 101),
                              "native hydraulic manifest/chunk writes are server-owned");
 #endif
@@ -2242,14 +2242,14 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             const std::uint64_t expected = strictUint64(body, "expectedGeneration");
             const QByteArray payload = decodePayload(body, "payloadBase64", maxJsonModelBytes);
             QString error;
-            const std::optional<NetworkHydraulic> network = ModelCodec<NetworkHydraulic>::decode(payload, &error);
-            if (!network || ModelCodec<NetworkHydraulic>::encode(*network) != payload)
+            const std::optional<NetworkHydraulicDistribution> network = ModelCodec<NetworkHydraulicDistribution>::decode(payload, &error);
+            if (!network || ModelCodec<NetworkHydraulicDistribution>::encode(*network) != payload)
                 throw ProjectError(ProjectErrorKind::InvalidInput,
-                                   "invalid canonical imported hydraulic network: " + error.toStdString());
+                                   "invalid canonical imported hydraulic distribution network: " + error.toStdString());
             requireInput(UuidV7::parse(uuidString(network->uuid).toStdString()).has_value(),
-                         "imported hydraulic network UUID must be UUIDv7");
+                         "imported hydraulic distribution network UUID must be UUIDv7");
             const std::vector<ModelChange> changes =
-                hydraulic::fullDraftHydraulicNetworkChanges(*network);
+                hydraulic::fullDraftHydraulicDistributionNetworkChanges(*network);
             const std::string draftId = pathParam(request, "draft");
             const WorkingCopyInfo draft = service.workingCopy(draftId, false);
             if (draft.baseRevision.has_value() || !draft.candidateChanges.empty() ||
@@ -2263,7 +2263,7 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             return Reply{200, workingCopyJson(saved)};
         });
     });
-    // Bootstrap the first hydraulic network in a private unborn working copy.
+    // Bootstrap the first hydraulic distribution network in a private unborn working copy.
     // The server owns manifest encoding. There is no implicit revision, no
     // synthetic initial commit and no direct arbitrary kind-100 client write.
     server.Post(routeWorkingCopyInitializeNetwork, [&service](const httplib::Request& request,
@@ -2280,8 +2280,8 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                          "new network identity must be UUIDv7");
             const QString name = body.value("name").toString();
             requireInput(body.value("name").isString() && !name.trimmed().isEmpty() &&
-                         name.size() <= 255, "invalid new hydraulic network name");
-            const ModelChange initial = hydraulic::emptyDraftHydraulicNetworkRoot(
+                         name.size() <= 255, "invalid new hydraulic distribution network name");
+            const ModelChange initial = hydraulic::emptyDraftHydraulicDistributionNetworkRoot(
                 QUuid(QString::fromStdString(networkId)), name);
             const std::string draftId = pathParam(request, "draft");
             const WorkingCopyInfo draft = service.workingCopy(draftId, false);
@@ -2325,7 +2325,7 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
             for (const ModelChange& change : changes)
                 requireInput(!change.record ||
-                             (change.record->kind != hydraulic::hydraulicNetworkKind &&
+                             (change.record->kind != hydraulic::hydraulicDistributionNetworkKind &&
                               change.record->kind != 101),
                              "native hydraulic manifest/chunk writes are server-owned");
 #endif
@@ -2394,7 +2394,7 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             const aowis::model::ModelEntityEdit* rootEdit = nullptr;
             for (const aowis::model::ModelEditTransaction& transaction : transactions) {
                 for (const aowis::model::ModelEntityEdit& edit : transaction.edits) {
-                    if (edit.entityType != QString::fromLatin1(aowis::model::hydraulicRootEditType))
+                    if (edit.entityType != QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType))
                         continue;
                     requireInput(rootEdit == nullptr && transactions.size() == 1 &&
                                  edit.before.has_value() && edit.after.has_value(),

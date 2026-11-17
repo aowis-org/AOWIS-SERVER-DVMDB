@@ -1,7 +1,7 @@
-#include "aowis/dvmdb/hydraulic_network_persistence.h"
+#include "aowis/dvmdb/hydraulic_distribution_network_persistence.h"
 #include "aowis/dvmdb/revision_record.h"
 #include "aowis/dvmdb/storage_error.h"
-#include <aowis/model/edit/hydraulic_root_edit.h>
+#include <aowis/model/edit/hydraulic_distribution_root_edit.h>
 
 #include <aowis/dvmdb/model_validation.h>
 #include <aowis/dvmdb/model_field_merge.h>
@@ -60,7 +60,7 @@ constexpr qsizetype chunkCapacity = 256;
 constexpr std::uint16_t chunkKind = 101;
 
 struct Manifest {
-    NetworkHydraulic metadata;
+    NetworkHydraulicDistribution metadata;
     // Populated only by manifestFor()/loadMembersAtRevision(), never serialized inline.
     std::array<QList<QUuid>, collectionCount> members;
     std::array<QList<QUuid>, collectionCount> chunks;
@@ -73,7 +73,7 @@ struct MemberChunk {
     QList<QUuid> members;
 };
 
-void clearCollections(NetworkHydraulic& network) {
+void clearCollections(NetworkHydraulicDistribution& network) {
 #define CLEAR(name, type, kind) network.name.clear();
     AOWIS_DVMDB_HYDRAULIC_COLLECTIONS(CLEAR)
 #undef CLEAR
@@ -83,19 +83,19 @@ QByteArray encodeManifest(const Manifest& manifest) {
     QByteArray output;
     QDataStream stream(&output, QIODevice::WriteOnly);
     stream.setVersion(QDataStream::Qt_6_0);
-    const QByteArray metadata = aowis::dvmdb::ModelCodec<NetworkHydraulic>::encode(manifest.metadata);
-    if (metadata.isEmpty()) throw StorageError(StorageErrorKind::Internal, "cannot encode hydraulic network metadata");
+    const QByteArray metadata = aowis::dvmdb::ModelCodec<NetworkHydraulicDistribution>::encode(manifest.metadata);
+    if (metadata.isEmpty()) throw StorageError(StorageErrorKind::Internal, "cannot encode hydraulic distribution network metadata");
     stream << manifestMagic << manifestVersion << metadata;
     for (std::size_t index = 0; index < collectionCount; ++index) {
         stream << manifest.nextChunk[index] << manifest.chunks[index];
     }
     if (stream.status() != QDataStream::Ok || output.size() > maxManifestBytes)
-        throw StorageError(StorageErrorKind::LimitExceeded, "hydraulic network manifest exceeds encoding limit");
+        throw StorageError(StorageErrorKind::LimitExceeded, "hydraulic distribution network manifest exceeds encoding limit");
     return output;
 }
 
 Manifest decodeManifest(const QByteArray& bytes) {
-    if (bytes.size() > maxManifestBytes) throw StorageError(StorageErrorKind::LimitExceeded, "hydraulic network manifest too large");
+    if (bytes.size() > maxManifestBytes) throw StorageError(StorageErrorKind::LimitExceeded, "hydraulic distribution network manifest too large");
     QDataStream stream(bytes);
     stream.setVersion(QDataStream::Qt_6_0);
     quint32 magic = 0;
@@ -103,10 +103,10 @@ Manifest decodeManifest(const QByteArray& bytes) {
     QByteArray metadata;
     stream >> magic >> version >> metadata;
     if (stream.status() != QDataStream::Ok || magic != manifestMagic || version != manifestVersion)
-        throw StorageError(StorageErrorKind::Corruption, "unsupported hydraulic network manifest");
+        throw StorageError(StorageErrorKind::Corruption, "unsupported hydraulic distribution network manifest");
     QString error;
-    std::optional<NetworkHydraulic> decoded = aowis::dvmdb::ModelCodec<NetworkHydraulic>::decode(metadata, &error);
-    if (!decoded) throw StorageError(StorageErrorKind::Corruption, "invalid hydraulic network metadata: " + error.toStdString());
+    std::optional<NetworkHydraulicDistribution> decoded = aowis::dvmdb::ModelCodec<NetworkHydraulicDistribution>::decode(metadata, &error);
+    if (!decoded) throw StorageError(StorageErrorKind::Corruption, "invalid hydraulic distribution network metadata: " + error.toStdString());
     Manifest result;
     result.metadata = std::move(*decoded);
 #define CHECK_EMPTY(name, type, kind) \
@@ -186,7 +186,7 @@ std::vector<Key> chunkKeys(const Manifest& manifest) {
 }
 
 void checkRoot(const Manifest& manifest, const ModelRecord& root) {
-    if (root.kind != hydraulicNetworkKind || root.references != chunkKeys(manifest))
+    if (root.kind != hydraulicDistributionNetworkKind || root.references != chunkKeys(manifest))
         throw StorageError(StorageErrorKind::Corruption, "hydraulic root/chunk references disagree");
 }
 
@@ -245,7 +245,7 @@ template<typename ReadModel, typename ReadReferrers>
 std::optional<Key> ownerChunkUsing(ReadModel readModel, ReadReferrers readReferrers,
                                     const QUuid& network, const Key& member) {
     const std::optional<ModelRecord> root = readModel(keyFromUuid(network));
-    if (!root || root->kind != hydraulicNetworkKind) return std::nullopt;
+    if (!root || root->kind != hydraulicDistributionNetworkKind) return std::nullopt;
     std::optional<Key> found;
     for (const Key& parent : readReferrers(member)) {
         const std::optional<ModelRecord> candidate = readModel(parent);
@@ -369,7 +369,7 @@ void restoreEntities(Repository& repository, const ProjectId& project,
 
 // Build the membership/index representation shared by whole-network saves
 // and edit-oriented commits. The manifest never duplicates entity payloads.
-Manifest manifestFor(const NetworkHydraulic& network) {
+Manifest manifestFor(const NetworkHydraulicDistribution& network) {
     Manifest result;
     result.metadata = network;
     clearCollections(result.metadata);
@@ -393,7 +393,7 @@ std::map<Key, std::size_t> collectionOwners(const Manifest& manifest) {
     return owners;
 }
 
-void applyEntityChange(NetworkHydraulic& network, const HydraulicEntityChange& change,
+void applyEntityChange(NetworkHydraulicDistribution& network, const HydraulicEntityChange& change,
                        std::size_t collection) {
     std::size_t ordinal = 0;
 #define APPLY_EDIT(name, type, kind) \
@@ -725,7 +725,7 @@ std::optional<RevisionType> tryIndexedMembershipEditsUsing(
     HydraulicEditDiagnostics* diagnostics) {
     const Key networkKey = keyFromUuid(networkUuid);
     const std::optional<ModelRecord> networkRoot = readModel(networkKey);
-    if (!networkRoot || networkRoot->kind != hydraulicNetworkKind) return std::nullopt;
+    if (!networkRoot || networkRoot->kind != hydraulicDistributionNetworkKind) return std::nullopt;
     Manifest manifest = decodeManifest(qByteArrayFromBytes(networkRoot->payload));
     if (manifest.metadata.uuid != networkUuid) return std::nullopt;
     checkRoot(manifest, *networkRoot);
@@ -843,7 +843,7 @@ std::optional<RevisionType> tryIndexedMembershipEditsUsing(
     QSet<QUuid> metadataReferences;
     if (!removals.empty()) {
         for (const aowis::dvmdb::HydraulicReference& reference :
-             aowis::dvmdb::hydraulicReferences(manifest.metadata)) {
+             aowis::dvmdb::hydraulicDistributionReferences(manifest.metadata)) {
             if (reference.source_uuid == networkUuid && !reference.target_uuid.isNull())
                 metadataReferences.insert(reference.target_uuid);
         }
@@ -1471,12 +1471,12 @@ std::optional<RevisionId> tryIndexedUuidScalarEdits(
 // entity values but not the original ordered membership position of a newly
 // created/deleted member. Consequently, membership changes are rejected rather
 // than being guessed (which could produce a different canonical network).
-std::optional<NetworkHydraulic> previewReverseHydraulicActions(
-        const NetworkHydraulic& committed, const std::vector<Bytes>& newestFirstFrames,
+std::optional<NetworkHydraulicDistribution> previewReverseHydraulicActions(
+        const NetworkHydraulicDistribution& committed, const std::vector<Bytes>& newestFirstFrames,
         QString* error) {
     if (error) error->clear();
-    const std::function<std::optional<NetworkHydraulic>(const QString&)> fail =
-        [error](const QString& reason) -> std::optional<NetworkHydraulic> {
+    const std::function<std::optional<NetworkHydraulicDistribution>(const QString&)> fail =
+        [error](const QString& reason) -> std::optional<NetworkHydraulicDistribution> {
             if (error) *error = reason;
             return std::nullopt;
         };
@@ -1484,7 +1484,7 @@ std::optional<NetworkHydraulic> previewReverseHydraulicActions(
     // pages an authenticated, revision-pinned immutable archive separately.
     if (newestFirstFrames.size() > 100)
         return fail(QStringLiteral("Historical action preview exceeds 100-event page limit"));
-    NetworkHydraulic candidate = committed;
+    NetworkHydraulicDistribution candidate = committed;
     for (const Bytes& frame : newestFirstFrames) {
         const QByteArray bytes = qByteArrayFromBytes(frame);
         QString decodedError;
@@ -1495,18 +1495,18 @@ std::optional<NetworkHydraulic> previewReverseHydraulicActions(
         // The transaction is reversed as a whole, including mixed root and
         // typed edits. Only canonical, image-verified updates are supported.
         // Validate against a copy so no half-event can be exposed on error.
-        NetworkHydraulic next = candidate;
+        NetworkHydraulicDistribution next = candidate;
         for (const aowis::model::ModelEntityEdit& edit : original->edits) {
             if (!edit.before || !edit.after)
                 return fail(QStringLiteral("Historical create/delete needs membership-order provenance"));
-            if (edit.entityType == QString::fromLatin1(aowis::model::hydraulicRootEditType)) {
+            if (edit.entityType == QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType)) {
                 if (edit.entityId != next.uuid ||
-                    aowis::model::hydraulicRootImage(next) != *edit.after)
+                    aowis::model::hydraulicDistributionRootImage(next) != *edit.after)
                     return fail(QStringLiteral("Historical root after-image does not match current state"));
                 QString rootError;
-                const std::optional<NetworkHydraulic> before =
-                    aowis::model::decodeHydraulicRootImage(*edit.before, &rootError);
-                if (!before || !aowis::model::applyHydraulicRootMetadata(next, *before))
+                const std::optional<NetworkHydraulicDistribution> before =
+                    aowis::model::decodeHydraulicDistributionRootImage(*edit.before, &rootError);
+                if (!before || !aowis::model::applyHydraulicDistributionRootMetadata(next, *before))
                     return fail(QStringLiteral("Historical root before-image is invalid: ") + rootError);
                 continue;
             }
@@ -1546,19 +1546,19 @@ std::optional<NetworkHydraulic> previewReverseHydraulicActions(
         candidate = std::move(next);
     }
     const aowis::dvmdb::HydraulicDependencyValidation checked =
-        aowis::dvmdb::validateHydraulicNetworkWithDependencies(candidate);
+        aowis::dvmdb::validateHydraulicDistributionNetworkWithDependencies(candidate);
     if (!checked.report.valid())
         return fail(QStringLiteral("Historical state has invalid model references or values: ") +
                     checked.report.summary());
-    if (aowis::dvmdb::ModelCodec<NetworkHydraulic>::encode(candidate).isEmpty())
+    if (aowis::dvmdb::ModelCodec<NetworkHydraulicDistribution>::encode(candidate).isEmpty())
         return fail(QStringLiteral("Historical state cannot be canonically encoded"));
     return candidate;
 }
 
 namespace {
 // A cross-collection UUID collision must be rejected before appending any
-// historical creation; UUID identity is global within a hydraulic network.
-bool historicalMemberExists(const NetworkHydraulic& network, const QUuid& uuid) {
+// historical creation; UUID identity is global within a hydraulic distribution network.
+bool historicalMemberExists(const NetworkHydraulicDistribution& network, const QUuid& uuid) {
 #define CHECK_HISTORY_UUID(name, type, kind) \
     for (const type& item : network.name) \
         if (item.uuid == uuid) return true;
@@ -1586,17 +1586,17 @@ std::optional<VerifiedHydraulicRevisionCoverage> verifyHydraulicRevisionActionCo
         const RevisionNativeActionWitness witness =
             service.verifiedRevisionNativeActionWitness(projectId, branch, revision);
         // An unborn first Commit cannot be replayed against a non-existent
-        // NetworkHydraulic parent. It remains a valid checkpoint, not a
+        // NetworkHydraulicDistribution parent. It remains a valid checkpoint, not a
         // fabricated sequence of individually reversible actions.
         if (!witness.parentRevision)
             return fail(QStringLiteral("Historical revision has no first-parent network snapshot"));
-        if (witness.hydraulicRootKeys.size() > 65536)
+        if (witness.hydraulicDistributionRootKeys.size() > 65536)
             return fail(QStringLiteral("Historical revision contains too many network roots"));
         // Forking the action timeline does not rewrite the revision DAG. The
         // newly archived actions start at the verified fork coordinate,
         // whereas their native immutable parent remains the previous HEAD.
         // Reconstruct and authenticate that alternate MODEL starting state.
-        std::optional<NetworkHydraulic> forkBase;
+        std::optional<NetworkHydraulicDistribution> forkBase;
         if (witness.historyForkRevision) {
             // A fork must point backward through this immutable revision's
             // first-parent ancestry. Otherwise an invalid sidecar could
@@ -1622,9 +1622,9 @@ std::optional<VerifiedHydraulicRevisionCoverage> verifyHydraulicRevisionActionCo
                 !witness.historyForkArchiveCommitOperationId ||
                 source->commitOperationId != *witness.historyForkArchiveCommitOperationId ||
                 *witness.historyForkActionPosition > source->actionCount ||
-                source->tracks.size() != 1 || witness.hydraulicRootKeys.size() != 1)
+                source->tracks.size() != 1 || witness.hydraulicDistributionRootKeys.size() != 1)
                 return fail(QStringLiteral("Archived fork source is incomplete or ambiguous"));
-            const VerifiedHydraulicNetworkActionTrack& sourceTrack = source->tracks.front();
+            const VerifiedHydraulicDistributionNetworkActionTrack& sourceTrack = source->tracks.front();
             std::size_t localBoundary = 0;
             for (const std::size_t global : sourceTrack.globalPositions)
                 if (global < *witness.historyForkActionPosition) ++localBoundary;
@@ -1636,8 +1636,8 @@ std::optional<VerifiedHydraulicRevisionCoverage> verifyHydraulicRevisionActionCo
         }
         struct NetworkState final {
             QUuid id;
-            NetworkHydraulic before;
-            NetworkHydraulic after;
+            NetworkHydraulicDistribution before;
+            NetworkHydraulicDistribution after;
             std::set<Key> rootKeys;
             std::set<Key> chunkKeys;
             std::set<Key> memberKeys;
@@ -1655,7 +1655,7 @@ std::optional<VerifiedHydraulicRevisionCoverage> verifyHydraulicRevisionActionCo
                 const std::pair<std::map<Key, std::size_t>::iterator, bool> inserted =
                     keyOwners.emplace(key, owner);
                 if (!inserted.second && inserted.first->second != owner)
-                    throw std::runtime_error("historical hydraulic network ownership collision");
+                    throw std::runtime_error("historical hydraulic distribution network ownership collision");
                 keys.insert(key);
             };
         const std::function<void(const std::optional<RevisionId>&, NetworkState&, std::size_t)> gather =
@@ -1668,7 +1668,7 @@ std::optional<VerifiedHydraulicRevisionCoverage> verifyHydraulicRevisionActionCo
                     };
                 const Key rootKey = keyFromUuid(state.id);
                 const std::optional<ModelRecord> rootRecord = read(rootKey);
-                if (!rootRecord || rootRecord->kind != hydraulicNetworkKind)
+                if (!rootRecord || rootRecord->kind != hydraulicDistributionNetworkKind)
                     throw std::runtime_error("historical network root is missing or malformed");
                 own(rootKey, index, state.rootKeys);
                 for (const Key& chunkKey : rootRecord->references) {
@@ -1699,13 +1699,13 @@ std::optional<VerifiedHydraulicRevisionCoverage> verifyHydraulicRevisionActionCo
             [&service, projectId, revision](const Key& key) -> std::optional<ModelRecord> {
                 return service.getModelAtRevision(projectId, revision, key);
             };
-        for (const Key& rootKey : witness.hydraulicRootKeys) {
+        for (const Key& rootKey : witness.hydraulicDistributionRootKeys) {
             NetworkState state;
             state.id = uuidFromKey(rootKey);
-            const std::optional<NetworkHydraulic> before =
-                loadDraftHydraulicNetwork(readBefore, state.id);
-            const std::optional<NetworkHydraulic> after =
-                loadDraftHydraulicNetwork(readAfter, state.id);
+            const std::optional<NetworkHydraulicDistribution> before =
+                loadDraftHydraulicDistributionNetwork(readBefore, state.id);
+            const std::optional<NetworkHydraulicDistribution> after =
+                loadDraftHydraulicDistributionNetwork(readAfter, state.id);
             if (!before || !after)
                 return fail(QStringLiteral("Network creation/removal is checkpoint-only until history support exists"));
             state.before = forkBase ? *forkBase : *before;
@@ -1719,9 +1719,9 @@ std::optional<VerifiedHydraulicRevisionCoverage> verifyHydraulicRevisionActionCo
                 // A member can exist only at the old fork coordinate: it
                 // may have been deleted in HEAD and deleted again by the new
                 // actions. Attribute it without guessing its network owner.
-                for (const ModelChange& owned : fullDraftHydraulicNetworkChanges(*forkBase)) {
+                for (const ModelChange& owned : fullDraftHydraulicDistributionNetworkChanges(*forkBase)) {
                     if (!owned.record) continue;
-                    if (owned.record->kind == hydraulicNetworkKind)
+                    if (owned.record->kind == hydraulicDistributionNetworkKind)
                         own(owned.key, index, state.rootKeys);
                     else if (owned.record->kind == 101)
                         own(owned.key, index, state.chunkKeys);
@@ -1747,12 +1747,12 @@ std::optional<VerifiedHydraulicRevisionCoverage> verifyHydraulicRevisionActionCo
             std::map<std::size_t, aowis::model::ModelEditTransaction> partitions;
             for (const aowis::model::ModelEntityEdit& edit : event->edits) {
                 std::size_t owner = 0;
-                if (edit.entityType == QString::fromLatin1(aowis::model::hydraulicRootEditType)) {
+                if (edit.entityType == QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType)) {
                     const std::map<Key, std::size_t>::const_iterator found =
                         keyOwners.find(keyFromUuid(edit.entityId));
                     if (found == keyOwners.end() || found->second >= networks.size() ||
                         networks[found->second].id != edit.entityId)
-                        return fail(QStringLiteral("Historical root event has no owning hydraulic network"));
+                        return fail(QStringLiteral("Historical root event has no owning hydraulic distribution network"));
                     owner = found->second;
                     networks[owner].rootEdited = true;
                 } else {
@@ -1789,9 +1789,9 @@ std::optional<VerifiedHydraulicRevisionCoverage> verifyHydraulicRevisionActionCo
         covered.actionCount = witness.actions.size();
         for (NetworkState& state : networks) {
             if (state.frames.empty()) {
-                if (ModelCodec<NetworkHydraulic>::encode(state.before) !=
-                    ModelCodec<NetworkHydraulic>::encode(state.after))
-                    return fail(QStringLiteral("An unjournaled hydraulic network changed in the revision"));
+                if (ModelCodec<NetworkHydraulicDistribution>::encode(state.before) !=
+                    ModelCodec<NetworkHydraulicDistribution>::encode(state.after))
+                    return fail(QStringLiteral("An unjournaled hydraulic distribution network changed in the revision"));
                 continue;
             }
             QString replayError;
@@ -1826,7 +1826,7 @@ std::optional<VerifiedHydraulicRevisionCoverage> verifyHydraulicRevisionActionCo
         }
         for (NetworkState& state : networks) {
             if (state.frames.empty()) continue;
-            covered.tracks.push_back(VerifiedHydraulicNetworkActionTrack{
+            covered.tracks.push_back(VerifiedHydraulicDistributionNetworkActionTrack{
                 std::move(state.before), std::move(state.after),
                 std::move(state.frames), std::move(state.globalPositions)});
         }
@@ -1889,8 +1889,8 @@ std::optional<VerifiedHydraulicActionNavigationPlan> planVerifiedHydraulicAction
         for (const ModelChange& change : checkpoint.candidateChanges)
             if (!overlay.emplace(change.key, change.record).second)
                 return fail(QStringLiteral("Historical checkpoint contains duplicate record keys"));
-        std::vector<std::pair<QUuid, NetworkHydraulic>> expectedNetworks;
-        for (const VerifiedHydraulicNetworkActionTrack& track : covered->tracks) {
+        std::vector<std::pair<QUuid, NetworkHydraulicDistribution>> expectedNetworks;
+        for (const VerifiedHydraulicDistributionNetworkActionTrack& track : covered->tracks) {
             if (track.frames.size() != track.globalPositions.size())
                 return fail(QStringLiteral("Historical network action positions are inconsistent"));
             std::size_t localPosition = 0;
@@ -1900,12 +1900,12 @@ std::optional<VerifiedHydraulicActionNavigationPlan> planVerifiedHydraulicAction
                 if (global < actionPosition) ++localPosition;
             }
             QString replayError;
-            const std::optional<NetworkHydraulic> desired =
+            const std::optional<NetworkHydraulicDistribution> desired =
                 previewVerifiedHydraulicActionBoundary(
                     track.parent, track.committed, track.frames, localPosition, &replayError);
             if (!desired)
                 return fail(QStringLiteral("Historical action cannot be reconstructed: ") + replayError);
-            const std::vector<ModelChange> desiredRecords = fullDraftHydraulicNetworkChanges(*desired);
+            const std::vector<ModelChange> desiredRecords = fullDraftHydraulicDistributionNetworkChanges(*desired);
             std::set<Key> generated;
             for (const ModelChange& change : desiredRecords)
                 if (!generated.insert(change.key).second)
@@ -1920,7 +1920,7 @@ std::optional<VerifiedHydraulicActionNavigationPlan> planVerifiedHydraulicAction
                     return service.getModelAtRevision(draft.projectId, *witness.parentRevision, key);
                 };
             const std::optional<ModelRecord> root = parentRead(rootKey);
-            if (!root || root->kind != hydraulicNetworkKind)
+            if (!root || root->kind != hydraulicDistributionNetworkKind)
                 return fail(QStringLiteral("Historical parent root is missing"));
             std::set<Key> parentKeys{rootKey};
             for (const Key& chunkKey : root->references) {
@@ -1947,11 +1947,11 @@ std::optional<VerifiedHydraulicActionNavigationPlan> planVerifiedHydraulicAction
                 if (found != overlay.end()) return found->second;
                 return service.getModelAtRevision(draft.projectId, *draft.baseRevision, key);
             };
-        for (const std::pair<QUuid, NetworkHydraulic>& expected : expectedNetworks) {
-            const std::optional<NetworkHydraulic> actual =
-                loadDraftHydraulicNetwork(readDesired, expected.first);
-            if (!actual || ModelCodec<NetworkHydraulic>::encode(*actual) !=
-                           ModelCodec<NetworkHydraulic>::encode(expected.second))
+        for (const std::pair<QUuid, NetworkHydraulicDistribution>& expected : expectedNetworks) {
+            const std::optional<NetworkHydraulicDistribution> actual =
+                loadDraftHydraulicDistributionNetwork(readDesired, expected.first);
+            if (!actual || ModelCodec<NetworkHydraulicDistribution>::encode(*actual) !=
+                           ModelCodec<NetworkHydraulicDistribution>::encode(expected.second))
                 return fail(QStringLiteral("Historical native overlay disagrees with verified MODEL state"));
         }
         // The overlay is relative to the current immutable HEAD. Rebuilding
@@ -2043,13 +2043,13 @@ std::optional<WorkingCopyInfo> navigateVerifiedHydraulicAction(
 // deleting; forward replay derives every intermediate ordered collection.
 // Equality with the immutable child proves archive coverage for this network
 // without inventing insertion indices in the MODEL wire format.
-static std::optional<NetworkHydraulic> replayHydraulicActionBoundary(
-        const NetworkHydraulic& parent, const NetworkHydraulic* committed,
+static std::optional<NetworkHydraulicDistribution> replayHydraulicActionBoundary(
+        const NetworkHydraulicDistribution& parent, const NetworkHydraulicDistribution* committed,
         const std::vector<Bytes>& oldestFirstFrames, std::size_t boundary,
-        NetworkHydraulic* terminal, QString* error) {
+        NetworkHydraulicDistribution* terminal, QString* error) {
     if (error) error->clear();
-    const std::function<std::optional<NetworkHydraulic>(const QString&)> fail =
-        [error](const QString& reason) -> std::optional<NetworkHydraulic> {
+    const std::function<std::optional<NetworkHydraulicDistribution>(const QString&)> fail =
+        [error](const QString& reason) -> std::optional<NetworkHydraulicDistribution> {
             if (error) *error = reason;
             return std::nullopt;
         };
@@ -2059,19 +2059,19 @@ static std::optional<NetworkHydraulic> replayHydraulicActionBoundary(
     constexpr std::size_t maximumBytes = 8 * 1024 * 1024;
     if (oldestFirstFrames.size() > maximumActions || boundary > oldestFirstFrames.size())
         return fail(QStringLiteral("Historical boundary or action count is out of range"));
-    const QByteArray parentImage = ModelCodec<NetworkHydraulic>::encode(parent);
-    const QByteArray committedImage = committed ? ModelCodec<NetworkHydraulic>::encode(*committed) : QByteArray();
+    const QByteArray parentImage = ModelCodec<NetworkHydraulicDistribution>::encode(parent);
+    const QByteArray committedImage = committed ? ModelCodec<NetworkHydraulicDistribution>::encode(*committed) : QByteArray();
     if (parent.uuid.isNull() || (committed && parent.uuid != committed->uuid) ||
         parentImage.isEmpty() || (committed && committedImage.isEmpty()))
         return fail(QStringLiteral("Invalid or mismatched historical network checkpoints"));
     const aowis::dvmdb::HydraulicDependencyValidation sourceValidation =
-        aowis::dvmdb::validateHydraulicNetworkWithDependencies(parent);
+        aowis::dvmdb::validateHydraulicDistributionNetworkWithDependencies(parent);
     if (!sourceValidation.report.valid() ||
-        (committed && !aowis::dvmdb::validateHydraulicNetworkWithDependencies(*committed).report.valid()))
+        (committed && !aowis::dvmdb::validateHydraulicDistributionNetworkWithDependencies(*committed).report.valid()))
         return fail(QStringLiteral("Historical checkpoint has invalid model references or values"));
 
-    NetworkHydraulic state = parent;
-    NetworkHydraulic selected = parent;
+    NetworkHydraulicDistribution state = parent;
+    NetworkHydraulicDistribution selected = parent;
     QSet<QUuid> seenTransactions;
     std::size_t totalBytes = 0;
     for (std::size_t index = 0; index < oldestFirstFrames.size(); ++index) {
@@ -2089,19 +2089,19 @@ static std::optional<NetworkHydraulic> replayHydraulicActionBoundary(
             return fail(QStringLiteral("Duplicate archived history action identity"));
         seenTransactions.insert(event->transactionId);
         QSet<QUuid> seenEntities;
-        NetworkHydraulic next = state;
+        NetworkHydraulicDistribution next = state;
         for (const aowis::model::ModelEntityEdit& edit : event->edits) {
             if (edit.entityId.isNull() || seenEntities.contains(edit.entityId))
                 return fail(QStringLiteral("Duplicate or null entity UUID in history action"));
             seenEntities.insert(edit.entityId);
-            if (edit.entityType == QString::fromLatin1(aowis::model::hydraulicRootEditType)) {
+            if (edit.entityType == QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType)) {
                 if (edit.entityId != next.uuid || !edit.before || !edit.after ||
-                    aowis::model::hydraulicRootImage(next) != *edit.before)
+                    aowis::model::hydraulicDistributionRootImage(next) != *edit.before)
                     return fail(QStringLiteral("Historical root before-image mismatch"));
                 QString rootError;
-                const std::optional<NetworkHydraulic> metadata =
-                    aowis::model::decodeHydraulicRootImage(*edit.after, &rootError);
-                if (!metadata || !aowis::model::applyHydraulicRootMetadata(next, *metadata))
+                const std::optional<NetworkHydraulicDistribution> metadata =
+                    aowis::model::decodeHydraulicDistributionRootImage(*edit.after, &rootError);
+                if (!metadata || !aowis::model::applyHydraulicDistributionRootMetadata(next, *metadata))
                     return fail(QStringLiteral("Invalid historical root after-image: ") + rootError);
                 continue;
             }
@@ -2151,21 +2151,21 @@ static std::optional<NetworkHydraulic> replayHydraulicActionBoundary(
             if (!failure.isEmpty()) return fail(failure);
         }
         const aowis::dvmdb::HydraulicDependencyValidation validated =
-            aowis::dvmdb::validateHydraulicNetworkWithDependencies(next);
-        if (!validated.report.valid() || ModelCodec<NetworkHydraulic>::encode(next).isEmpty())
+            aowis::dvmdb::validateHydraulicDistributionNetworkWithDependencies(next);
+        if (!validated.report.valid() || ModelCodec<NetworkHydraulicDistribution>::encode(next).isEmpty())
             return fail(QStringLiteral("Historical action produced an invalid hydraulic state"));
         state = std::move(next);
         if (index + 1 == boundary) selected = state;
     }
-    if (committed && ModelCodec<NetworkHydraulic>::encode(state) != committedImage)
+    if (committed && ModelCodec<NetworkHydraulicDistribution>::encode(state) != committedImage)
         return fail(QStringLiteral("Historical MODEL archive does not cover the immutable network delta"));
     if (terminal) *terminal = state;
     return selected;
 }
 
 
-std::optional<NetworkHydraulic> previewVerifiedHydraulicActionBoundary(
-        const NetworkHydraulic& parent, const NetworkHydraulic& committed,
+std::optional<NetworkHydraulicDistribution> previewVerifiedHydraulicActionBoundary(
+        const NetworkHydraulicDistribution& parent, const NetworkHydraulicDistribution& committed,
         const std::vector<Bytes>& oldestFirstFrames, std::size_t boundary,
         QString* error) {
     return replayHydraulicActionBoundary(
@@ -2220,7 +2220,7 @@ planVerifiedHydraulicDraftActionNavigation(
                                        "Active history base exceeds bounded model scan");
                 for (const std::pair<Key, Bytes>& item : records) {
                     const ModelRecord record = decodeModelRecord(item.second);
-                    if (record.kind == hydraulicNetworkKind)
+                    if (record.kind == hydraulicDistributionNetworkKind)
                         roots.push_back(item.first);
                 }
             });
@@ -2229,11 +2229,11 @@ planVerifiedHydraulicDraftActionNavigation(
             // initialization/import is an unjournaled seed, not an Undo step.
             // Its unique root must be present in the candidate itself.
             for (const ModelChange& change : draft.candidateChanges)
-                if (change.record && change.record->kind == hydraulicNetworkKind)
+                if (change.record && change.record->kind == hydraulicDistributionNetworkKind)
                     roots.push_back(change.key);
         }
         if (roots.size() != 1)
-            return fail(QStringLiteral("Active journal replay requires one unambiguous hydraulic network"));
+            return fail(QStringLiteral("Active journal replay requires one unambiguous hydraulic distribution network"));
         const Key rootKey = roots.front();
         const QUuid networkId = uuidFromKey(rootKey);
         const std::function<std::optional<ModelRecord>(const Key&)> readBase =
@@ -2251,13 +2251,13 @@ planVerifiedHydraulicDraftActionNavigation(
                     candidate.find(key);
                 return found != candidate.end() ? found->second : readBase(key);
             };
-        const std::optional<NetworkHydraulic> current =
-            loadDraftHydraulicNetwork(readCurrent, networkId);
+        const std::optional<NetworkHydraulicDistribution> current =
+            loadDraftHydraulicDistributionNetwork(readCurrent, networkId);
         if (!current)
-            return fail(QStringLiteral("Active draft cannot be loaded as its hydraulic network"));
-        std::optional<NetworkHydraulic> parent;
+            return fail(QStringLiteral("Active draft cannot be loaded as its hydraulic distribution network"));
+        std::optional<NetworkHydraulicDistribution> parent;
         if (draft.baseRevision) {
-            parent = loadDraftHydraulicNetwork(readBase, networkId);
+            parent = loadDraftHydraulicDistributionNetwork(readBase, networkId);
             if (!parent)
                 return fail(QStringLiteral("Active draft committed network base cannot be loaded"));
             if (draft.historyForkRevisionId) {
@@ -2278,7 +2278,7 @@ planVerifiedHydraulicDraftActionNavigation(
                     *draft.historyForkActionPosition > source->actionCount ||
                     source->tracks.front().parent.uuid != networkId)
                     return fail(QStringLiteral("Cannot verify the journal's archived fork source: ") + sourceError);
-                const VerifiedHydraulicNetworkActionTrack& track = source->tracks.front();
+                const VerifiedHydraulicDistributionNetworkActionTrack& track = source->tracks.front();
                 std::size_t localPosition = 0;
                 for (const std::size_t globalPosition : track.globalPositions)
                     if (globalPosition < *draft.historyForkActionPosition)
@@ -2299,7 +2299,7 @@ planVerifiedHydraulicDraftActionNavigation(
                     -> std::set<Key> {
                 std::set<Key> keys{rootKey};
                 const std::optional<ModelRecord> root = read(rootKey);
-                if (!root || root->kind != hydraulicNetworkKind)
+                if (!root || root->kind != hydraulicDistributionNetworkKind)
                     throw StorageError(StorageErrorKind::Corruption,
                                        "Invalid active history network root");
                 for (const Key& chunkKey : root->references) {
@@ -2335,7 +2335,7 @@ planVerifiedHydraulicDraftActionNavigation(
                 return fail(QStringLiteral("Active MODEL journal identity mismatch: ") + decodeError);
             frames.push_back(event.encoded);
         }
-        NetworkHydraulic terminal;
+        NetworkHydraulicDistribution terminal;
         QString replayError;
         if (!draft.baseRevision) {
             // Reconstruct the seed of an unborn first draft from the exact
@@ -2370,7 +2370,7 @@ planVerifiedHydraulicDraftActionNavigation(
             if (!parent)
                 return fail(QStringLiteral("Cannot verify unborn network seed: ") + replayError);
         }
-        const std::optional<NetworkHydraulic> persistedPosition =
+        const std::optional<NetworkHydraulicDistribution> persistedPosition =
             replayHydraulicActionBoundary(*parent, nullptr, frames,
                 static_cast<std::size_t>(selectedPosition), &terminal, &replayError);
         if (!persistedPosition)
@@ -2379,16 +2379,16 @@ planVerifiedHydraulicDraftActionNavigation(
         // authenticated historical selection, not the active journal view.
         // The retained journal was checked before crossing the boundary.
         if (!draft.historyCheckpointRevisionId &&
-            ModelCodec<NetworkHydraulic>::encode(*persistedPosition) !=
-                ModelCodec<NetworkHydraulic>::encode(*current))
+            ModelCodec<NetworkHydraulicDistribution>::encode(*persistedPosition) !=
+                ModelCodec<NetworkHydraulicDistribution>::encode(*current))
             return fail(QStringLiteral("Active MODEL actions do not explain the persisted draft model"));
-        const std::optional<NetworkHydraulic> desired =
+        const std::optional<NetworkHydraulicDistribution> desired =
             replayHydraulicActionBoundary(*parent, &terminal, frames,
                 actionPosition, nullptr, &replayError);
         if (!desired)
             return fail(QStringLiteral("Selected active action cannot be reconstructed: ") + replayError);
 
-        const std::vector<ModelChange> generated = fullDraftHydraulicNetworkChanges(*desired);
+        const std::vector<ModelChange> generated = fullDraftHydraulicDistributionNetworkChanges(*desired);
         std::map<Key, std::optional<ModelRecord>> overlay;
         std::set<Key> generatedKeys;
         for (const ModelChange& change : generated) {
@@ -2422,10 +2422,10 @@ planVerifiedHydraulicDraftActionNavigation(
                     overlay.find(key);
                 return found != overlay.end() ? found->second : readBase(key);
             };
-        const std::optional<NetworkHydraulic> rebuilt =
-            loadDraftHydraulicNetwork(readDesired, networkId);
-        if (!rebuilt || ModelCodec<NetworkHydraulic>::encode(*rebuilt) !=
-                          ModelCodec<NetworkHydraulic>::encode(*desired))
+        const std::optional<NetworkHydraulicDistribution> rebuilt =
+            loadDraftHydraulicDistributionNetwork(readDesired, networkId);
+        if (!rebuilt || ModelCodec<NetworkHydraulicDistribution>::encode(*rebuilt) !=
+                          ModelCodec<NetworkHydraulicDistribution>::encode(*desired))
             return fail(QStringLiteral("Native active overlay differs from verified MODEL action state"));
         const WorkingCopyInfo fresh = service.workingCopy(draftId, false);
         const std::optional<RevisionGraphHead> branchFresh =
@@ -2489,33 +2489,33 @@ ModelChange materializeDraftRootEdit(
     const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
     const aowis::model::ModelEntityEdit& edit)
 {
-    if (edit.entityType != QString::fromLatin1(aowis::model::hydraulicRootEditType) ||
+    if (edit.entityType != QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType) ||
         edit.entityId.isNull() || !edit.before || !edit.after)
         throw StorageError(StorageErrorKind::InvalidInput, "invalid network-root MODEL event");
     const Key rootKey = keyFromUuid(edit.entityId);
     const std::optional<ModelRecord> root = readCurrent(rootKey);
-    if (!root || root->kind != hydraulicNetworkKind)
+    if (!root || root->kind != hydraulicDistributionNetworkKind)
         throw StorageError(StorageErrorKind::InvalidInput, "network-root MODEL event has no manifest");
     Manifest manifest = decodeManifest(qByteArrayFromBytes(root->payload));
     checkRoot(manifest, *root);
     if (manifest.metadata.uuid != edit.entityId ||
-        aowis::model::hydraulicRootImage(manifest.metadata) != *edit.before)
+        aowis::model::hydraulicDistributionRootImage(manifest.metadata) != *edit.before)
         throw StorageError(StorageErrorKind::Conflict, "stale network-root MODEL before-image");
     QString error;
-    const std::optional<NetworkHydraulic> after =
-        aowis::model::decodeHydraulicRootImage(*edit.after, &error);
+    const std::optional<NetworkHydraulicDistribution> after =
+        aowis::model::decodeHydraulicDistributionRootImage(*edit.after, &error);
     if (!after || after->uuid != manifest.metadata.uuid ||
         after->id.trimmed().isEmpty() || after->id.size() > 255)
         throw StorageError(StorageErrorKind::InvalidInput,
                            "invalid network-root MODEL after-image: " + error.toStdString());
     // Verify references and numeric rules against the entire saved network,
     // not only the scalar metadata projection.
-    std::optional<NetworkHydraulic> complete =
-        loadDraftHydraulicNetwork(readCurrent, edit.entityId);
-    if (!complete || !aowis::model::applyHydraulicRootMetadata(*complete, *after))
+    std::optional<NetworkHydraulicDistribution> complete =
+        loadDraftHydraulicDistributionNetwork(readCurrent, edit.entityId);
+    if (!complete || !aowis::model::applyHydraulicDistributionRootMetadata(*complete, *after))
         throw StorageError(StorageErrorKind::InvalidInput, "cannot update network-root metadata");
     const aowis::dvmdb::HydraulicDependencyValidation validation =
-        aowis::dvmdb::validateHydraulicNetworkWithDependencies(*complete);
+        aowis::dvmdb::validateHydraulicDistributionNetworkWithDependencies(*complete);
     if (!validation.report.valid())
         throw StorageError(StorageErrorKind::InvalidInput,
                            "invalid network-root metadata: " + validation.report.summary().toStdString());
@@ -2525,14 +2525,14 @@ ModelChange materializeDraftRootEdit(
     return ModelChange{rootKey, std::move(changed)};
 }
 
-std::vector<ModelChange> fullDraftHydraulicNetworkChanges(const NetworkHydraulic& network) {
+std::vector<ModelChange> fullDraftHydraulicDistributionNetworkChanges(const NetworkHydraulicDistribution& network) {
     if (network.uuid.isNull() || network.id.trimmed().isEmpty())
-        throw StorageError(StorageErrorKind::InvalidInput, "invalid imported hydraulic network identity or name");
+        throw StorageError(StorageErrorKind::InvalidInput, "invalid imported hydraulic distribution network identity or name");
     const aowis::dvmdb::HydraulicDependencyValidation validated =
-        aowis::dvmdb::validateHydraulicNetworkWithDependencies(network);
+        aowis::dvmdb::validateHydraulicDistributionNetworkWithDependencies(network);
     if (!validated.report.valid())
         throw StorageError(StorageErrorKind::InvalidInput,
-                           "invalid imported hydraulic network: " + validated.report.summary().toStdString());
+                           "invalid imported hydraulic distribution network: " + validated.report.summary().toStdString());
     Manifest next = manifestFor(network);
     const std::set<Key> members = memberKeys(next);
     const DependencyIndex references = indexedDependencies(validated.dependencies, members);
@@ -2544,41 +2544,41 @@ std::vector<ModelChange> fullDraftHydraulicNetworkChanges(const NetworkHydraulic
 #undef APPEND_IMPORTED_COLLECTION
     buildChunks(next, changes);
     ModelRecord root;
-    root.kind = hydraulicNetworkKind;
+    root.kind = hydraulicDistributionNetworkKind;
     root.payload = bytesFromQByteArray(encodeManifest(next));
     root.references = chunkKeys(next);
     changes.push_back(ModelChange{keyFromUuid(network.uuid), std::move(root)});
     return changes;
 }
 
-ModelChange emptyDraftHydraulicNetworkRoot(const QUuid& networkId, const QString& name) {
+ModelChange emptyDraftHydraulicDistributionNetworkRoot(const QUuid& networkId, const QString& name) {
     if (networkId.isNull() || name.trimmed().isEmpty() || name.size() > 255)
-        throw StorageError(StorageErrorKind::InvalidInput, "invalid new hydraulic network identity or name");
-    NetworkHydraulic network;
+        throw StorageError(StorageErrorKind::InvalidInput, "invalid new hydraulic distribution network identity or name");
+    NetworkHydraulicDistribution network;
     network.uuid = networkId;
     network.id = name;
     Manifest manifest = manifestFor(network);
     ModelRecord root;
-    root.kind = hydraulicNetworkKind;
+    root.kind = hydraulicDistributionNetworkKind;
     root.payload = bytesFromQByteArray(encodeManifest(manifest));
     root.references = chunkKeys(manifest);
     return ModelChange{keyFromUuid(networkId), std::move(root)};
 }
 
-std::optional<NetworkHydraulic> loadDraftHydraulicNetwork(
+std::optional<NetworkHydraulicDistribution> loadDraftHydraulicDistributionNetwork(
     const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
     const QUuid& networkId) {
     if (networkId.isNull())
-        throw StorageError(StorageErrorKind::InvalidInput, "hydraulic network UUID is null");
+        throw StorageError(StorageErrorKind::InvalidInput, "hydraulic distribution network UUID is null");
     const std::optional<ModelRecord> root = readCurrent(keyFromUuid(networkId));
-    if (!root || root->kind != hydraulicNetworkKind) return std::nullopt;
+    if (!root || root->kind != hydraulicDistributionNetworkKind) return std::nullopt;
     Manifest manifest = decodeManifest(qByteArrayFromBytes(root->payload));
     if (manifest.metadata.uuid != networkId)
         throw StorageError(StorageErrorKind::Corruption, "draft network root UUID mismatch");
     checkRoot(manifest, *root);
     loadMembersUsing(readCurrent, manifest);
     const std::set<Key> members = memberKeys(manifest);
-    NetworkHydraulic network = std::move(manifest.metadata);
+    NetworkHydraulicDistribution network = std::move(manifest.metadata);
     DependencyIndex storedReferences;
     std::size_t ordinal = 0;
 #define RESTORE_DRAFT(name, type, entityKind) \
@@ -2599,10 +2599,10 @@ std::optional<NetworkHydraulic> loadDraftHydraulicNetwork(
     AOWIS_DVMDB_HYDRAULIC_COLLECTIONS(RESTORE_DRAFT)
 #undef RESTORE_DRAFT
     const aowis::dvmdb::HydraulicDependencyValidation validated =
-        aowis::dvmdb::validateHydraulicNetworkWithDependencies(network);
+        aowis::dvmdb::validateHydraulicDistributionNetworkWithDependencies(network);
     if (!validated.report.valid())
         throw StorageError(StorageErrorKind::Corruption,
-                           "draft hydraulic network invalid: " + validated.report.summary().toStdString());
+                           "draft hydraulic distribution network invalid: " + validated.report.summary().toStdString());
     const DependencyIndex canonicalReferences = indexedDependencies(validated.dependencies, members);
     std::sort(storedReferences.begin(), storedReferences.end());
     storedReferences.erase(std::unique(storedReferences.begin(), storedReferences.end()),
@@ -2672,7 +2672,7 @@ void materializeDraftMembership(
     }
     // Never accept user-supplied native manifest/chunk writes in the same batch.
     for (const ModelChange& change : changes)
-        if (change.record && (change.record->kind == hydraulicNetworkKind ||
+        if (change.record && (change.record->kind == hydraulicDistributionNetworkKind ||
                               change.record->kind == chunkKind))
             throw StorageError(StorageErrorKind::InvalidInput,
                                "internal hydraulic records are server-owned");
@@ -2681,17 +2681,17 @@ void materializeDraftMembership(
     for (const std::pair<const Key, std::vector<DraftMembershipIntent>>& group : grouped) {
         const QUuid networkId = uuidFromKey(group.first);
         if (networkId.isNull())
-            throw StorageError(StorageErrorKind::InvalidInput, "invalid hydraulic network UUID");
+            throw StorageError(StorageErrorKind::InvalidInput, "invalid hydraulic distribution network UUID");
         if (incoming.contains(group.first))
             throw StorageError(StorageErrorKind::InvalidInput,
                                "network metadata and membership cannot change together");
         const std::optional<ModelRecord> root = readCurrent(group.first);
-        if (!root || root->kind != hydraulicNetworkKind)
+        if (!root || root->kind != hydraulicDistributionNetworkKind)
             throw StorageError(StorageErrorKind::Conflict,
                                "hydraulic membership requires an existing network root");
         Manifest manifest = decodeManifest(qByteArrayFromBytes(root->payload));
         if (manifest.metadata.uuid != networkId)
-            throw StorageError(StorageErrorKind::Corruption, "wrong hydraulic network root identity");
+            throw StorageError(StorageErrorKind::Corruption, "wrong hydraulic distribution network root identity");
         checkRoot(manifest, *root);
         // Read only the affected collections. Unchanged hydraulic lists and
         // their chunks are never decoded or rewritten for this draft Save.
@@ -2836,7 +2836,7 @@ std::optional<std::string> validateMergedHydraulicSnapshot(const MergeCandidate&
         candidate.forEach([&roots, &existing](const Key& key, const ModelRecord& record) {
             if (!existing.insert(key).second)
                 throw StorageError(StorageErrorKind::Corruption, "duplicate object UUID in merged snapshot");
-            if (record.kind == hydraulicNetworkKind) roots.push_back(key);
+            if (record.kind == hydraulicDistributionNetworkKind) roots.push_back(key);
         });
         if (roots.empty()) return std::string("hydraulic merge has no network root");
         std::set<Key> globallyOwned;
@@ -2859,7 +2859,7 @@ std::optional<std::string> validateMergedHydraulicSnapshot(const MergeCandidate&
                 if (!globallyOwned.insert(member).second)
                     throw StorageError(StorageErrorKind::Corruption, "hydraulic entity belongs to multiple networks");
             }
-            NetworkHydraulic network = std::move(manifest.metadata);
+            NetworkHydraulicDistribution network = std::move(manifest.metadata);
             DependencyIndex stored;
             std::size_t ordinal = 0;
 #define RESTORE_MERGED(name, type, kind) \
@@ -2869,7 +2869,7 @@ std::optional<std::string> validateMergedHydraulicSnapshot(const MergeCandidate&
             AOWIS_DVMDB_HYDRAULIC_COLLECTIONS(RESTORE_MERGED)
 #undef RESTORE_MERGED
             const aowis::dvmdb::HydraulicDependencyValidation validated =
-                aowis::dvmdb::validateHydraulicNetworkWithDependencies(network);
+                aowis::dvmdb::validateHydraulicDistributionNetworkWithDependencies(network);
             if (!validated.report.valid())
                 throw StorageError(StorageErrorKind::Corruption, "invalid combined hydraulic model: " +
                                          validated.report.summary().toStdString());
@@ -2957,15 +2957,15 @@ std::optional<ModelRecord> mergeHydraulicMembershipRecord(
             return std::nullopt;
         return encodeChunk(merged);
     }
-    if (base.kind == hydraulicNetworkKind) {
+    if (base.kind == hydraulicDistributionNetworkKind) {
         const Manifest ancestor = decodeManifest(qByteArrayFromBytes(base.payload));
         const Manifest left = decodeManifest(qByteArrayFromBytes(target.payload));
         const Manifest right = decodeManifest(qByteArrayFromBytes(source.payload));
         if (ancestor.metadata.uuid != left.metadata.uuid ||
             ancestor.metadata.uuid != right.metadata.uuid) return std::nullopt;
-        const QByteArray baseMetadata = aowis::model::hydraulicRootImage(ancestor.metadata);
-        const QByteArray leftMetadata = aowis::model::hydraulicRootImage(left.metadata);
-        const QByteArray rightMetadata = aowis::model::hydraulicRootImage(right.metadata);
+        const QByteArray baseMetadata = aowis::model::hydraulicDistributionRootImage(ancestor.metadata);
+        const QByteArray leftMetadata = aowis::model::hydraulicDistributionRootImage(left.metadata);
+        const QByteArray rightMetadata = aowis::model::hydraulicDistributionRootImage(right.metadata);
         if (baseMetadata.isEmpty() || leftMetadata.isEmpty() || rightMetadata.isEmpty())
             return std::nullopt;
         Manifest merged = leftMetadata == baseMetadata ? right : left;
@@ -2982,8 +2982,8 @@ std::optional<ModelRecord> mergeHydraulicMembershipRecord(
                         conflictingFields->push_back(field.toStdString());
                 return std::nullopt;
             }
-            const std::optional<NetworkHydraulic> metadata =
-                aowis::model::decodeHydraulicRootImage(fields->content);
+            const std::optional<NetworkHydraulicDistribution> metadata =
+                aowis::model::decodeHydraulicDistributionRootImage(fields->content);
             if (!metadata || metadata->uuid != ancestor.metadata.uuid) return std::nullopt;
             merged = left;
             merged.metadata = *metadata;
@@ -2994,7 +2994,7 @@ std::optional<ModelRecord> mergeHydraulicMembershipRecord(
             merged.nextChunk[i] = std::max(left.nextChunk[i], right.nextChunk[i]);
         }
         ModelRecord record;
-        record.kind = hydraulicNetworkKind;
+        record.kind = hydraulicDistributionNetworkKind;
         record.payload = bytesFromQByteArray(encodeManifest(merged));
         record.references = chunkKeys(merged);
         return record;
@@ -3035,17 +3035,17 @@ std::optional<std::string> reconcileExplicitHydraulicMembership(
     try {
         std::vector<Key> networks;
         candidate.forEach([&networks](const Key& key, const ModelRecord& record) {
-            if (record.kind == hydraulicNetworkKind) networks.push_back(key);
+            if (record.kind == hydraulicDistributionNetworkKind) networks.push_back(key);
         });
         for (const std::pair<const Key, MergeChoiceSide>& choice : choices) {
             const std::optional<ModelRecord> historicalTarget = target(choice.first);
             const std::optional<ModelRecord> historicalSource = source(choice.first);
             for (const std::optional<ModelRecord>& record : {historicalTarget, historicalSource}) {
-                if (record && (record->kind == hydraulicNetworkKind || record->kind == chunkKind))
+                if (record && (record->kind == hydraulicDistributionNetworkKind || record->kind == chunkKind))
                     throw StorageError(StorageErrorKind::InvalidInput, "internal membership records cannot be selected directly");
             }
             const std::optional<ModelRecord> kept = candidate.get(choice.first);
-            if (!kept || kept->kind == hydraulicNetworkKind || kept->kind == chunkKind)
+            if (!kept || kept->kind == hydraulicDistributionNetworkKind || kept->kind == chunkKind)
                 continue; // a selected deletion, or a non-entity choice
             std::size_t type = collectionCount;
             const std::array<std::uint16_t, collectionCount> kinds = {
@@ -3082,7 +3082,7 @@ std::optional<std::string> reconcileExplicitHydraulicMembership(
                 ? source : target;
             for (const Key& networkKey : networks) {
                 const std::optional<ModelRecord> historicRoot = selectedSide(networkKey);
-                if (!historicRoot || historicRoot->kind != hydraulicNetworkKind) continue;
+                if (!historicRoot || historicRoot->kind != hydraulicDistributionNetworkKind) continue;
                 const Manifest original = decodeManifest(qByteArrayFromBytes(historicRoot->payload));
                 for (const QUuid& chunkId : original.chunks[type]) {
                     const std::optional<ModelRecord> historicChunk = selectedSide(keyFromUuid(chunkId));
@@ -3144,7 +3144,7 @@ MergeResolution resolveHydraulicRecord(const Key& key, const ModelRecord& base,
         } catch (const std::exception&) { /* conservative conflict */ }
         return rejected;
     }
-    if (base.kind == hydraulicNetworkKind) {
+    if (base.kind == hydraulicDistributionNetworkKind) {
         if (target.kind != base.kind || source.kind != base.kind) return rejected;
         // Field choices may only resolve root fields that actually conflict.
         if (!fieldChoices.isEmpty()) {
@@ -3325,10 +3325,10 @@ std::optional<QList<QUuid>> listHydraulicEntityIdsAtRevisionLimited(
         throw StorageError(StorageErrorKind::InvalidInput, "unknown hydraulic entity collection");
     const std::optional<ModelRecord> root =
         repository.getModelAtRevision(project, revisionId, keyFromUuid(networkUuid));
-    if (!root || root->kind != hydraulicNetworkKind) return std::nullopt;
+    if (!root || root->kind != hydraulicDistributionNetworkKind) return std::nullopt;
     Manifest manifest = decodeManifest(qByteArrayFromBytes(root->payload));
     if (manifest.metadata.uuid != networkUuid)
-        throw StorageError(StorageErrorKind::Corruption, "hydraulic network root UUID mismatch");
+        throw StorageError(StorageErrorKind::Corruption, "hydraulic distribution network root UUID mismatch");
     checkRoot(manifest, *root);
     loadMembersAtRevision(repository, project, revisionId, manifest, index, maxCount);
     return manifest.members[index];
@@ -3363,19 +3363,19 @@ std::optional<HydraulicEntity> loadHydraulicEntityAtRevision(
     return decoded;
 }
 
-std::optional<NetworkHydraulic> loadHydraulicNetworkAtRevision(
+std::optional<NetworkHydraulicDistribution> loadHydraulicDistributionNetworkAtRevision(
     Repository& repository, const ProjectId& project, const RevisionId& revisionId,
     const QUuid& networkUuid) {
     const std::optional<ModelRecord> root =
         repository.getModelAtRevision(project, revisionId, keyFromUuid(networkUuid));
-    if (!root || root->kind != hydraulicNetworkKind) return std::nullopt;
+    if (!root || root->kind != hydraulicDistributionNetworkKind) return std::nullopt;
     Manifest manifest = decodeManifest(qByteArrayFromBytes(root->payload));
     if (manifest.metadata.uuid != networkUuid)
-        throw StorageError(StorageErrorKind::Corruption, "hydraulic network root UUID mismatch");
+        throw StorageError(StorageErrorKind::Corruption, "hydraulic distribution network root UUID mismatch");
     checkRoot(manifest, *root);
     loadMembersAtRevision(repository, project, revisionId, manifest);
     const std::set<Key> members = memberKeys(manifest);
-    NetworkHydraulic network = std::move(manifest.metadata);
+    NetworkHydraulicDistribution network = std::move(manifest.metadata);
     DependencyIndex storedReferences;
     std::size_t ordinal = 0;
 #define RESTORE_COLLECTION(name, type, kind) \
@@ -3385,7 +3385,7 @@ std::optional<NetworkHydraulic> loadHydraulicNetworkAtRevision(
     AOWIS_DVMDB_HYDRAULIC_COLLECTIONS(RESTORE_COLLECTION)
 #undef RESTORE_COLLECTION
     const aowis::dvmdb::HydraulicDependencyValidation validated =
-        aowis::dvmdb::validateHydraulicNetworkWithDependencies(network);
+        aowis::dvmdb::validateHydraulicDistributionNetworkWithDependencies(network);
     if (!validated.report.valid())
         throw StorageError(StorageErrorKind::Corruption,
                            "loaded network invalid: " + validated.report.summary().toStdString());
@@ -3399,13 +3399,13 @@ std::optional<NetworkHydraulic> loadHydraulicNetworkAtRevision(
     return network;
 }
 
-RevisionId saveHydraulicNetwork(Repository& repository, const ProjectId& project,
-                                  std::string_view branch, const NetworkHydraulic& network,
+RevisionId saveHydraulicDistributionNetwork(Repository& repository, const ProjectId& project,
+                                  std::string_view branch, const NetworkHydraulicDistribution& network,
                                   const RevisionId& expectedHead,
                                   const CommitMetadata& metadata) {
     validateCommitMetadata(metadata);
     if (network.uuid.isNull())
-        throw StorageError(StorageErrorKind::InvalidInput, "hydraulic network UUID is null");
+        throw StorageError(StorageErrorKind::InvalidInput, "hydraulic distribution network UUID is null");
     // Pin one immutable starting point. Native commitModel() rechecks the
     // expected HEAD under the writer lock before publishing any new revision.
     if (repository.head(project, branch) != expectedHead)
@@ -3414,14 +3414,14 @@ RevisionId saveHydraulicNetwork(Repository& repository, const ProjectId& project
     if (!startingBytes) throw StorageError(StorageErrorKind::NotFound, "revision UUID not found");
     const RevisionRecord starting = decodeRevisionRecord(*startingBytes);
     if (!starting.modelIndexed && starting.root != Hash{})
-        throw StorageError(StorageErrorKind::InvalidInput, "cannot save a hydraulic network to a populated raw branch");
+        throw StorageError(StorageErrorKind::InvalidInput, "cannot save a hydraulic distribution network to a populated raw branch");
     Manifest next = manifestFor(network);
     const std::set<Key> newMembers = memberKeys(next);
     const aowis::dvmdb::HydraulicDependencyValidation validated =
-        aowis::dvmdb::validateHydraulicNetworkWithDependencies(network);
+        aowis::dvmdb::validateHydraulicDistributionNetworkWithDependencies(network);
     if (!validated.report.valid())
         throw StorageError(StorageErrorKind::InvalidInput,
-                           "invalid hydraulic network: " + validated.report.summary().toStdString());
+                           "invalid hydraulic distribution network: " + validated.report.summary().toStdString());
     const DependencyIndex references = indexedDependencies(validated.dependencies, newMembers);
     const Key networkKey = keyFromUuid(network.uuid);
     std::optional<ModelRecord> currentRoot;
@@ -3429,7 +3429,7 @@ RevisionId saveHydraulicNetwork(Repository& repository, const ProjectId& project
         currentRoot = repository.getModelAtRevision(project, expectedHead, networkKey);
     std::set<Key> oldMembers;
     if (currentRoot) {
-        if (currentRoot->kind != hydraulicNetworkKind)
+        if (currentRoot->kind != hydraulicDistributionNetworkKind)
             throw StorageError(StorageErrorKind::Conflict, "network UUID already used by another entity");
         Manifest previous = decodeManifest(qByteArrayFromBytes(currentRoot->payload));
         if (previous.metadata.uuid != network.uuid)
@@ -3460,14 +3460,14 @@ RevisionId saveHydraulicNetwork(Repository& repository, const ProjectId& project
                 changes.push_back(ModelChange{oldChunk, std::nullopt});
     }
     ModelRecord root;
-    root.kind = hydraulicNetworkKind;
+    root.kind = hydraulicDistributionNetworkKind;
     root.payload = bytesFromQByteArray(encodeManifest(next));
     root.references = chunkKeys(next);
     changes.push_back(ModelChange{networkKey, std::move(root)});
     return repository.commitModel(project, branch, std::move(changes), metadata, expectedHead);
 }
 
-RevisionId editHydraulicNetwork(Repository& repository, const ProjectId& project,
+RevisionId editHydraulicDistributionNetwork(Repository& repository, const ProjectId& project,
                                   std::string_view branch, const QUuid& networkUuid,
                                   const std::vector<HydraulicEntityChange>& changes,
                                   const RevisionId& expectedHead,
@@ -3476,7 +3476,7 @@ RevisionId editHydraulicNetwork(Repository& repository, const ProjectId& project
     validateCommitMetadata(metadata);
     if (diagnostics) *diagnostics = HydraulicEditDiagnostics{};
     if (networkUuid.isNull())
-        throw StorageError(StorageErrorKind::InvalidInput, "hydraulic network UUID is null");
+        throw StorageError(StorageErrorKind::InvalidInput, "hydraulic distribution network UUID is null");
     if (changes.size() > 128)
         throw StorageError(StorageErrorKind::LimitExceeded, "hydraulic edit exceeds 128 changes");
     if (repository.head(project, branch) != expectedHead)
@@ -3503,13 +3503,13 @@ RevisionId editHydraulicNetwork(Repository& repository, const ProjectId& project
                 repository, project, branch, networkUuid, changes, expectedHead, metadata, diagnostics))
             return *indexed;
     }
-    std::optional<NetworkHydraulic> network =
-        loadHydraulicNetworkAtRevision(repository, project, expectedHead, networkUuid);
-    if (!network) throw StorageError(StorageErrorKind::NotFound, "hydraulic network not found");
+    std::optional<NetworkHydraulicDistribution> network =
+        loadHydraulicDistributionNetworkAtRevision(repository, project, expectedHead, networkUuid);
+    if (!network) throw StorageError(StorageErrorKind::NotFound, "hydraulic distribution network not found");
     const Manifest previous = manifestFor(*network);
     const std::map<Key, std::size_t> owners = collectionOwners(previous);
     std::set<Key> seen;
-    const QByteArray before = ModelCodec<NetworkHydraulic>::encode(*network);
+    const QByteArray before = ModelCodec<NetworkHydraulicDistribution>::encode(*network);
     for (const HydraulicEntityChange& change : changes) {
         const Key key = keyFromUuid(change.uuid);
         if (change.uuid.isNull() || change.uuid == networkUuid || !seen.insert(key).second)
@@ -3537,12 +3537,12 @@ RevisionId editHydraulicNetwork(Repository& repository, const ProjectId& project
     }
     // The save below checks every hydraulic reference and physical rule.
     // No-op edits still verify the pinned HEAD, without creating a revision.
-    if (ModelCodec<NetworkHydraulic>::encode(*network) == before) {
+    if (ModelCodec<NetworkHydraulicDistribution>::encode(*network) == before) {
         if (repository.head(project, branch) != expectedHead)
             throw StorageError(StorageErrorKind::Conflict, "branch head changed during hydraulic edit");
         return expectedHead;
     }
-    return saveHydraulicNetwork(repository, project, branch, *network, expectedHead, metadata);
+    return saveHydraulicDistributionNetwork(repository, project, branch, *network, expectedHead, metadata);
 }
 
 } // namespace aowis::dvmdb::hydraulic

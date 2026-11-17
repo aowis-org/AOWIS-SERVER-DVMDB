@@ -1,12 +1,31 @@
-# Hydraulic network persistence
+# Hydraulic distribution network persistence
 
-`aowis::dvmdb::hydraulic` (`include/aowis/dvmdb/hydraulic_network_persistence.h`,
+`aowis::dvmdb::hydraulic` (`include/aowis/dvmdb/hydraulic_distribution_network_persistence.h`,
 CMake target `AOWIS::DvmdbHydraulic`) stores canonical AOWIS
-`NetworkHydraulic` models in the native store, reads them back at an immutable
+`NetworkHydraulicDistribution` models in the native store, reads them back at an immutable
 revision, edits them with indexed updates and merges them with hydraulic
 validation. It needs Qt Core and the MODEL submodule. Merging is described in
 [hydraulic merging](native-hydraulic-merging.md); drafts in
 [working copies](working-copies.md).
+
+## MODEL dependency and existing data
+
+DVMDB requires a MODEL submodule that defines `NetworkHydraulicDistribution`,
+`NetworkHydraulicDistributionRoot`, and the corresponding distribution-root
+edit helpers. Update the pinned submodule in this repository to the committed
+MODEL rename; old submodule checkouts fail configuration.
+
+The native distribution-root record kind remains **100**, the membership chunk
+kind remains **101**, and existing `/networks` HTTP URL paths and record formats
+are unchanged by this source rename. However, archived MODEL root-edit events
+using the old `NetworkHydraulicRoot` entity type are not transparently
+converted to `NetworkHydraulicDistributionRoot`. Pre-release repositories
+containing these events must be recreated or handled by an explicit conversion
+before relying on history replay; no migration is bundled with this patch.
+
+`NetworkHydraulicDrainage` is a name reserved for a future independent model;
+this adapter implements distribution only and does not introduce a shared
+hydraulic network supertype.
 
 ## How a network is stored
 
@@ -33,9 +52,9 @@ changes its kind.
 
 | Operation | C++ | HTTP (`/dvmdb/v1/projects/{id}/branches/{branch}`) |
 |---|---|---|
-| Save a whole network | `saveHydraulicNetwork(repository, project, branch, network, expectedHead, metadata)` | `POST …/networks` |
-| Edit up to 128 entities | `editHydraulicNetwork(repository, project, branch, networkId, changes, expectedHead, metadata)` | `POST …/networks/{networkId}/edits` |
-| Load a network | `loadHydraulicNetworkAtRevision(repository, project, revision, networkId)` | `GET …/networks/{networkId}?revision=` |
+| Save a whole network | `saveHydraulicDistributionNetwork(repository, project, branch, network, expectedHead, metadata)` | `POST …/networks` |
+| Edit up to 128 entities | `editHydraulicDistributionNetwork(repository, project, branch, networkId, changes, expectedHead, metadata)` | `POST …/networks/{networkId}/edits` |
+| Load a network | `loadHydraulicDistributionNetworkAtRevision(repository, project, revision, networkId)` | `GET …/networks/{networkId}?revision=` |
 | List one collection | `listHydraulicEntityIdsAtRevisionLimited(…, type, limit)` | `GET …/networks/{networkId}/entities?type=&revision=` (≤ 10,000) |
 | Load one entity | `loadHydraulicEntityAtRevision(…, networkId, entityId)` | `GET …/networks/{networkId}/entities/{entityId}?revision=` |
 | Merge branches | `mergeHydraulicBranches(repository, project, target, source, selections, metadata)` | `POST /dvmdb/v1/projects/{id}/hydraulic-merges` |
@@ -58,7 +77,7 @@ Saves and edits take an exact expected HEAD and publish one new revision with
 compare-and-swap; a stale HEAD is a conflict and nothing is written. An
 identical edit batch creates no revision and returns the current one.
 
-`editHydraulicNetwork` uses bounded indexed paths for scalar, physical and
+`editHydraulicDistributionNetwork` uses bounded indexed paths for scalar, physical and
 operating values, catalogue records, eligible pipe endpoint rewiring,
 dependent-reference changes and membership insertions and removals. Each path
 pins one revision and checks ownership, MODEL value rules and references.
@@ -118,7 +137,7 @@ GUI activation and unborn-base navigation remain outstanding. See
 
 ## Tests
 
-`aowis-dvmdb-hydraulic-network-tests` covers all 18 collections, the 256-member
+`aowis-dvmdb-hydraulic-distribution-network-tests` covers all 18 collections, the 256-member
 chunk boundaries, indexed and fallback edits, stale pins, physical and
 reference validation, merge choices and ancestry, fast-forward validation,
 concurrent immutable snapshots, compaction, reopening and archived-action

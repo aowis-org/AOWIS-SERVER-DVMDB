@@ -497,6 +497,25 @@ if(AOWIS_DVMDB_WITH_MODEL_CODEC)
         if(NOT EXISTS "${AOWIS_DVMDB_MODEL_SOURCE_DIR}/CMakeLists.txt")
             message(FATAL_ERROR "Missing Model submodule. Run ./git_submodule_init.sh")
         endif()
+        # This repository uses the distribution-specific MODEL contract.
+        # An older submodule can appear initialized yet still export the
+        # removed NetworkHydraulic / hydraulicRootEditType APIs. Fail at
+        # configure time with an actionable message instead of many C++ errors.
+        if(NOT EXISTS "${AOWIS_DVMDB_MODEL_SOURCE_DIR}/include/aowis/model/hydraulic/network_hydraulic_distribution.h"
+           OR NOT EXISTS "${AOWIS_DVMDB_MODEL_SOURCE_DIR}/include/aowis/model/edit/hydraulic_distribution_root_edit.h")
+            message(FATAL_ERROR
+                "DVMDB requires the renamed AOWIS-SERVER-MODEL (NetworkHydraulicDistribution). "
+                "Update external/AOWIS-SERVER-MODEL to its current committed version before building.")
+        endif()
+        file(STRINGS
+            "${AOWIS_DVMDB_MODEL_SOURCE_DIR}/include/aowis/model/edit/hydraulic_distribution_root_edit.h"
+            AOWIS_DVMDB_DISTRIBUTION_ROOT_TYPE
+            REGEX "NetworkHydraulicDistributionRoot")
+        if(NOT AOWIS_DVMDB_DISTRIBUTION_ROOT_TYPE)
+            message(FATAL_ERROR
+                "The MODEL submodule has an outdated distribution-root edit type. "
+                "Update it to the corrected NetworkHydraulicDistributionRoot version.")
+        endif()
         if(NOT TARGET AOWIS::Model)
             add_subdirectory("${AOWIS_DVMDB_MODEL_SOURCE_DIR}"
                 "${CMAKE_CURRENT_BINARY_DIR}/aowis-server-model")
@@ -508,7 +527,7 @@ if(AOWIS_DVMDB_WITH_MODEL_CODEC)
         # compiled exactly once in AOWIS::Model, regardless of host target.
         add_library(aowis-dvmdb-hydraulic STATIC
             src/model_codec_adapter.cpp
-            src/hydraulic_network_persistence.cpp)
+            src/hydraulic_distribution_network_persistence.cpp)
         add_library(AOWIS::DvmdbHydraulic ALIAS aowis-dvmdb-hydraulic)
         target_compile_features(aowis-dvmdb-hydraulic PUBLIC cxx_std_20)
         target_include_directories(aowis-dvmdb-hydraulic PUBLIC
@@ -543,11 +562,11 @@ if(AOWIS_DVMDB_WITH_MODEL_CODEC)
             target_link_libraries(aowis-dvmdb-model-codec-tests PRIVATE aowis-dvmdb-hydraulic)
             add_test(NAME aowis-dvmdb-model-codec-tests COMMAND aowis-dvmdb-model-codec-tests)
             set_tests_properties(aowis-dvmdb-model-codec-tests PROPERTIES LABELS "aowis")
-            add_executable(aowis-dvmdb-hydraulic-network-tests
-                tests/hydraulic_network_persistence_tests.cpp)
-            target_link_libraries(aowis-dvmdb-hydraulic-network-tests PRIVATE aowis-dvmdb-hydraulic)
-            add_test(NAME aowis-dvmdb-hydraulic-network-tests COMMAND aowis-dvmdb-hydraulic-network-tests)
-            set_tests_properties(aowis-dvmdb-hydraulic-network-tests PROPERTIES LABELS "aowis")
+            add_executable(aowis-dvmdb-hydraulic-distribution-network-tests
+                tests/hydraulic_distribution_network_persistence_tests.cpp)
+            target_link_libraries(aowis-dvmdb-hydraulic-distribution-network-tests PRIVATE aowis-dvmdb-hydraulic)
+            add_test(NAME aowis-dvmdb-hydraulic-distribution-network-tests COMMAND aowis-dvmdb-hydraulic-distribution-network-tests)
+            set_tests_properties(aowis-dvmdb-hydraulic-distribution-network-tests PROPERTIES LABELS "aowis")
             add_executable(aowis-dvmdb-model-value-rules-tests tests/model_value_rules_tests.cpp)
             target_link_libraries(aowis-dvmdb-model-value-rules-tests PRIVATE aowis-dvmdb-hydraulic)
             get_target_property(AOWIS_DVMDB_MODEL_ENUM_DIR AOWIS::Model AOWIS_MODEL_ENUM_DIR)
@@ -557,7 +576,7 @@ if(AOWIS_DVMDB_WITH_MODEL_CODEC)
             target_include_directories(aowis-dvmdb-model-value-rules-tests PRIVATE "${AOWIS_DVMDB_MODEL_ENUM_DIR}")
             add_test(NAME aowis-dvmdb-model-value-rules-tests COMMAND aowis-dvmdb-model-value-rules-tests)
             set_tests_properties(aowis-dvmdb-model-value-rules-tests PROPERTIES LABELS "aowis")
-            add_dependencies(aowis-dvmdb-tests aowis-dvmdb-model-codec-tests aowis-dvmdb-hydraulic-network-tests
+            add_dependencies(aowis-dvmdb-tests aowis-dvmdb-model-codec-tests aowis-dvmdb-hydraulic-distribution-network-tests
                 aowis-dvmdb-model-value-rules-tests)
         endif()
         message(STATUS "Native model serializer and hydraulic persistence enabled")

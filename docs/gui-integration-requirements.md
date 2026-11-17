@@ -60,7 +60,7 @@ archived MODEL actions** alongside the active draft journal. Fenced HTTP
 including crossing Commit markers without rewriting immutable revisions.
 
 A successful navigation returns a verified **sparse `historyDelta`** for the
-selected hydraulic network (canonical source/destination SHA-256, changed
+selected hydraulic distribution network (canonical source/destination SHA-256, changed
 entity images and membership-order changes). The GUI verifies source digest,
 before-images, and destination digest before changing the editor. It does
 **not** download the complete network for routine Undo/Redo.

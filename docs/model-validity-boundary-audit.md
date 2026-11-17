@@ -29,14 +29,14 @@ agreed and is not required to Commit a network that lacks hydraulic supply.
 
 | Implementation | Behavior |
 |---|---|
-| MODEL `validateHydraulicNetworkWithDependencies` | Validates entity values, types and existing references; this is not an EPANET solver invocation |
+| MODEL `validateHydraulicDistributionNetworkWithDependencies` | Validates entity values, types and existing references; this is not an EPANET solver invocation |
 | GUI `HydraulicDraftEventAdapter` | Stages canonical events only if before/after and dependencies remain structurally consistent |
 | DVMDB `native_store.cpp` | Validates reference targets and rejects deletion of referenced objects |
-| DVMDB `hydraulic_network_persistence.cpp` | Serializes/loads root, membership chunks and indexed records with MODEL validation |
+| DVMDB `hydraulic_distribution_network_persistence.cpp` | Serializes/loads root, membership chunks and indexed records with MODEL validation |
 | DVMDB `ProjectService::commitWorkingCopy` | Commits a saved, dirty candidate with lease/generation/local HEAD checks and a durable ledger; no solver-success gate |
 | Hydraulic-specific merge path | Has additional domain checks; separate hydraulic feasibility from structural/reference failures when completing Merge qualification |
 
-The native `aowis-dvmdb-hydraulic-network-tests` includes an unsupplied
+The native `aowis-dvmdb-hydraulic-distribution-network-tests` includes an unsupplied
 junction-only regression. The GUI transaction test includes an unsupplied
 network with an isolated junction, edited and replayed through local queue
 restart. Source coverage does not automatically prove external HTTP or

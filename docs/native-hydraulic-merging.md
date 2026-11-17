@@ -7,7 +7,7 @@ hydraulic model **before any bytes are appended or the target branch ref moves**
 The operation returns `MergeStatus::Conflicts` with diagnostics on rejected
 merges. It never changes the source branch. **This describes the present
 strict API, not the agreed long-term rule:** for version-control merges,
-otherwise representable broken hydraulic networks must be allowed, with
+otherwise representable broken hydraulic distribution networks must be allowed, with
 non-blocking diagnostics. See [remaining Merge work](roadmap.md).
 
 For independently modified fields of the **same** canonical hydraulic entity,
@@ -75,7 +75,7 @@ finds the **selected side's historical network/collection ownership** and
 restores *only that chosen entity* to a bounded membership chunk. Other objects
 removed on either branch are not resurrected. This also works with multiple
 chosen entities in the same merge. Ambiguous historical ownership, invalid
-references or an invalid hydraulic network cause a conflict **before pack
+references or an invalid hydraulic distribution network cause a conflict **before pack
 writes**; a stale branch head cannot accept an old selection.
 
 Concurrent independent appends/deletions within the same membership chunk are
@@ -110,7 +110,7 @@ selections are whole-record decisions; they do not merge different fields.
 
 Before publishing a divergent merge, the callback traverses the proposed
 copy-on-write model snapshot without invoking repository APIs, reconstructs
-every hydraulic network from its chunks, checks identities and canonical model
+every hydraulic distribution network from its chunks, checks identities and canonical model
 bytes, detects cross-network ownership collisions and orphaned records, revalidates network rules
 (including pipe-assigned demand endpoints), and compares stored reference edges
 against canonically extracted model dependencies. Any failure blocks publication.

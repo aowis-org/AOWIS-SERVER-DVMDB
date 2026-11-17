@@ -3,7 +3,7 @@
 // directions), the value rules (AOWIS-SERVER-MODEL/docs/model-value-rules.md) and every
 // hydraulic save and edit path, including the indexed fast paths.
 #include "commit_metadata_fixture.h"
-#include "aowis/dvmdb/hydraulic_network_persistence.h"
+#include "aowis/dvmdb/hydraulic_distribution_network_persistence.h"
 
 #include <aowis/dvmdb/model_codec.h>
 #include <aowis/dvmdb/model_validation.h>
@@ -146,7 +146,7 @@ void testCodecRejectsNonFiniteNumbers() {
         pattern.uuid = QUuid::createUuid();
         pattern.multipliers = {1.0, bad};
         expect(encoded(pattern).isEmpty(), "non-finite list element encoded");
-        NetworkHydraulic network;
+        NetworkHydraulicDistribution network;
         network.uuid = QUuid::createUuid();
         network.options_hydraulic.accuracy = bad;
         expect(encoded(network).isEmpty(), "non-finite network option encoded");
@@ -188,9 +188,9 @@ void testDraftDefaultsAreValid() {
            native::validateHydraulicEntityValues(HydraulicControlRule{}).valid() &&
            native::validateHydraulicEntityValues(HydraulicMapLabel{}).valid(),
            "a default-constructed entity violates the value rules");
-    NetworkHydraulic network;
+    NetworkHydraulicDistribution network;
     network.uuid = QUuid::createUuid();
-    expect(native::validateHydraulicValues(network).valid() && native::validateHydraulicNetwork(network).valid(),
+    expect(native::validateHydraulicDistributionValues(network).valid() && native::validateHydraulicDistributionNetwork(network).valid(),
            "default network violates the value rules");
 }
 
@@ -210,12 +210,12 @@ std::function<ModelValidationReport()> entity(const std::function<void(T&)>& cha
     };
 }
 
-std::function<ModelValidationReport()> network(const std::function<void(NetworkHydraulic&)>& change) {
+std::function<ModelValidationReport()> network(const std::function<void(NetworkHydraulicDistribution&)>& change) {
     return [change] {
-        NetworkHydraulic value;
+        NetworkHydraulicDistribution value;
         value.uuid = QUuid::createUuid();
         change(value);
-        return native::validateHydraulicValues(value);
+        return native::validateHydraulicDistributionValues(value);
     };
 }
 
@@ -356,79 +356,79 @@ void testRuleTable() {
         {"label longitude 200", entity<HydraulicMapLabel>([](HydraulicMapLabel& l) {
              l.coordinate_wgs84.longitude_deg = 200; }), ".coordinate_wgs84.longitude_deg"},
         // Network options
-        {"hydraulic timestep 0", network([](NetworkHydraulic& n) { n.timestep_hydraulic_s = 0; }), ".timestep_hydraulic_s"},
-        {"quality timestep 0", network([](NetworkHydraulic& n) { n.timestep_quality_s = 0; }), ".timestep_quality_s"},
-        {"pattern timestep 0", network([](NetworkHydraulic& n) { n.timestep_pattern_s = 0; }), ".timestep_pattern_s"},
-        {"report timestep 0", network([](NetworkHydraulic& n) { n.timestep_report_s = 0; }), ".timestep_report_s"},
-        {"rule timestep 0", network([](NetworkHydraulic& n) { n.timestep_rule_s = 0; }), ".timestep_rule_s"},
-        {"start time of day 86400", network([](NetworkHydraulic& n) { n.start_time_of_day_s = 86400; }), ".start_time_of_day_s"},
-        {"accuracy 0", network([](NetworkHydraulic& n) { n.options_hydraulic.accuracy = 0; }), ".options_hydraulic.accuracy"},
-        {"trials 0", network([](NetworkHydraulic& n) { n.options_hydraulic.maximum_trials = 0; }), ".options_hydraulic.maximum_trials"},
-        {"check frequency 0", network([](NetworkHydraulic& n) { n.options_hydraulic.check_frequency = 0; }),
+        {"hydraulic timestep 0", network([](NetworkHydraulicDistribution& n) { n.timestep_hydraulic_s = 0; }), ".timestep_hydraulic_s"},
+        {"quality timestep 0", network([](NetworkHydraulicDistribution& n) { n.timestep_quality_s = 0; }), ".timestep_quality_s"},
+        {"pattern timestep 0", network([](NetworkHydraulicDistribution& n) { n.timestep_pattern_s = 0; }), ".timestep_pattern_s"},
+        {"report timestep 0", network([](NetworkHydraulicDistribution& n) { n.timestep_report_s = 0; }), ".timestep_report_s"},
+        {"rule timestep 0", network([](NetworkHydraulicDistribution& n) { n.timestep_rule_s = 0; }), ".timestep_rule_s"},
+        {"start time of day 86400", network([](NetworkHydraulicDistribution& n) { n.start_time_of_day_s = 86400; }), ".start_time_of_day_s"},
+        {"accuracy 0", network([](NetworkHydraulicDistribution& n) { n.options_hydraulic.accuracy = 0; }), ".options_hydraulic.accuracy"},
+        {"trials 0", network([](NetworkHydraulicDistribution& n) { n.options_hydraulic.maximum_trials = 0; }), ".options_hydraulic.maximum_trials"},
+        {"check frequency 0", network([](NetworkHydraulicDistribution& n) { n.options_hydraulic.check_frequency = 0; }),
          ".options_hydraulic.check_frequency"},
-        {"required below minimum pressure", network([](NetworkHydraulic& n) {
+        {"required below minimum pressure", network([](NetworkHydraulicDistribution& n) {
              n.options_hydraulic.minimum_pressure_head_m = 10; n.options_hydraulic.required_pressure_head_m = 5; }),
          ".options_hydraulic.required_pressure_head_m"},
-        {"specific gravity 0", network([](NetworkHydraulic& n) { n.options_hydraulic.specific_gravity = 0; }),
+        {"specific gravity 0", network([](NetworkHydraulicDistribution& n) { n.options_hydraulic.specific_gravity = 0; }),
          ".options_hydraulic.specific_gravity"},
-        {"viscosity negative", network([](NetworkHydraulic& n) { n.options_hydraulic.relative_viscosity = -1; }),
+        {"viscosity negative", network([](NetworkHydraulicDistribution& n) { n.options_hydraulic.relative_viscosity = -1; }),
          ".options_hydraulic.relative_viscosity"},
-        {"demand multiplier negative", network([](NetworkHydraulic& n) { n.options_hydraulic.demand_multiplier = -1; }),
+        {"demand multiplier negative", network([](NetworkHydraulicDistribution& n) { n.options_hydraulic.demand_multiplier = -1; }),
          ".options_hydraulic.demand_multiplier"},
-        {"global efficiency 0", network([](NetworkHydraulic& n) { n.options_energy.global_pump_efficiency_percent = 0; }),
+        {"global efficiency 0", network([](NetworkHydraulicDistribution& n) { n.options_energy.global_pump_efficiency_percent = 0; }),
          ".options_energy.global_pump_efficiency_percent"},
-        {"currency lowercase", network([](NetworkHydraulic& n) { n.options_energy.currency_iso4217 = QStringLiteral("eur"); }),
+        {"currency lowercase", network([](NetworkHydraulicDistribution& n) { n.options_energy.currency_iso4217 = QStringLiteral("eur"); }),
          ".options_energy.currency_iso4217"},
-        {"currency EUR", network([](NetworkHydraulic& n) { n.options_energy.currency_iso4217 = QStringLiteral("EUR"); }), nullptr},
-        {"global wall order 0.5", network([](NetworkHydraulic& n) { n.options_reaction.global_pipe_wall_reaction.order = 0.5; }),
+        {"currency EUR", network([](NetworkHydraulicDistribution& n) { n.options_energy.currency_iso4217 = QStringLiteral("EUR"); }), nullptr},
+        {"global wall order 0.5", network([](NetworkHydraulicDistribution& n) { n.options_reaction.global_pipe_wall_reaction.order = 0.5; }),
          ".options_reaction.global_pipe_wall_reaction.order"},
-        {"limiting concentration negative", network([](NetworkHydraulic& n) {
+        {"limiting concentration negative", network([](NetworkHydraulicDistribution& n) {
              n.options_reaction.limiting_concentration_mg_per_l = -1; }), ".options_reaction.limiting_concentration_mg_per_l"},
-        {"report precision 16", network([](NetworkHydraulic& n) { n.options_report.fields_link.velocity.precision = 16; }),
+        {"report precision 16", network([](NetworkHydraulicDistribution& n) { n.options_report.fields_link.velocity.precision = 16; }),
          ".options_report.fields_link.velocity.precision"},
-        {"report page size negative", network([](NetworkHydraulic& n) { n.options_report.page_size = -1; }),
+        {"report page size negative", network([](NetworkHydraulicDistribution& n) { n.options_report.page_size = -1; }),
          ".options_report.page_size"},
-        {"report threshold NaN", network([](NetworkHydraulic& n) { n.options_report.fields_node.pressure.below_m = nan; }),
+        {"report threshold NaN", network([](NetworkHydraulicDistribution& n) { n.options_report.fields_node.pressure.below_m = nan; }),
          ".options_report.fields_node.pressure.below_m"},
-        {"msx timestep 0", network([](NetworkHydraulic& n) { n.multi_species.options.timestep_s = 0; }),
+        {"msx timestep 0", network([](NetworkHydraulicDistribution& n) { n.multi_species.options.timestep_s = 0; }),
          ".multi_species.options.timestep_s"},
-        {"msx segments 0", network([](NetworkHydraulic& n) { n.multi_species.options.maximum_segments = 0; }),
+        {"msx segments 0", network([](NetworkHydraulicDistribution& n) { n.multi_species.options.maximum_segments = 0; }),
          ".multi_species.options.maximum_segments"},
-        {"msx species tolerance negative", network([](NetworkHydraulic& n) {
+        {"msx species tolerance negative", network([](NetworkHydraulicDistribution& n) {
              n.multi_species.species.append(MultiSpeciesSpecies{}); n.multi_species.species[0].absolute_tolerance = -1; }),
          ".multi_species.species[0].absolute_tolerance"},
-        {"msx source negative", network([](NetworkHydraulic& n) {
+        {"msx source negative", network([](NetworkHydraulicDistribution& n) {
              n.multi_species.sources.append(MultiSpeciesNodeSource{}); n.multi_species.sources[0].value = -1; }),
          ".multi_species.sources[0].value"},
-        {"msx initial quality negative", network([](NetworkHydraulic& n) {
+        {"msx initial quality negative", network([](NetworkHydraulicDistribution& n) {
              n.multi_species.initial_quality_pipes.append(MultiSpeciesPipeInitialQuality{});
              n.multi_species.initial_quality_pipes[0].value = -1; }), ".multi_species.initial_quality_pipes[0].value"},
-        {"msx pattern NaN", network([](NetworkHydraulic& n) {
+        {"msx pattern NaN", network([](NetworkHydraulicDistribution& n) {
              n.multi_species.patterns.append(MultiSpeciesPattern{}); n.multi_species.patterns[0].multipliers = {nan}; }),
          ".multi_species.patterns[0].multipliers[0]"},
-        {"backdrop offset 400", network([](NetworkHydraulic& n) { n.map_backdrop.offset_longitude_deg = 400; }),
+        {"backdrop offset 400", network([](NetworkHydraulicDistribution& n) { n.map_backdrop.offset_longitude_deg = 400; }),
          ".map_backdrop.offset_longitude_deg"},
-        {"project units unknown unit", network([](NetworkHydraulic& n) {
+        {"project units unknown unit", network([](NetworkHydraulicDistribution& n) {
              NetworkPresentationUnits units; units.name = QStringLiteral("Bad");
              units.units.append(NetworkPresentationUnit{QStringLiteral("volumetric_flow_rate"), QStringLiteral("parsec/s")});
              n.presentation_units = units; }), ".presentation_units.units[0].unit"},
-        {"project units unknown quantity", network([](NetworkHydraulic& n) {
+        {"project units unknown quantity", network([](NetworkHydraulicDistribution& n) {
              NetworkPresentationUnits units; units.name = QStringLiteral("Bad");
              units.units.append(NetworkPresentationUnit{QStringLiteral("no_such_quantity"), QStringLiteral("m")});
              n.presentation_units = units; }), ".presentation_units.units[0].quantity"},
-        {"project units unsorted", network([](NetworkHydraulic& n) {
+        {"project units unsorted", network([](NetworkHydraulicDistribution& n) {
              NetworkPresentationUnits units; units.name = QStringLiteral("Bad");
              units.units.append(NetworkPresentationUnit{QStringLiteral("volumetric_flow_rate"), QStringLiteral("L/s")});
              units.units.append(NetworkPresentationUnit{QStringLiteral("pressure_head"), QStringLiteral("bar")});
              n.presentation_units = units; }), ".presentation_units.units[1].quantity"},
-        {"project units valid", network([](NetworkHydraulic& n) {
+        {"project units valid", network([](NetworkHydraulicDistribution& n) {
              NetworkPresentationUnits units; units.name = QStringLiteral("LPS");
              units.units.append(NetworkPresentationUnit{QStringLiteral("pressure_head"), QStringLiteral("bar")});
              units.units.append(NetworkPresentationUnit{QStringLiteral("volumetric_flow_rate"), QStringLiteral("L/s")});
              n.presentation_units = units; }), nullptr},
-        {"project units unnamed", network([](NetworkHydraulic& n) {
+        {"project units unnamed", network([](NetworkHydraulicDistribution& n) {
              n.presentation_units = NetworkPresentationUnits{}; }), ".presentation_units.name"},
-        {"entity inside network", network([](NetworkHydraulic& n) {
+        {"entity inside network", network([](NetworkHydraulicDistribution& n) {
              n.links_pipes.append(HydraulicLinkPipe{}); n.links_pipes[0].diameter_mm = -1; }), ".diameter_mm"},
     };
     for (const Case& test : cases) {
@@ -477,7 +477,7 @@ void testPersistencePaths() {
         native::Repository repository(directory / "repo");
         const native::ProjectId project = native::ProjectId::generate();
         const native::RevisionId unbornHead = repository.createRootBranch(project, "main", commitMetadata());
-        NetworkHydraulic network;
+        NetworkHydraulicDistribution network;
         network.uuid = QUuid::createUuid();
         HydraulicNodeReservoir reservoir; reservoir.uuid = QUuid::createUuid(); reservoir.hydraulic_head_m = 120;
         HydraulicNodeJunction first; first.uuid = QUuid::createUuid(); first.elevation_m = 50;
@@ -504,15 +504,15 @@ void testPersistencePaths() {
         network.links_valves = {valve};
         network.demand_points = {point};
 
-        NetworkHydraulic broken = network;
+        NetworkHydraulicDistribution broken = network;
         broken.links_pipes[0].diameter_mm = -5;
         expectInvalidInput("save with negative diameter",
-                           [&] { (void)hydraulic::saveHydraulicNetwork(repository, project, "main", broken, unbornHead, commitMetadata()); });
+                           [&] { (void)hydraulic::saveHydraulicDistributionNetwork(repository, project, "main", broken, unbornHead, commitMetadata()); });
         broken = network;
         broken.options_hydraulic.accuracy = 0;
         expectInvalidInput("save with zero accuracy",
-                           [&] { (void)hydraulic::saveHydraulicNetwork(repository, project, "main", broken, unbornHead, commitMetadata()); });
-        const native::RevisionId saved = hydraulic::saveHydraulicNetwork(
+                           [&] { (void)hydraulic::saveHydraulicDistributionNetwork(repository, project, "main", broken, unbornHead, commitMetadata()); });
+        const native::RevisionId saved = hydraulic::saveHydraulicDistributionNetwork(
             repository, project, "main", network, unbornHead, commitMetadata());
 
         const std::function<void(const std::string&, hydraulic::HydraulicEntity)> rejected =
@@ -520,7 +520,7 @@ void testPersistencePaths() {
                 const QUuid id = std::visit([](const auto& value) { return value.uuid; }, entity);
                 hydraulic::HydraulicEditDiagnostics diagnostics;
                 expectInvalidInput(label, [&] {
-                    (void)hydraulic::editHydraulicNetwork(repository, project, "main", network.uuid,
+                    (void)hydraulic::editHydraulicDistributionNetwork(repository, project, "main", network.uuid,
                         {{id, std::move(entity)}}, saved, commitMetadata(), &diagnostics);
                 });
                 expect(repository.head(project, "main") == saved,
@@ -553,7 +553,7 @@ void testPersistencePaths() {
         // Valid edits still take their fast paths.
         HydraulicLinkValve goodValve = valve; goodValve.diameter_mm = 200;
         hydraulic::HydraulicEditDiagnostics diagnostics;
-        const native::RevisionId edited = hydraulic::editHydraulicNetwork(
+        const native::RevisionId edited = hydraulic::editHydraulicDistributionNetwork(
             repository, project, "main", network.uuid,
             {{goodValve.uuid, hydraulic::HydraulicEntity{goodValve}}}, saved, commitMetadata(), &diagnostics);
         expect(edited != saved && diagnostics.indexedPhysicalFastPath &&

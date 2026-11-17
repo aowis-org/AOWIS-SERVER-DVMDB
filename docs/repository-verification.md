@@ -45,7 +45,7 @@ cannot move during a check.
 ## What it does not do
 
 * **No hydraulic validation.** It checks generic records, references, tries
-  and history, not whether a `NetworkHydraulic` obeys the domain rules. The
+  and history, not whether a `NetworkHydraulicDistribution` obeys the domain rules. The
   output says so.
 * **No repair.** Branch heads, revisions and indexes are never changed. If a
   check fails, keep an untouched copy of the repository and investigate; do

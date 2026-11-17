@@ -206,7 +206,7 @@ struct RevisionNativeActionWitness {
     // just changed roots. A scalar entity edit need not change the manifest.
     // This bounded set lets the Qt validator prove ownership of every native
     // delta key without trusting a caller-provided network list.
-    std::vector<Key> hydraulicRootKeys;
+    std::vector<Key> hydraulicDistributionRootKeys;
 };
 
 struct BranchActionHistoryPage {

@@ -26,7 +26,7 @@ def create_report(root, pipes, benchmark_sha="a" * 64, verifier_sha="b" * 64):
     runs = []
     for iteration in (1, 2, 3):
         metrics = {
-            "engine": "pack", "fixture": "canonical-hydraulic-network", "pipes": pipes,
+            "engine": "pack", "fixture": "canonical-hydraulic-distribution-network", "pipes": pipes,
             "scalar_edits": 20, "topology_edits": 3, "import_ms": float(pipes) / 10 + iteration,
             "indexed_scalar_mean_ms": 1.0, "indexed_topology_mean_ms": 2.0,
             "targeted_read_samples": 32, "targeted_read_mean_ms": 0.5,

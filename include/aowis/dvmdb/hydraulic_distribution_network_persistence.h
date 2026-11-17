@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <functional>
 
-// Optional Qt/hydraulic persistence adapter for a complete NetworkHydraulic aggregate. The
+// Optional Qt/hydraulic persistence adapter for a complete NetworkHydraulicDistribution aggregate. The
 // authoritative entity bytes are encoded by the native-owned canonical ModelCodec;
 // ordered network membership is stored as bounded, individually versioned chunks.
 #include "aowis/dvmdb/model_codec_adapter.h"
@@ -19,7 +19,7 @@
 
 namespace aowis::dvmdb::hydraulic {
 
-inline constexpr std::uint16_t hydraulicNetworkKind = 100;
+inline constexpr std::uint16_t hydraulicDistributionNetworkKind = 100;
 
 // VC-04 draft transaction membership operation. The GUI transmits logical
 // collection identity; only this DVMDB adapter knows chunk and manifest bytes.
@@ -33,19 +33,19 @@ struct DraftMembershipIntent final {
 };
 
 // Construct the server-owned empty membership manifest for a newly created
-// hydraulic network. This is an ordinary draft ModelChange, not a revision.
+// hydraulic distribution network. This is an ordinary draft ModelChange, not a revision.
 // No external caller should manufacture kind-100 manifest bytes itself.
-ModelChange emptyDraftHydraulicNetworkRoot(const QUuid& networkId, const QString& name);
+ModelChange emptyDraftHydraulicDistributionNetworkRoot(const QUuid& networkId, const QString& name);
 
-// Construct a complete validated hydraulic network as native draft records.
+// Construct a complete validated hydraulic distribution network as native draft records.
 // This does not commit anything and is only used under a fenced, empty-draft
 // HTTP import transaction. Manifest/chunk bytes remain server-owned.
-std::vector<ModelChange> fullDraftHydraulicNetworkChanges(const NetworkHydraulic& network);
+std::vector<ModelChange> fullDraftHydraulicDistributionNetworkChanges(const NetworkHydraulicDistribution& network);
 
 // Read one consistent working-copy view (immutable committed base overlaid by
 // the draft's complete candidate record map). Never reads a mutable HEAD.
 // Validates native chunks, canonical entity payloads and typed dependencies.
-std::optional<NetworkHydraulic> loadDraftHydraulicNetwork(
+std::optional<NetworkHydraulicDistribution> loadDraftHydraulicDistributionNetwork(
     const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
     const QUuid& networkId);
 
@@ -75,9 +75,9 @@ void materializeDraftMembership(
 // entire Commit archive. A mixed action has one global position even when it
 // touches multiple networks. This evidence is emitted only after complete
 // native revision/action coverage has been verified.
-struct VerifiedHydraulicNetworkActionTrack final {
-    NetworkHydraulic parent;
-    NetworkHydraulic committed;
+struct VerifiedHydraulicDistributionNetworkActionTrack final {
+    NetworkHydraulicDistribution parent;
+    NetworkHydraulicDistribution committed;
     std::vector<Bytes> frames;
     std::vector<std::size_t> globalPositions;
 };
@@ -94,7 +94,7 @@ struct VerifiedHydraulicRevisionCoverage final {
     std::string commitOperationId;
     std::size_t actionCount = 0;
     std::vector<QUuid> changedNetworkIds;
-    std::vector<VerifiedHydraulicNetworkActionTrack> tracks;
+    std::vector<VerifiedHydraulicDistributionNetworkActionTrack> tracks;
 };
 std::optional<VerifiedHydraulicRevisionCoverage> verifyHydraulicRevisionActionCoverage(
     ProjectService& service, std::string_view projectId, std::string_view branch,
@@ -139,7 +139,7 @@ std::optional<WorkingCopyInfo> navigateVerifiedHydraulicAction(
 // HDB-03b: verify an active draft's entire retained MODEL journal against
 // its persisted canonical network, then compute a COMPLETE, HEAD-relative
 // candidate for an action position. This first slice supports one existing
-// hydraulic network per base snapshot; additional/ambiguous roots, unjournaled
+// hydraulic distribution network per base snapshot; additional/ambiguous roots, unjournaled
 // native candidate changes and active checkpoint selection fail closed.
 // Read-only: the native cursor/overlay cannot change while planning.
 struct VerifiedHydraulicDraftActionNavigationPlan final {
@@ -174,11 +174,11 @@ std::optional<WorkingCopyInfo> navigateVerifiedHydraulicDraftAction(
 // MODEL envelope does not record it. This preview must not be used as an
 // executable DVMDB navigation plan until archive coverage against immutable
 // revision snapshots and atomic cursor publication are implemented.
-std::optional<NetworkHydraulic> previewReverseHydraulicActions(
-    const NetworkHydraulic& committed, const std::vector<Bytes>& newestFirstFrames,
+std::optional<NetworkHydraulicDistribution> previewReverseHydraulicActions(
+    const NetworkHydraulicDistribution& committed, const std::vector<Bytes>& newestFirstFrames,
     QString* error = nullptr);
 
-// HIST-03c2b: verify a *complete* forward archive for one hydraulic network
+// HIST-03c2b: verify a *complete* forward archive for one hydraulic distribution network
 // against immutable before/after snapshots. Archived events are oldest-first,
 // and `boundary` counts accepted logical actions (0 = parent, size = child).
 // Structural edits obey the native draft membership contract: additions append
@@ -188,12 +188,12 @@ std::optional<NetworkHydraulic> previewReverseHydraulicActions(
 // Saves or an incompatible ordering scheme fail closed. This verifies one
 // network's content, not every record in a multi-network revision, and does
 // not publish the resulting state or a history cursor.
-std::optional<NetworkHydraulic> previewVerifiedHydraulicActionBoundary(
-    const NetworkHydraulic& parent, const NetworkHydraulic& committed,
+std::optional<NetworkHydraulicDistribution> previewVerifiedHydraulicActionBoundary(
+    const NetworkHydraulicDistribution& parent, const NetworkHydraulicDistribution& committed,
     const std::vector<Bytes>& oldestFirstFrames, std::size_t boundary,
     QString* error = nullptr);
 
-// Exactly the 18 top-level types persisted by saveHydraulicNetwork().
+// Exactly the 18 top-level types persisted by saveHydraulicDistributionNetwork().
 // The alternative order follows the manifest's collection order.
 using HydraulicEntity = std::variant<
     HydraulicPipeMaterial, HydraulicPatternTime, HydraulicCurveTankVolume,
@@ -204,7 +204,7 @@ using HydraulicEntity = std::variant<
     HydraulicControlRule, HydraulicMapLabel>;
 
 // Ordinal matches the corresponding alternative in HydraulicEntity, and the
-// canonical NetworkHydraulic collection order. This is an API enum, not a
+// canonical NetworkHydraulicDistribution collection order. This is an API enum, not a
 // serialized/on-disk kind identifier.
 enum class HydraulicEntityType : std::size_t {
     PipeMaterial = 0,
@@ -284,17 +284,17 @@ MergeResult mergeHydraulicBranches(Repository& repository, const ProjectId& proj
 // structural membership edits use revision-pinned indexed validation. Other
 // edits fall back to complete canonical network validation and replacement.
 // Every revision records the caller's `metadata` (author and message).
-RevisionId saveHydraulicNetwork(Repository& repository, const ProjectId& project,
-                                  std::string_view branch, const NetworkHydraulic& network,
+RevisionId saveHydraulicDistributionNetwork(Repository& repository, const ProjectId& project,
+                                  std::string_view branch, const NetworkHydraulicDistribution& network,
                                   const RevisionId& expectedHead,
                                   const CommitMetadata& metadata);
-RevisionId editHydraulicNetwork(Repository& repository, const ProjectId& project,
+RevisionId editHydraulicDistributionNetwork(Repository& repository, const ProjectId& project,
                                   std::string_view branch, const QUuid& networkUuid,
                                   const std::vector<HydraulicEntityChange>& changes,
                                   const RevisionId& expectedHead,
                                   const CommitMetadata& metadata,
                                   HydraulicEditDiagnostics* diagnostics = nullptr);
-std::optional<NetworkHydraulic> loadHydraulicNetworkAtRevision(
+std::optional<NetworkHydraulicDistribution> loadHydraulicDistributionNetworkAtRevision(
     Repository& repository, const ProjectId& project, const RevisionId& revisionId,
     const QUuid& networkUuid);
 std::optional<QList<QUuid>> listHydraulicEntityIdsAtRevisionLimited(

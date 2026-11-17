@@ -1,4 +1,4 @@
-#include <aowis/dvmdb/hydraulic_network_persistence.h>
+#include <aowis/dvmdb/hydraulic_distribution_network_persistence.h>
 #include <aowis/dvmdb/revision_record.h>
 
 #include <QCoreApplication>
@@ -71,7 +71,7 @@ int main(int argc, char** argv) {
         if (argc != 3 && argc != 4 && argc != 5)
             throw std::runtime_error("unexpected benchmark arguments");
 
-        NetworkHydraulic network;
+        NetworkHydraulicDistribution network;
         network.uuid = uuid(1);
         network.id = QStringLiteral("benchmark");
         network.nodes_junctions.reserve(pipeCount + 1);
@@ -115,7 +115,7 @@ int main(int argc, char** argv) {
         const native::ProjectId project = native::ProjectId::generate();
         const native::RevisionId genesis = repository.createRootBranch(project, "main", benchmarkMetadata());
         const std::chrono::steady_clock::time_point importStart = std::chrono::steady_clock::now();
-        native::RevisionId mainHead = hydraulic::saveHydraulicNetwork(
+        native::RevisionId mainHead = hydraulic::saveHydraulicDistributionNetwork(
             repository, project, "main", network, genesis, benchmarkMetadata());
         const double importMs = elapsedMs(importStart);
         // Keep the precise expected HEAD after each indexed write, rather
@@ -125,7 +125,7 @@ int main(int argc, char** argv) {
             hydraulic::HydraulicEditDiagnostics*)> editMain =
             [&](const std::vector<hydraulic::HydraulicEntityChange>& changes,
                 hydraulic::HydraulicEditDiagnostics* diagnostics) -> native::RevisionId {
-                mainHead = hydraulic::editHydraulicNetwork(
+                mainHead = hydraulic::editHydraulicDistributionNetwork(
                     repository, project, "main", network.uuid, changes, mainHead, benchmarkMetadata(), diagnostics);
                 return mainHead;
             };
@@ -354,8 +354,8 @@ int main(int argc, char** argv) {
         const double targetedMs = elapsedMs(targetedStart);
         const std::chrono::steady_clock::time_point fullReadStart =
             std::chrono::steady_clock::now();
-        const std::optional<NetworkHydraulic> reconstructed =
-            hydraulic::loadHydraulicNetworkAtRevision(repository, project, mainHead, network.uuid);
+        const std::optional<NetworkHydraulicDistribution> reconstructed =
+            hydraulic::loadHydraulicDistributionNetworkAtRevision(repository, project, mainHead, network.uuid);
         const double fullReadMs = elapsedMs(fullReadStart);
         if (!reconstructed || reconstructed->links_pipes.size() != pipeCount ||
             reconstructed->nodes_junctions.size() != pipeCount + 1)
@@ -375,7 +375,7 @@ int main(int argc, char** argv) {
         featurePipe.length_calculated_m += 10.0;
         editMain(
             {{targetPipe.uuid, hydraulic::HydraulicEntity{targetPipe}}}, nullptr);
-        featureHead = hydraulic::editHydraulicNetwork(repository, project, "feature", network.uuid,
+        featureHead = hydraulic::editHydraulicDistributionNetwork(repository, project, "feature", network.uuid,
             {{featurePipe.uuid, hydraulic::HydraulicEntity{featurePipe}}}, featureHead, benchmarkMetadata());
         const std::chrono::steady_clock::time_point diffStart =
             std::chrono::steady_clock::now();
@@ -428,12 +428,12 @@ int main(int argc, char** argv) {
         repository.verifyPack();
         const std::optional<native::ModelRecord> networkRoot = repository.getModelAtRevision(
             project, mainHead, hydraulic::keyFromUuid(network.uuid));
-        if (!networkRoot || networkRoot->kind != hydraulic::hydraulicNetworkKind)
+        if (!networkRoot || networkRoot->kind != hydraulic::hydraulicDistributionNetworkKind)
             throw std::runtime_error("missing indexed network root");
         const std::uint64_t peakRssKiB = peakResidentKiB();
         std::cout << std::fixed << std::setprecision(3)
                   << "engine=" << ("pack") << '\n'
-                  << "fixture=canonical-hydraulic-network\n"
+                  << "fixture=canonical-hydraulic-distribution-network\n"
                   << "pipes=" << pipeCount << '\n'
                   << "scalar_edits=" << scalarEdits << '\n'
                   << "topology_edits=" << topologyEdits << '\n'

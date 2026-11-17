@@ -104,7 +104,7 @@ internal native scratch have separate budgets; see [operations](operations.md).
   pack fails closed. A lost/damaged *derived* sidecar is rebuildable.
 - **Semantic safety:** model reference integrity, hydraulic domain validation
   and recursive criss-cross merge bases are separate responsibilities. Native
-  generic merge correctness does not replace hydraulic-network validation.
+  generic merge correctness does not replace hydraulic-distribution-network validation.
 - **Deletion power-cut qualification (November 5, 2026):** the developer's
   Docker/QEMU KVM runs on disposable ext4 and XFS data disks passed **20/20**
   deterministic branch-delete/revision-truncation cut rounds across five
@@ -447,7 +447,7 @@ results. The renamed executables have new hashes and report identifiers; the
 operator subsequently repeated the 10K baseline and ran the 50K/100K series
 with DVMDB-native Release executables, as recorded below.
 
-**DVMDB hydraulic network size series (operator, October 26, 2026):**
+**DVMDB hydraulic distribution network size series (operator, October 26, 2026):**
 With the renamed Release benchmark, the operator then completed **three
 independent successful runs at each of 10K, 50K and 100K pipes**, using
 20 scalar edits and three topology edits per repository:

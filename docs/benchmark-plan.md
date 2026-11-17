@@ -152,7 +152,7 @@ hydraulic edit traffic, disk-use or cold-reopen measurement.
 ## Representative canonical hydraulic workload qualification
 
 The `aowis-dvmdb-hydraulic-edit-benchmark` uses **real serialized
-NetworkHydraulic objects** on one project-scoped UUIDv7 revision DAG, not a
+NetworkHydraulicDistribution objects** on one project-scoped UUIDv7 revision DAG, not a
 synthetic model-record topology.
 Every measured edit passes the precise expected UUIDv7 HEAD; branch diff and
 hydraulic merge operate on immutable project-qualified revision IDs. The

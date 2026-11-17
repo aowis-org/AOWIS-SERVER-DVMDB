@@ -3,7 +3,7 @@
 DVMDB stores models as independently addressed **model records** in a
 UUID-keyed Merkle trie, with a second trie indexing who references whom. This
 page covers the generic record layer; the hydraulic adapter built on top of
-it is in [hydraulic persistence](native-hydraulic-network.md).
+it is in [hydraulic persistence](native-hydraulic-distribution-network.md).
 
 ## Who owns what
 
@@ -11,7 +11,7 @@ it is in [hydraulic persistence](native-hydraulic-network.md).
 |---|---|
 | Model types, canonical codec `aowis::model::ModelCodec<T>`, validation, field merge, value rules, MODEL edit transactions | [AOWIS-SERVER-MODEL](../external/AOWIS-SERVER-MODEL/docs/model-serialization.md) (submodule) |
 | `ModelRecord` envelope, reverse-reference index, immutable storage, revisions, drafts, HTTP transport | DVMDB |
-| Bridge from typed hydraulic networks to records (`aowis/dvmdb/hydraulic_network_persistence.h`) | DVMDB, using MODEL's codec |
+| Bridge from typed hydraulic distribution networks to records (`aowis/dvmdb/hydraulic_distribution_network_persistence.h`) | DVMDB, using MODEL's codec |
 
 DVMDB never builds a second serializer: its adapter aliases point at the MODEL
 implementation. The MODEL target checks its 70-structure field manifest and

@@ -9,10 +9,10 @@ using aowis::model::ModelValidationReport;
 using aowis::model::HydraulicReference;
 using aowis::model::HydraulicDependency;
 using aowis::model::HydraulicDependencyValidation;
-using aowis::model::hydraulicReferences;
-using aowis::model::validateHydraulicNetworkWithDependencies;
-using aowis::model::validateHydraulicNetwork;
-using aowis::model::validateHydraulicValues;
+using aowis::model::hydraulicDistributionReferences;
+using aowis::model::validateHydraulicDistributionNetworkWithDependencies;
+using aowis::model::validateHydraulicDistributionNetwork;
+using aowis::model::validateHydraulicDistributionValues;
 using aowis::model::validateHydraulicEntityValues;
 }
 

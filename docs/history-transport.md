@@ -2,7 +2,7 @@
 
 DVMDB owns the authoritative working-copy content, saved generation,
 History cursor, immutable revisions and original MODEL action archives.
-The GUI owns a cached displayed `NetworkHydraulic` and a durable **client-side
+The GUI owns a cached displayed `NetworkHydraulicDistribution` and a durable **client-side
 navigation intent** for uncertain requests. These are complementary, not
 two competing Undo histories.
 
@@ -16,7 +16,7 @@ HEAD-relative private candidate and the cursor. Its HTTP `historyDelta`
 contains the source and destination **canonical SHA-256** digests, changed
 typed entity before/after images (including network-root metadata) and
 ordered membership moves across the 18 collections. It does **not** return
-every unchanged entity or a full `NetworkHydraulic` just to Undo one action.
+every unchanged entity or a full `NetworkHydraulicDistribution` just to Undo one action.
 
 The server can reconstruct full snapshots internally; this is not a full
 network **transfer**. The GUI checks its source digest, validates every
@@ -80,7 +80,7 @@ whole authoritative network once. A browser client needs persistent
 browser-backed storage for its navigation intent; in-memory WASM state alone
 cannot guarantee recovery from page close/restart.
 
-History navigation currently supports **one unambiguous hydraulic network**,
+History navigation currently supports **one unambiguous hydraulic distribution network**,
 including eligible initialized unborn draft actions. Unprovable original
 membership deletion order, checkpoint-only revisions, multi-network History
 and some incomplete archived actions are not given synthetic action

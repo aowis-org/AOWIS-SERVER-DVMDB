@@ -34,7 +34,7 @@ separate server executable is required for Standalone.
 * **Storage.** One append-only object pack per project with a rebuildable
   index, path-compressed Merkle tries keyed by entity UUID, a reverse-reference
   index, crash-safe ref publication, full verification and offline compaction.
-* **Hydraulic models.** Complete `NetworkHydraulic` persistence (all 18 entity
+* **Hydraulic models.** Complete `NetworkHydraulicDistribution` persistence (all 18 entity
   collections, chunked membership, reference and physical-value validation),
   indexed reads and edits, and hydraulic-aware three-way merges with explicit
   conflict choices.
@@ -52,7 +52,7 @@ or a trusted network. The service implements HTTP local Commit, first draft
 initialization/import, original MODEL action archives, cross-Commit
 Undo/Redo and verified **sparse History navigation**. Only changed typed
 entities and membership moves are returned with canonical SHA-256 digests,
-not a complete `NetworkHydraulic` for every action. DVMDB retains the
+not a complete `NetworkHydraulicDistribution` for every action. DVMDB retains the
 prior candidate reference for idempotent same-UUID replay and exposes a
 small read-only hash/generation/History-cursor reconciliation receipt. The
 GUI also persists a navigation intent so uncertain requests can be

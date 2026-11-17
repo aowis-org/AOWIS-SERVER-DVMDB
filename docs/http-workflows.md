@@ -85,7 +85,7 @@ branch's committed HEAD. Network summaries are read-only and do not save.
 `GET /working-copies/{id}` exposes a bounded draft event journal. In addition,
 the **permanent local-Commit MODEL action archive** is available through the
 read-only `/action-history` and `/action-history/{revisionId}/events` routes
-below, including real actions across Commit markers. For a **verified single hydraulic network**, including eligible actions in an
+below, including real actions across Commit markers. For a **verified single hydraulic distribution network**, including eligible actions in an
 initialized unborn first draft, HTTP selects active journal and archived
 Commit action positions. It can cross from active position zero to the last
 archived action without discarding Redo. The GUI History dock uses that
@@ -198,7 +198,7 @@ retry the **identical** operation ID, generation and target rather than
 computing another relative Undo. HTTP 409 means no verified publication;
 refresh the cursor and resolve any uncertain previous request first.
 
-This first executable HTTP slice supports one existing hydraulic network in a
+This first executable HTTP slice supports one existing hydraulic distribution network in a
 committed base. It intentionally refuses unborn/multi-network drafts, mixed
 native-only edits, and crossing from a retained live journal at position zero
 into archived actions. Explicit archived action navigation is supported when

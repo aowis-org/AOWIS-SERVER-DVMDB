@@ -16,7 +16,7 @@ different claims.
 | Personal draft, Save and local Commit | [Working copies](working-copies.md), [private repositories](private-working-repositories.md) |
 | Continuous Undo/Redo and action archives | [History contract](history-contract.md), [original MODEL action archive](commit-action-archive.md) |
 | Sparse MODEL updates and SHA-256 recovery | [History transport/reconciliation](history-transport.md) |
-| Hydraulic root, 18 collections and references | [Hydraulic persistence](native-hydraulic-network.md), [MODEL records](model-records.md) |
+| Hydraulic root, 18 collections and references | [Hydraulic persistence](native-hydraulic-distribution-network.md), [MODEL records](model-records.md) |
 | Commit/working-copy integrity versus solver feasibility | [Validation boundary](model-validity-boundary-audit.md) |
 | Clone/Fetch primitives, tracking and merge | [Offline synchronization](offline-repository-synchronization.md), [tracking](repository-tracking.md), [merge](native-hydraulic-merging.md) |
 
@@ -38,7 +38,7 @@ DVMDB keeps original MODEL frames in the active journal and indexes them
 permanently after local Commit. Its durable cursor navigates eligible
 actions across Commit boundaries without changing immutable revisions.
 Navigation returns a verified **sparse change set** for the one selected
-hydraulic network, with canonical source/destination SHA-256 values. The
+hydraulic distribution network, with canonical source/destination SHA-256 values. The
 server also provides a lightweight operation/generation/cursor/hash
 reconciliation receipt and pinned previous candidate for same-UUID delta
 replay after lost acknowledgements or restart. The GUI has a separate

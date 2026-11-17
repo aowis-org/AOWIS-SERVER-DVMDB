@@ -261,8 +261,8 @@ paths:
     get:
       operationId: reconcileWorkingCopyHistory
       description: |
-        Read a compact receipt for the exact saved hydraulic network and
-        History selection. Returns canonical ModelCodec NetworkHydraulic SHA-256,
+        Read a compact receipt for the exact saved hydraulic distribution network and
+        History selection. Returns canonical ModelCodec NetworkHydraulicDistribution SHA-256,
         working-copy generation, session, original journal count, selected
         action coordinate, latest accepted navigation UUID and its source
         generation. No MODEL images, journal frames or complete network are
@@ -314,7 +314,7 @@ paths:
         immutable local hydraulic Commit; the draft must be clean, an archived checkpoint, or an active journal
         verified at position zero; in the latter case V9 retains Redo frames. Without revisionId, select
         an active draft boundary (0..journalCount) for one EXISTING hydraulic
-        network. Multiple NetworkHydraulic roots remain supported in storage,
+        network. Multiple NetworkHydraulicDistribution roots remain supported in storage,
         but multi-network active draft navigation and unborn base replay are
         deferred. Eligible position-zero active journals can cross into the
         archived HEAD and return without losing Redo. Immutable HEAD never moves.
@@ -322,7 +322,7 @@ paths:
         idempotent. When networkId is provided the first successful response
         includes historyDelta (canonical source/destination SHA-256, changed
         entity before/after images, and sparse membership moves) instead of
-        an entire NetworkHydraulic. The preceding native candidate is kept
+        an entire NetworkHydraulicDistribution. The preceding native candidate is kept
         as an atomically pinned file reference with the operation receipt.
         An identical retry of the most recent operation UUIDv7 and source
         generation returns the same verified sparse delta, even after a
@@ -345,7 +345,7 @@ paths:
                 expectedHead: {type: [string, 'null'], format: uuid}
                 actionPosition: {type: string, pattern: '^[0-9]{1,20}$', description: Explicit action boundary, zero to journalCount (draft) or archived actionCount (when revisionId is supplied)}
                 revisionId: {type: string, format: uuid, description: Optional archived local Commit revision UUIDv7; when supplied expectedHead must be non-null}
-                networkId: {type: string, format: uuid, description: Optional selected hydraulic network UUIDv7; request verified sparse historyDelta with no full model payload}
+                networkId: {type: string, format: uuid, description: Optional selected hydraulic distribution network UUIDv7; request verified sparse historyDelta with no full model payload}
       responses:
         '200': {description: Durable working-copy generation and cursor; with networkId, a verified sparse historyDelta including exact idempotent retries; without networkId, no model payload}
         '400': {description: Malformed operation UUID, field type, action position or expected HEAD}
@@ -357,7 +357,7 @@ paths:
     get:
       operationId: getSavedWorkingCopyNetworkSummary
       description: |
-        Read canonical hydraulic network counts from one exact saved private
+        Read canonical hydraulic distribution network counts from one exact saved private
         draft candidate generation, including overlays over a committed base.
         Unlike the committed revision summary, this also reports uncommitted
         network data in an unborn HEAD. Does not acquire a lease or mutate data.
@@ -392,7 +392,7 @@ paths:
     get:
       operationId: getWorkingCopyNetwork
       description: |
-        Read one canonical NetworkHydraulic aggregate from a consistent saved
+        Read one canonical NetworkHydraulicDistribution aggregate from a consistent saved
         draft candidate generation over its immutable pinned base. The server
         validates native manifest/chunk membership, typed entity payloads and
         canonical dependency references before returning bytes. This is a
@@ -426,9 +426,9 @@ paths:
     parameters:
       - {name: draftId, in: path, required: true, schema: {type: string, format: uuid}}
     post:
-      operationId: importHydraulicNetworkIntoEmptyWorkingCopy
+      operationId: importHydraulicDistributionNetworkIntoEmptyWorkingCopy
       description: |
-        Atomically import a complete canonical NetworkHydraulic into a private,
+        Atomically import a complete canonical NetworkHydraulicDistribution into a private,
         untouched unborn draft, without creating a commit. Requires a live
         writer lease, exact saved generation, and an empty candidate and
         event journal. DVMDB validates all hydraulic dependencies, owns the
@@ -447,7 +447,7 @@ paths:
                 sessionId: {type: string, format: uuid}
                 fencingToken: {type: string, format: uuid}
                 expectedGeneration: {type: string, pattern: '^[0-9]{1,20}$'}
-                payloadBase64: {type: string, description: Canonical ModelCodec NetworkHydraulic bytes}
+                payloadBase64: {type: string, description: Canonical ModelCodec NetworkHydraulicDistribution bytes}
       responses:
         '200': {description: Saved draft with complete imported model and incremented generation}
         '400': {description: Malformed canonical model or invalid hydraulic dependencies}
@@ -459,7 +459,7 @@ paths:
     post:
       operationId: initializeWorkingCopyNetwork
       description: |
-        Create the first empty hydraulic network as server-owned manifest data
+        Create the first empty hydraulic distribution network as server-owned manifest data
         in an untouched private unborn draft. Requires the live fenced writer
         and exact generation. The response contains the saved candidate overlay;
         the branch HEAD remains null. Immediate same-writer retry of exactly the
@@ -1304,7 +1304,7 @@ paths:
         Domain-validated hydraulic branch merge. Both expected
         HEAD UUIDs are mandatory, even when no conflict choices are supplied.
         Reconciles canonical typed fields and membership chunks and validates
-        the entire candidate hydraulic network before publication, including
+        the entire candidate hydraulic distribution network before publication, including
         fast-forward merges. A 409 conflict leaves both branch HEADs intact.
         Field/object choices may target only actual conflicts; unknown,
         duplicated, unused or stale choices are rejected. Network-root
@@ -1376,9 +1376,9 @@ paths:
       - {$ref: '#/components/parameters/ProjectId'}
       - {$ref: '#/components/parameters/Branch'}
     post:
-      operationId: saveHydraulicNetwork
+      operationId: saveHydraulicDistributionNetwork
       description: |
-        Create/replace a complete, canonically validated hydraulic network on
+        Create/replace a complete, canonically validated hydraulic distribution network on
         a UUIDv7 project and branch. The exact expected revision HEAD must
         match at atomic publication. Revision UUID and content SHA are separate.
       requestBody:
@@ -1393,7 +1393,7 @@ paths:
                 author: {$ref: '#/components/schemas/CommitAuthor'}
                 message: {$ref: '#/components/schemas/CommitMessage'}
                 expectedHead: {type: string, format: uuid, description: UUIDv7 revision}
-                payloadBase64: {type: string, contentEncoding: base64, description: Canonical NetworkHydraulic model bytes}
+                payloadBase64: {type: string, contentEncoding: base64, description: Canonical NetworkHydraulicDistribution model bytes}
       responses:
         '201': {description: '{"id":"<new UUIDv7 revision>"}'}
         '400': {$ref: '#/components/responses/BadRequest'}
@@ -1404,9 +1404,9 @@ paths:
       - {$ref: '#/components/parameters/Branch'}
       - {name: revision, in: query, required: false, schema: {type: string, format: uuid}, description: Exact immutable revision to summarize; omitted selects the committed branch tip}
     get:
-      operationId: getCommittedHydraulicNetworkSummary
+      operationId: getCommittedHydraulicDistributionNetworkSummary
       description: |
-        Revision-pinned inventory of canonical hydraulic network roots and
+        Revision-pinned inventory of canonical hydraulic distribution network roots and
         their 18 collection counts. This is the COMMITTED snapshot only; an
         unborn HEAD returns zero committed networks, which does not prove a
         private working copy contains no network or changes. Clients must
@@ -1445,7 +1445,7 @@ paths:
       - {$ref: '#/components/parameters/NetworkId'}
       - {name: revision, in: query, required: false, schema: {type: string, format: uuid}, description: UUIDv7 revision in this branch ancestry; omitted selects current HEAD}
     get:
-      operationId: getHydraulicNetwork
+      operationId: getHydraulicDistributionNetwork
       description: Pin one UUIDv7 revision, verify hydraulic metadata and all member references, then load the complete canonical payload.
       responses:
         '200': {description: Canonical network payload with UUIDv7 revision}
@@ -1482,7 +1482,7 @@ paths:
       - {$ref: '#/components/parameters/Branch'}
       - {$ref: '#/components/parameters/NetworkId'}
     post:
-      operationId: editHydraulicNetwork
+      operationId: editHydraulicDistributionNetwork
       description: |
         Apply at most 128 entity changes to one branch at an exact
         expectedHead. Scalar, physical, catalogue, topology, dependent-reference

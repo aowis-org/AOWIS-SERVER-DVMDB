@@ -3,9 +3,9 @@
 #include "model_edit_event_fixture.h"
 #include "aowis/dvmdb/dvmdb_http_routes.h"
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
-#include "aowis/dvmdb/hydraulic_network_persistence.h"
+#include "aowis/dvmdb/hydraulic_distribution_network_persistence.h"
 #include <aowis/model/edit/model_edit_transaction.h>
-#include <aowis/model/edit/hydraulic_root_edit.h>
+#include <aowis/model/edit/hydraulic_distribution_root_edit.h>
 #endif
 
 #include <httplib.h>
@@ -2205,7 +2205,7 @@ void exerciseUnbornNetworkInitializationHttp() {
     const QString junctionId = junctionUuid.toString(QUuid::WithoutBraces);
     {
         native::ProjectService service(root.root());
-        const native::ProjectInfo project = service.createUnbornProject("first hydraulic network");
+        const native::ProjectInfo project = service.createUnbornProject("first hydraulic distribution network");
         projectId = project.id;
         service.configureRepositoryRole(native::RepositoryRole::Private);
         TestServer server(service, native::BundleLimits{4ULL * 1024ULL * 1024ULL,
@@ -2271,8 +2271,8 @@ void exerciseUnbornNetworkInitializationHttp() {
         const Response firstView = client.call("GET", path + "/networks/" + networkId);
         const QByteArray firstPayload = QByteArray::fromBase64(
             firstView.json.value("payloadBase64").toString().toLatin1());
-        const std::optional<NetworkHydraulic> firstNetwork =
-            native::ModelCodec<NetworkHydraulic>::decode(firstPayload);
+        const std::optional<NetworkHydraulicDistribution> firstNetwork =
+            native::ModelCodec<NetworkHydraulicDistribution>::decode(firstPayload);
         check(firstView.status == 200 && firstView.json.value("generation") == "1" &&
               firstView.json.value("draftId") == QString::fromStdString(draftId) &&
               firstNetwork && firstNetwork->uuid == networkUuid &&
@@ -2301,12 +2301,12 @@ void exerciseUnbornNetworkInitializationHttp() {
         // Creating the first member also creates its membership chunk and
         // rewrites the native root. The metadata edit must be composed onto
         // that same server-owned root without generating a duplicate key.
-        NetworkHydraulic initialMixedRoot = *firstNetwork;
+        NetworkHydraulicDistribution initialMixedRoot = *firstNetwork;
         initialMixedRoot.title_line_3 = QStringLiteral("First member and root metadata");
         event.edits.append(aowis::model::ModelEntityEdit{
-            networkUuid, QString::fromLatin1(aowis::model::hydraulicRootEditType),
-            aowis::model::hydraulicRootImage(*firstNetwork),
-            aowis::model::hydraulicRootImage(initialMixedRoot)});
+            networkUuid, QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType),
+            aowis::model::hydraulicDistributionRootImage(*firstNetwork),
+            aowis::model::hydraulicDistributionRootImage(initialMixedRoot)});
         QString encodingError;
         const QByteArray frame = aowis::model::ModelEditTransactionCodec::encode(event, &encodingError);
         check(!frame.isEmpty(), "failed to encode first unborn junction event");
@@ -2332,8 +2332,8 @@ void exerciseUnbornNetworkInitializationHttp() {
         const Response populatedView = client.call("GET", path + "/networks/" + networkId);
         const QByteArray populatedPayload = QByteArray::fromBase64(
             populatedView.json.value("payloadBase64").toString().toLatin1());
-        const std::optional<NetworkHydraulic> populatedNetwork =
-            native::ModelCodec<NetworkHydraulic>::decode(populatedPayload);
+        const std::optional<NetworkHydraulicDistribution> populatedNetwork =
+            native::ModelCodec<NetworkHydraulicDistribution>::decode(populatedPayload);
         check(populatedView.status == 200 && populatedView.json.value("generation") == "2" &&
               populatedNetwork && populatedNetwork->nodes_junctions.size() == 1 &&
               populatedNetwork->nodes_junctions.first().uuid == junctionUuid &&
@@ -2343,16 +2343,16 @@ void exerciseUnbornNetworkInitializationHttp() {
               "saved membership did not hydrate canonical draft network");
         // Root metadata uses the same fenced event journal, but no client
         // sends native kind-100 manifest bytes or membership chunk records.
-        NetworkHydraulic updatedRoot = *populatedNetwork;
+        NetworkHydraulicDistribution updatedRoot = *populatedNetwork;
         updatedRoot.title_line_1 = QStringLiteral("Saved root metadata");
         updatedRoot.options_hydraulic.headloss_formula = HydraulicHeadlossFormula::DarcyWeisbach;
         aowis::model::ModelEditTransaction rootEvent;
         rootEvent.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
         rootEvent.operation = QStringLiteral("hydraulic.network.root.update");
         rootEvent.edits.append(aowis::model::ModelEntityEdit{
-            networkUuid, QString::fromLatin1(aowis::model::hydraulicRootEditType),
-            aowis::model::hydraulicRootImage(*populatedNetwork),
-            aowis::model::hydraulicRootImage(updatedRoot)});
+            networkUuid, QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType),
+            aowis::model::hydraulicDistributionRootImage(*populatedNetwork),
+            aowis::model::hydraulicDistributionRootImage(updatedRoot)});
         const QByteArray rootFrame = aowis::model::ModelEditTransactionCodec::encode(rootEvent);
         check(!rootFrame.isEmpty(), "failed to encode hydraulic root transaction");
         const QJsonObject rootSave{{"sessionId", session}, {"fencingToken", token},
@@ -2372,8 +2372,8 @@ void exerciseUnbornNetworkInitializationHttp() {
               replayedRoot.json.value("generation") == "3",
               "root event Save or lost-response replay returned the wrong generation");
         const Response rootView = client.call("GET", path + "/networks/" + networkId);
-        const std::optional<NetworkHydraulic> finalRoot =
-            native::ModelCodec<NetworkHydraulic>::decode(QByteArray::fromBase64(
+        const std::optional<NetworkHydraulicDistribution> finalRoot =
+            native::ModelCodec<NetworkHydraulicDistribution>::decode(QByteArray::fromBase64(
                 rootView.json.value("payloadBase64").toString().toLatin1()));
         check(rootView.status == 200 && finalRoot &&
               finalRoot->options_hydraulic.headloss_formula == HydraulicHeadlossFormula::DarcyWeisbach &&
@@ -2402,16 +2402,16 @@ void exerciseUnbornNetworkInitializationHttp() {
         additional.id = QStringLiteral("J2");
         additional.elevation_m = 27;
         const QByteArray additionalBytes = native::ModelCodec<HydraulicNodeJunction>::encode(additional);
-        NetworkHydraulic mixedExpected = *finalRoot;
+        NetworkHydraulicDistribution mixedExpected = *finalRoot;
         mixedExpected.title_line_2 = QStringLiteral("Mixed atomic root and entity edit");
         aowis::model::ModelEditTransaction mixedEvent;
         mixedEvent.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
         mixedEvent.operation = QStringLiteral("hydraulic.network.mixed");
         mixedEvent.description = QStringLiteral("Add J2 and update network title");
         mixedEvent.edits.append(aowis::model::ModelEntityEdit{
-            networkUuid, QString::fromLatin1(aowis::model::hydraulicRootEditType),
-            aowis::model::hydraulicRootImage(*finalRoot),
-            aowis::model::hydraulicRootImage(mixedExpected)});
+            networkUuid, QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType),
+            aowis::model::hydraulicDistributionRootImage(*finalRoot),
+            aowis::model::hydraulicDistributionRootImage(mixedExpected)});
         mixedEvent.edits.append(aowis::model::ModelEntityEdit{
             additionalUuid, QStringLiteral("HydraulicNodeJunction"), std::nullopt, additionalBytes});
         const QByteArray mixedFrame = aowis::model::ModelEditTransactionCodec::encode(mixedEvent);
@@ -2447,8 +2447,8 @@ void exerciseUnbornNetworkInitializationHttp() {
                 QJsonDocument(mixedSaved.json).toJson(QJsonDocument::Compact).toStdString());
         const Response mixedReplayed = client.call("POST", path + "/save-events", mixedSave);
         const Response mixedView = client.call("GET", path + "/networks/" + networkId);
-        const std::optional<NetworkHydraulic> mixedNetwork =
-            native::ModelCodec<NetworkHydraulic>::decode(QByteArray::fromBase64(
+        const std::optional<NetworkHydraulicDistribution> mixedNetwork =
+            native::ModelCodec<NetworkHydraulicDistribution>::decode(QByteArray::fromBase64(
                 mixedView.json.value("payloadBase64").toString().toLatin1()));
         mixedExpected.nodes_junctions.append(additional);
         const QString actionHistoryUrl = QStringLiteral("/dvmdb/v1/projects/") +
@@ -2469,8 +2469,8 @@ void exerciseUnbornNetworkInitializationHttp() {
         check(mixedSaved.json.value("generation") == "4" &&
               mixedReplayed.status == 200 && mixedReplayed.json.value("generation") == "4" &&
               mixedView.status == 200 && mixedNetwork &&
-              native::ModelCodec<NetworkHydraulic>::encode(*mixedNetwork) ==
-                  native::ModelCodec<NetworkHydraulic>::encode(mixedExpected) &&
+              native::ModelCodec<NetworkHydraulicDistribution>::encode(*mixedNetwork) ==
+                  native::ModelCodec<NetworkHydraulicDistribution>::encode(mixedExpected) &&
               client.call("GET", path).json.value("events").toArray().size() == 3,
               "mixed root/entity event did not persist exactly once with complete canonical equality");
         // Bad before-image must not partially save an entity or change the
@@ -2510,7 +2510,7 @@ void exerciseUnbornNetworkInitializationHttp() {
         check(!draft.baseRevision && draft.generation == 4 && draft.journal.size() == 3 &&
               draft.candidateChanges.size() >= 4 &&
               !reopened.optionalHead(projectId, "main").has_value(),
-              "first hydraulic network, member and root edit did not survive service restart");
+              "first hydraulic distribution network, member and root edit did not survive service restart");
         TestServer server(reopened, native::BundleLimits{4ULL * 1024ULL * 1024ULL,
                                                         10000ULL, 1024ULL * 1024ULL});
         Client client(server.port());
@@ -2524,7 +2524,7 @@ void exerciseUnbornNetworkInitializationHttp() {
               "private network summary was lost after DVMDB restart");
         const Response recovered = client.call("GET", QStringLiteral("/dvmdb/v1/working-copies/")
             + QString::fromStdString(draftId) + "/networks/" + networkId);
-        const std::optional<NetworkHydraulic> restored = native::ModelCodec<NetworkHydraulic>::decode(
+        const std::optional<NetworkHydraulicDistribution> restored = native::ModelCodec<NetworkHydraulicDistribution>::decode(
             QByteArray::fromBase64(recovered.json.value("payloadBase64").toString().toLatin1()));
         check(recovered.status == 200 && recovered.json.value("generation") == "4" &&
               restored && restored->title_line_1 == QStringLiteral("Saved root metadata") &&
@@ -2561,7 +2561,7 @@ void exerciseCompleteNetworkDraftImportHttp() {
         const Response leased = client.call("POST", path + "/lease",
             QJsonObject{{"sessionId", session}, {"seconds", 90}});
         check(leased.status == 200, "could not acquire full-network import lease");
-        NetworkHydraulic imported;
+        NetworkHydraulicDistribution imported;
         imported.uuid = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
         imported.id = QStringLiteral("imported-water");
         HydraulicNodeJunction junction;
@@ -2570,7 +2570,7 @@ void exerciseCompleteNetworkDraftImportHttp() {
         junction.elevation_m = 17;
         imported.nodes_junctions.append(junction);
         networkId = imported.uuid.toString(QUuid::WithoutBraces);
-        const QByteArray payload = native::ModelCodec<NetworkHydraulic>::encode(imported);
+        const QByteArray payload = native::ModelCodec<NetworkHydraulicDistribution>::encode(imported);
         const QJsonObject request{{"sessionId", session},
             {"fencingToken", leased.json.value("token")},
             {"expectedGeneration", QStringLiteral("0")},
@@ -2590,12 +2590,12 @@ void exerciseCompleteNetworkDraftImportHttp() {
         check(repeat.status == 409 &&
               repeat.json.value("error").toObject().value("code") == "conflict",
               "repeat import was not rejected as a conflict");
-        NetworkHydraulic replacement = imported;
+        NetworkHydraulicDistribution replacement = imported;
         replacement.nodes_junctions[0].elevation_m = 99;
         QJsonObject replacementRequest = request;
         replacementRequest.insert("expectedGeneration", QStringLiteral("1"));
         replacementRequest.insert("payloadBase64", QString::fromLatin1(
-            native::ModelCodec<NetworkHydraulic>::encode(replacement).toBase64()));
+            native::ModelCodec<NetworkHydraulicDistribution>::encode(replacement).toBase64()));
         check(client.call("POST", path + "/import-network", replacementRequest).status == 409,
               "populated private HEAD accepted a replacement network");
         const Response summary = client.call("GET", path + "/networks/summary");
@@ -2604,7 +2604,7 @@ void exerciseCompleteNetworkDraftImportHttp() {
                   .value("counts").toObject().value("junctions") == 1,
               "full import did not materialize all network collections");
         const Response loaded = client.call("GET", path + "/networks/" + networkId);
-        const std::optional<NetworkHydraulic> restored = native::ModelCodec<NetworkHydraulic>::decode(
+        const std::optional<NetworkHydraulicDistribution> restored = native::ModelCodec<NetworkHydraulicDistribution>::decode(
             QByteArray::fromBase64(loaded.json.value("payloadBase64").toString().toLatin1()));
         check(loaded.status == 200 && restored && restored->nodes_junctions.size() == 1
               && restored->nodes_junctions.first().uuid == junction.uuid &&
@@ -2641,7 +2641,7 @@ void exerciseHydraulicDraftMembershipHttp() {
     const QString networkId = networkUuid.toString(QUuid::WithoutBraces);
     const QString oldId = oldUuid.toString(QUuid::WithoutBraces);
     const QString newId = newUuid.toString(QUuid::WithoutBraces);
-    NetworkHydraulic network;
+    NetworkHydraulicDistribution network;
     network.uuid = networkUuid;
     network.id = QStringLiteral("draft-membership");
     HydraulicNodeJunction initial;
@@ -2658,7 +2658,7 @@ void exerciseHydraulicDraftMembershipHttp() {
           "first hydraulic fixture commit did not establish the HEAD");
     native::RevisionId base = head;
     service.withRepository(project.id, [&](native::Repository& repository) {
-        base = native::hydraulic::saveHydraulicNetwork(repository, projectUuid,
+        base = native::hydraulic::saveHydraulicDistributionNetwork(repository, projectUuid,
                                                          "main", network, head, commitMetadata());
     });
     service.configureRepositoryRole(native::RepositoryRole::Private);
@@ -2675,7 +2675,7 @@ void exerciseHydraulicDraftMembershipHttp() {
     check(created.status == 201, "hydraulic draft checkout failed");
     const QString path = listPath + "/" + created.json.value("id").toString();
     const Response baseView = client.call("GET", path + "/networks/" + networkId);
-    const std::optional<NetworkHydraulic> baseNetwork = native::ModelCodec<NetworkHydraulic>::decode(
+    const std::optional<NetworkHydraulicDistribution> baseNetwork = native::ModelCodec<NetworkHydraulicDistribution>::decode(
         QByteArray::fromBase64(baseView.json.value("payloadBase64").toString().toLatin1()));
     check(baseView.status == 200 && baseView.json.value("generation") == "0" &&
           baseNetwork && baseNetwork->nodes_junctions.size() == 1 &&
@@ -2763,7 +2763,7 @@ void exerciseHydraulicDraftMembershipHttp() {
           saved.json.value("eventCount") == QStringLiteral("1"),
           "hydraulic entity and membership did not save atomically");
     const Response combinedView = client.call("GET", path + "/networks/" + networkId);
-    const std::optional<NetworkHydraulic> combinedNetwork = native::ModelCodec<NetworkHydraulic>::decode(
+    const std::optional<NetworkHydraulicDistribution> combinedNetwork = native::ModelCodec<NetworkHydraulicDistribution>::decode(
         QByteArray::fromBase64(combinedView.json.value("payloadBase64").toString().toLatin1()));
     check(combinedView.status == 200 && combinedView.json.value("generation") == "1" &&
           combinedNetwork && combinedNetwork->nodes_junctions.size() == 2 &&
@@ -2801,7 +2801,7 @@ void exerciseHydraulicDraftMembershipHttp() {
           service.optionalHead(project.id, "main") == base,
           "hydraulic deletion or replay modified committed HEAD");
     const Response finalView = client.call("GET", path + "/networks/" + networkId);
-    const std::optional<NetworkHydraulic> finalNetwork = native::ModelCodec<NetworkHydraulic>::decode(
+    const std::optional<NetworkHydraulicDistribution> finalNetwork = native::ModelCodec<NetworkHydraulicDistribution>::decode(
         QByteArray::fromBase64(finalView.json.value("payloadBase64").toString().toLatin1()));
     check(finalView.status == 200 && finalView.json.value("generation") == "2" &&
           finalNetwork && finalNetwork->nodes_junctions.size() == 1 &&
@@ -2833,7 +2833,7 @@ void exerciseHydraulicDraftMembershipHttp() {
     const QJsonObject undoOneBody = navBody(undoOneId, "2", "1");
     const Response undoneOne = client.call("POST", navigatePath, undoOneBody);
     const Response atOne = client.call("GET", path + "/networks/" + networkId);
-    const std::optional<NetworkHydraulic> oneNetwork = native::ModelCodec<NetworkHydraulic>::decode(
+    const std::optional<NetworkHydraulicDistribution> oneNetwork = native::ModelCodec<NetworkHydraulicDistribution>::decode(
         QByteArray::fromBase64(atOne.json.value("payloadBase64").toString().toLatin1()));
     check(undoneOne.status == 200 && undoneOne.json.value("generation") == "3" &&
           undoneOne.json.value("draftActionPosition") == "1" &&
@@ -2855,7 +2855,7 @@ void exerciseHydraulicDraftMembershipHttp() {
               QString::fromStdString(native::UuidV7::generate().toString()), "3", "0")).status == 200,
           "HDB-03d HTTP Undo to base rejected");
     const Response atBase = client.call("GET", path + "/networks/" + networkId);
-    const std::optional<NetworkHydraulic> baseAgain = native::ModelCodec<NetworkHydraulic>::decode(
+    const std::optional<NetworkHydraulicDistribution> baseAgain = native::ModelCodec<NetworkHydraulicDistribution>::decode(
         QByteArray::fromBase64(atBase.json.value("payloadBase64").toString().toLatin1()));
     const Response cursorAtBase = client.call("GET", cursorPath);
     check(atBase.status == 200 && baseAgain && baseAgain->nodes_junctions.size() == 1 &&
@@ -2868,7 +2868,7 @@ void exerciseHydraulicDraftMembershipHttp() {
           cursorAtBase.json.value("nextAction").toObject().value("actionPosition") == "1",
           "HDB-03d HTTP Undo to the immutable base failed");
     // The delta-enabled request must return ONLY the newly restored entity,
-    // not the full NetworkHydraulic or the unchanged base member. The source
+    // not the full NetworkHydraulicDistribution or the unchanged base member. The source
     // and destination hashes cover the complete canonical model snapshots.
     QJsonObject sparseRedoRequest = navBody(
         QString::fromStdString(native::UuidV7::generate().toString()), "4", "1");
@@ -2879,10 +2879,10 @@ void exerciseHydraulicDraftMembershipHttp() {
     const QJsonObject sparseInsert = sparseEdits.isEmpty() ? QJsonObject() :
         sparseEdits.first().toObject();
     const QString baseDigest = baseAgain ? QString::fromLatin1(QCryptographicHash::hash(
-        native::ModelCodec<NetworkHydraulic>::encode(*baseAgain),
+        native::ModelCodec<NetworkHydraulicDistribution>::encode(*baseAgain),
         QCryptographicHash::Sha256).toHex()) : QString();
     const QString oneDigest = oneNetwork ? QString::fromLatin1(QCryptographicHash::hash(
-        native::ModelCodec<NetworkHydraulic>::encode(*oneNetwork),
+        native::ModelCodec<NetworkHydraulicDistribution>::encode(*oneNetwork),
         QCryptographicHash::Sha256).toHex()) : QString();
     // A tiny read-only receipt is enough to identify the exact authoritative
     // state after a lost navigation reply. A matching digest alone is NOT
@@ -2948,7 +2948,7 @@ void exerciseHydraulicDraftMembershipHttp() {
               QString::fromStdString(native::UuidV7::generate().toString()), "5", "2")).status == 200,
           "HDB-03d HTTP Redo rejected a valid original action boundary");
     const Response restoredView = client.call("GET", path + "/networks/" + networkId);
-    const std::optional<NetworkHydraulic> restoredNetwork = native::ModelCodec<NetworkHydraulic>::decode(
+    const std::optional<NetworkHydraulicDistribution> restoredNetwork = native::ModelCodec<NetworkHydraulicDistribution>::decode(
         QByteArray::fromBase64(restoredView.json.value("payloadBase64").toString().toLatin1()));
     check(restoredView.status == 200 && restoredNetwork &&
           restoredNetwork->nodes_junctions.size() == 1 &&
@@ -2989,7 +2989,7 @@ void exerciseHydraulicDraftMembershipHttp() {
           !client.call("GET", cursorPath).json.value("hasNextDraftAction").toBool(),
           "HDB-03d event Save did not invalidate the redo tail through HTTP");
     const Response branchedView = client.call("GET", path + "/networks/" + networkId);
-    const std::optional<NetworkHydraulic> branchedNetwork = native::ModelCodec<NetworkHydraulic>::decode(
+    const std::optional<NetworkHydraulicDistribution> branchedNetwork = native::ModelCodec<NetworkHydraulicDistribution>::decode(
         QByteArray::fromBase64(branchedView.json.value("payloadBase64").toString().toLatin1()));
     check(branchedView.status == 200 && branchedNetwork &&
           branchedNetwork->nodes_junctions.size() == 2 &&
@@ -3029,8 +3029,8 @@ void exerciseHydraulicDraftMembershipHttp() {
             if (found != persistedOverlay.end()) return found->second;
             return service.getModelAtRevision(project.id, base, key);
         };
-    const std::optional<NetworkHydraulic> persistedNetwork =
-        native::hydraulic::loadDraftHydraulicNetwork(readPersisted, networkUuid);
+    const std::optional<NetworkHydraulicDistribution> persistedNetwork =
+        native::hydraulic::loadDraftHydraulicDistributionNetwork(readPersisted, networkUuid);
     check(persisted.generation == 8 && persisted.journalCount == 2 &&
           !persisted.draftActionPosition,
           "HDB-03d durable HTTP draft generation, journal count or cursor mismatch");
@@ -3042,7 +3042,7 @@ void exerciseHydraulicDraftMembershipHttp() {
           persistedNetwork->nodes_junctions.first().uuid == oldUuid &&
           persistedNetwork->nodes_junctions.last().uuid == newUuid &&
           persistedNetwork->nodes_junctions.last().elevation_m == 66,
-          "HDB-03d durable HTTP native overlay does not reconstruct branched hydraulic network");
+          "HDB-03d durable HTTP native overlay does not reconstruct branched hydraulic distribution network");
     check(service.optionalHead(project.id, "main") == base,
           "HDB-03d durable HTTP draft history advanced committed HEAD");
 
@@ -3100,8 +3100,8 @@ void exerciseHydraulicDraftMembershipHttp() {
     const QJsonObject zeroBody = archivedBody(zeroOperation, "9", "0");
     const Response atArchivedParent = archiveClient.call("POST", archivedPath, zeroBody);
     const Response parentView = archiveClient.call("GET", path + "/networks/" + networkId);
-    const std::optional<NetworkHydraulic> parentNetwork =
-        native::ModelCodec<NetworkHydraulic>::decode(QByteArray::fromBase64(
+    const std::optional<NetworkHydraulicDistribution> parentNetwork =
+        native::ModelCodec<NetworkHydraulicDistribution>::decode(QByteArray::fromBase64(
             parentView.json.value("payloadBase64").toString().toLatin1()));
     const Response parentCursor = archiveClient.call("GET", archivedCursorPath);
     check(atArchivedParent.status == 200 &&
@@ -3141,8 +3141,8 @@ void exerciseHydraulicDraftMembershipHttp() {
     const Response atArchivedFirst = archiveClient.call("POST", archivedPath,
         archivedBody(QString::fromStdString(native::UuidV7::generate().toString()), "10", "1"));
     const Response firstView = archiveClient.call("GET", path + "/networks/" + networkId);
-    const std::optional<NetworkHydraulic> firstNetwork =
-        native::ModelCodec<NetworkHydraulic>::decode(QByteArray::fromBase64(
+    const std::optional<NetworkHydraulicDistribution> firstNetwork =
+        native::ModelCodec<NetworkHydraulicDistribution>::decode(QByteArray::fromBase64(
             firstView.json.value("payloadBase64").toString().toLatin1()));
     check(atArchivedFirst.status == 200 &&
           atArchivedFirst.json.value("generation") == "11" &&
@@ -3155,8 +3155,8 @@ void exerciseHydraulicDraftMembershipHttp() {
     const Response atArchivedTip = archiveClient.call("POST", archivedPath,
         archivedBody(QString::fromStdString(native::UuidV7::generate().toString()), "11", "2"));
     const Response tipView = archiveClient.call("GET", path + "/networks/" + networkId);
-    const std::optional<NetworkHydraulic> tipNetwork =
-        native::ModelCodec<NetworkHydraulic>::decode(QByteArray::fromBase64(
+    const std::optional<NetworkHydraulicDistribution> tipNetwork =
+        native::ModelCodec<NetworkHydraulicDistribution>::decode(QByteArray::fromBase64(
             tipView.json.value("payloadBase64").toString().toLatin1()));
     const Response tipCursor = archiveClient.call("GET", archivedCursorPath);
     check(atArchivedTip.status == 200 &&
@@ -3226,8 +3226,8 @@ void exerciseHydraulicDraftMembershipHttp() {
         nextArchivedBody(QString::fromStdString(native::UuidV7::generate().toString()),
                          "15", archivedRevision, "1"));
     const Response oldActionView = archiveClient.call("GET", path + "/networks/" + networkId);
-    const std::optional<NetworkHydraulic> oldActionNetwork =
-        native::ModelCodec<NetworkHydraulic>::decode(QByteArray::fromBase64(
+    const std::optional<NetworkHydraulicDistribution> oldActionNetwork =
+        native::ModelCodec<NetworkHydraulicDistribution>::decode(QByteArray::fromBase64(
             oldActionView.json.value("payloadBase64").toString().toLatin1()));
     check(crossedBack.status == 200 && oldActionView.status == 200 &&
           oldActionNetwork && oldActionNetwork->nodes_junctions.size() == 2 &&
@@ -3269,8 +3269,8 @@ void exerciseHydraulicDraftMembershipHttp() {
           !archivedReplay.json.contains("payloadBase64"),
           "HDB-03f archived lost-acknowledgement retry changed the MODEL delta");
     const Response finalNetworkView = archiveClient.call("GET", path + "/networks/" + networkId);
-    const std::optional<NetworkHydraulic> finalNetworkState =
-        native::ModelCodec<NetworkHydraulic>::decode(QByteArray::fromBase64(
+    const std::optional<NetworkHydraulicDistribution> finalNetworkState =
+        native::ModelCodec<NetworkHydraulicDistribution>::decode(QByteArray::fromBase64(
             finalNetworkView.json.value("payloadBase64").toString().toLatin1()));
     check(crossedForward.status == 200 &&
           !crossedForward.json.value("dirty").toBool() &&
@@ -3321,8 +3321,8 @@ void exerciseHydraulicDraftMembershipHttp() {
     const Response suspended = archiveClient.call("POST", archivedPath, suspendedBody);
     const Response suspendedCursor = archiveClient.call("GET", archivedCursorPath);
     const Response earlierView = archiveClient.call("GET", path + "/networks/" + networkId);
-    const std::optional<NetworkHydraulic> earlierNetwork =
-        native::ModelCodec<NetworkHydraulic>::decode(QByteArray::fromBase64(
+    const std::optional<NetworkHydraulicDistribution> earlierNetwork =
+        native::ModelCodec<NetworkHydraulicDistribution>::decode(QByteArray::fromBase64(
             earlierView.json.value("payloadBase64").toString().toLatin1()));
     check(suspended.status == 200 && suspended.json.value("generation") == "21" &&
           suspended.json.value("eventCount") == "1" &&
@@ -3353,8 +3353,8 @@ void exerciseHydraulicDraftMembershipHttp() {
     const Response redone = archiveClient.call("POST", archivedPath,
         liveNavigation(QString::fromStdString(native::UuidV7::generate().toString()), "22", "1"));
     const Response redoneView = archiveClient.call("GET", path + "/networks/" + networkId);
-    const std::optional<NetworkHydraulic> redoneNetwork =
-        native::ModelCodec<NetworkHydraulic>::decode(QByteArray::fromBase64(
+    const std::optional<NetworkHydraulicDistribution> redoneNetwork =
+        native::ModelCodec<NetworkHydraulicDistribution>::decode(QByteArray::fromBase64(
             redoneView.json.value("payloadBase64").toString().toLatin1()));
     check(redone.status == 200 && redone.json.value("generation") == "23" &&
           redoneView.status == 200 && redoneNetwork &&
@@ -3409,8 +3409,8 @@ void exerciseHydraulicDraftMembershipHttp() {
     const Response forkSaved = archiveClient.call("POST", path + "/save-events", forkBody);
     const Response forkCursor = archiveClient.call("GET", archivedCursorPath);
     const Response forkView = archiveClient.call("GET", path + "/networks/" + networkId);
-    const std::optional<NetworkHydraulic> forkNetwork =
-        native::ModelCodec<NetworkHydraulic>::decode(QByteArray::fromBase64(
+    const std::optional<NetworkHydraulicDistribution> forkNetwork =
+        native::ModelCodec<NetworkHydraulicDistribution>::decode(QByteArray::fromBase64(
             forkView.json.value("payloadBase64").toString().toLatin1()));
     const native::WorkingCopyInfo forkDraft = service.workingCopy(draftId, true);
     check(forkSaved.status == 200 && forkSaved.json.value("generation") == "26" &&
@@ -3458,8 +3458,8 @@ void exerciseHydraulicDraftMembershipHttp() {
     const Response forkRedone = archiveClient.call("POST", archivedPath,
         liveNavigation(QString::fromStdString(native::UuidV7::generate().toString()), "27", "1"));
     const Response forkRedoView = archiveClient.call("GET", path + "/networks/" + networkId);
-    const std::optional<NetworkHydraulic> forkRedoneNetwork =
-        native::ModelCodec<NetworkHydraulic>::decode(QByteArray::fromBase64(
+    const std::optional<NetworkHydraulicDistribution> forkRedoneNetwork =
+        native::ModelCodec<NetworkHydraulicDistribution>::decode(QByteArray::fromBase64(
             forkRedoView.json.value("payloadBase64").toString().toLatin1()));
     check(forkUndone.status == 200 && forkUndone.json.value("generation") == "27" &&
           forkAtBase.json.value("selectionKind") == "draft" &&

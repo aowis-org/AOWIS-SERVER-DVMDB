@@ -24,7 +24,7 @@ deployment configuration, not access control.
 | Save model changes | `saveWorkingCopyChanges` | `POST /working-copies/{id}/save` |
 | Save MODEL events + changes | `saveWorkingCopyTransactions` | `POST /working-copies/{id}/save-events` |
 | Create the first network (unborn draft) | via `saveWorkingCopyChanges` | `POST /working-copies/{id}/initialize-network` |
-| Read one hydraulic network | — | `GET /working-copies/{id}/networks/{networkId}` |
+| Read one hydraulic distribution network | — | `GET /working-copies/{id}/networks/{networkId}` |
 | Summarize saved HEAD network(s) | native candidate/materialization | `GET /working-copies/{id}/networks/summary` |
 | Import network into untouched unborn draft | private saved draft import | `POST /working-copies/{id}/import-network` |
 | Release the lease | `releaseWorkingCopyLease` | `POST /working-copies/{id}/release` |
@@ -162,7 +162,7 @@ count, digest and cleared cursor together. It never truncates the previously
 acknowledged journal file in place. Leases, releases and listings touch only
 the small `meta` record. The response follows durable publication.
 
-`initialize-network` creates the first, empty hydraulic network in an
+`initialize-network` creates the first, empty hydraulic distribution network in an
 untouched unborn draft: it writes a server-built network root through the
 fenced Save path and leaves the branch HEAD null. Repeating it at exactly the
 next generation with the same root returns the saved draft; anything else is

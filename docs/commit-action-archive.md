@@ -8,7 +8,7 @@ the draft rebases; archived actions are not.
 
 The backend provides read-only HTTP timelines and fenced HTTP/native
 selection of archived Commit boundaries and retained active journal actions
-for one unambiguous hydraulic network. It supports safe position-zero
+for one unambiguous hydraulic distribution network. It supports safe position-zero
 handoff across Commit boundaries while preserving original Redo frames.
 The GUI dock uses these HTTP operations; a MODEL Save from a verified
 archived coordinate starts a fresh logical action path. Sparse navigation,
@@ -124,7 +124,7 @@ confirmed passing run against the current correction.
 
 ## HTTP active-journal action selection
 
-For **one existing hydraulic network** in a committed base, the draft-scoped
+For **one existing hydraulic distribution network** in a committed base, the draft-scoped
 `GET /working-copies/{draftId}/history/cursor` reports the saved journal tip
 and selected action boundary. `POST /working-copies/{draftId}/history/navigate`
 accepts only an explicit boundary, UUIDv7 operation ID, session/fencing token,
@@ -189,11 +189,11 @@ operation.
 ### Reconciliation after a lost History acknowledgement
 
 `GET /working-copies/{draftId}/history/reconcile?networkId={uuid}` reports
-the canonical `NetworkHydraulic` SHA-256, saved generation, session ID,
+the canonical `NetworkHydraulicDistribution` SHA-256, saved generation, session ID,
 active or archived History coordinate, journal count and last successful
 navigation UUID/source generation. It is read-only and returns no network
 frames. A digest match alone does not establish the selected editing
-boundary: different actions may yield byte-identical hydraulic networks.
+boundary: different actions may yield byte-identical hydraulic distribution networks.
 The GUI must verify the operation identity, cursor and generation as well.
 
 If the server has already published the requested operation AND its digest
