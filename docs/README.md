@@ -20,6 +20,13 @@ different claims.
 | Commit/working-copy integrity versus solver feasibility | [Validation boundary](model-validity-boundary-audit.md) |
 | Clone/Fetch primitives, tracking and merge | [Offline synchronization](offline-repository-synchronization.md), [tracking](repository-tracking.md), [merge](native-hydraulic-merging.md) |
 
+## Planned map annotation storage (A1, not implemented)
+
+The [annotation persistence design](map-annotation-persistence-design.md)
+defines separate revisioned annotation-layer roots and records alongside
+engineering network roots. It is a **future implementation contract**, not
+a description of currently available DVMDB record kinds or endpoints.
+
 ## APIs, deployment and validation
 
 | Area | Documentation |
