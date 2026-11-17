@@ -1,9 +1,14 @@
 # Versioned map annotation layers — DVMDB storage design (A1)
 
-**Status:** agreed design, **not implemented**. Implementation is planned for
-B1–B4. The canonical MODEL contract is in the MODEL repository at
-`docs/map-annotations-contract.md`. These proposals do not describe APIs or
-record types already present in the current binary.
+**Status:** B1, increment 1/2 has implemented an isolated native annotation
+record adapter (`map_annotation_persistence.h/.cpp`) with kinds 110/111/112,
+bounded 256-member chunks, canonical MODEL payloads, deterministic chunk IDs,
+exact reference-index checks, pinned-revision reads and native-record tests.
+The project-wide candidate verifier, hydraulic 18-to-17 removal, layer discovery,
+logical membership edits, HTTP/draft publication and history integration are
+**not yet implemented** and remain B1.2–B4. These standalone format builders
+are not HTTP/GUI write APIs. The canonical MODEL contract is in the MODEL
+repository at `docs/map-annotations-contract.md`.
 
 ## Storage boundary
 
@@ -22,10 +27,12 @@ collection, hidden compatibility type, or dual writer remains. The old
 
 ## Proposed native record graph
 
-Reserve the currently unused native kinds **110** (`annotation layer root`),
-**111** (`annotation membership chunk`) and **112** (`MapAnnotation` member)
-for implementation. Confirm that the kind registry still has no collision
-when B1 starts; once used, kinds must be validated, not blindly inferred.
+Native kinds **110** (`annotation layer root`), **111** (`annotation
+membership chunk`) and **112** (`MapAnnotation` member) are now used by the B1
+record adapter. Their payload formats carry explicit magic/version markers and
+reject wrong-kind, malformed, noncanonical and mismatched-reference records.
+The generic native store is still model-agnostic; candidate-wide kind/owner
+closure is the next gate, not a guarantee of this isolated record codec.
 These IDs are native storage kinds, distinct from MODEL entity type names.
 
 ```text
@@ -152,3 +159,29 @@ branch additions; archive/revision coverage; replication and crash recovery.
 
 **A1 is documentation only**: no native kinds, route handlers, or new MODEL
 code have been installed by this step.
+
+## B1 implementation gate
+
+B1.1 is a **record-format increment**, not a complete editable persistence
+feature. `fullDraftAnnotationLayerChanges()` builds root, chunks and individual
+records for one layer and returns an ordinary `ModelChange` set. The caller must
+provide the owning distribution network record in the same candidate. The
+`loadAnnotationLayerAtRevision()` wrapper pins the entire read to one immutable
+revision. An empty layer is represented by a root without chunks. Chunk UUIDs
+are SHA-256-derived from a namespaced layer UUID and serial, with a maximum of
+4,096 chunks and 256 members per chunk. Independently addressed annotation
+records hold canonical MODEL bytes and optional anchor references.
+
+The builder and loader deliberately do **not** infer that an annotation belongs
+to a hydraulic network simply because it references some UUID. The missing
+candidate-wide ownership/anchor-closure validation is a hard B2 prerequisite
+before any untrusted draft publication or general import. The reader verifies
+owner record kind 100 when present, but full network-manifest verification and
+exactly-one-layer-per-distribution-network constraints remain to be implemented.
+
+DVMDB's archived submodule snapshot in the B1.1 input predates the A2/A3 MODEL
+annotation types. Update the actual MODEL Git submodule to the committed new
+MODEL contract as part of the **coordinated B1.2 update**. That step must also
+remove the old 18th hydraulic collection from DVMDB's adapter and fixtures;
+otherwise a full build with A3 MODEL will intentionally fail. No legacy shim
+will be added.

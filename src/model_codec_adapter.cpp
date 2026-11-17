@@ -1,47 +1,16 @@
 #include "aowis/dvmdb/model_codec_adapter.h"
+#include "aowis/dvmdb/model_record_conversion.h"
 #include "aowis/dvmdb/storage_error.h"
 
 #include <algorithm>
-#include <cstddef>
 #include <utility>
-#include <limits>
 
 namespace aowis::dvmdb::hydraulic {
 
-Key keyFromUuid(const QUuid& uuid) {
-    const QByteArray raw = uuid.toRfc4122();
-    if (raw.size() != 16 || uuid.isNull()) {
-        throw StorageError(StorageErrorKind::InvalidInput, "AOWIS model record requires a non-null UUID");
-    }
-    Key key{};
-    for (std::size_t i = 0; i < key.size(); ++i) {
-        key[i] = static_cast<std::uint8_t>(static_cast<unsigned char>(raw.at(static_cast<qsizetype>(i))));
-    }
-    return key;
-}
-
-QUuid uuidFromKey(const Key& key) {
-    const QByteArray raw(reinterpret_cast<const char*>(key.data()),
-                         static_cast<qsizetype>(key.size()));
-    return QUuid::fromRfc4122(raw);
-}
-
-Bytes bytesFromQByteArray(const QByteArray& data) {
-    Bytes result;
-    result.reserve(static_cast<std::size_t>(data.size()));
-    for (const char byte : data) {
-        result.push_back(static_cast<std::uint8_t>(static_cast<unsigned char>(byte)));
-    }
-    return result;
-}
-
-QByteArray qByteArrayFromBytes(const Bytes& data) {
-    if (data.size() > static_cast<std::size_t>(std::numeric_limits<qsizetype>::max())) {
-        throw StorageError(StorageErrorKind::LimitExceeded, "canonical model payload too large");
-    }
-    return QByteArray(reinterpret_cast<const char*>(data.data()),
-                      static_cast<qsizetype>(data.size()));
-}
+Key keyFromUuid(const QUuid& uuid) { return record::keyFromUuid(uuid); }
+QUuid uuidFromKey(const Key& key) { return record::uuidFromKey(key); }
+Bytes bytesFromQByteArray(const QByteArray& bytes) { return record::bytesFromQByteArray(bytes); }
+QByteArray qByteArrayFromBytes(const Bytes& bytes) { return record::qByteArrayFromBytes(bytes); }
 
 ModelChange changeFor(const HydraulicNodeJunction& junction) {
     ModelRecord record;

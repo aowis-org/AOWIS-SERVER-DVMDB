@@ -537,6 +537,27 @@ if(AOWIS_DVMDB_WITH_MODEL_CODEC)
         # with the service archive after the hydraulic archive at link time.
         target_link_libraries(aowis-dvmdb-hydraulic PUBLIC
             aowis-dvmdb-project-service aowis-dvmdb-store AOWIS::Model)
+        # Native annotation records are independent of the hydraulic manifest.
+        # Their MODEL-backed values are stored alongside networks in the same
+        # revision index, using separate kinds 110/111/112.
+        add_library(aowis-dvmdb-annotations STATIC src/map_annotation_persistence.cpp)
+        add_library(AOWIS::DvmdbAnnotations ALIAS aowis-dvmdb-annotations)
+        target_compile_features(aowis-dvmdb-annotations PUBLIC cxx_std_20)
+        target_include_directories(aowis-dvmdb-annotations PUBLIC
+            "${CMAKE_CURRENT_SOURCE_DIR}/include")
+        target_link_libraries(aowis-dvmdb-annotations PUBLIC
+            aowis-dvmdb-store AOWIS::Model)
+        if(BUILD_TESTING)
+            add_executable(aowis-dvmdb-annotation-record-tests
+                tests/map_annotation_persistence_tests.cpp)
+            target_link_libraries(aowis-dvmdb-annotation-record-tests PRIVATE
+                aowis-dvmdb-annotations)
+            add_test(NAME aowis-dvmdb-annotation-record-tests
+                COMMAND aowis-dvmdb-annotation-record-tests)
+            set_tests_properties(aowis-dvmdb-annotation-record-tests PROPERTIES
+                LABELS "aowis;annotations")
+            add_dependencies(aowis-dvmdb-tests aowis-dvmdb-annotation-record-tests)
+        endif()
         add_executable(aowis-dvmdb-hydraulic-model-benchmark
             benchmarks/v5_model_benchmark.cpp)
         target_link_libraries(aowis-dvmdb-hydraulic-model-benchmark PRIVATE aowis-dvmdb-hydraulic)
