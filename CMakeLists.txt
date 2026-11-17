@@ -565,6 +565,28 @@ if(AOWIS_DVMDB_WITH_MODEL_CODEC)
             "${CMAKE_CURRENT_SOURCE_DIR}/include")
         target_link_libraries(aowis-dvmdb-annotations PUBLIC
             aowis-dvmdb-store AOWIS::Model)
+        # Cross-layer semantic checks need both the independent annotation
+        # adapter and the canonical hydraulic aggregate loader. Keep this as
+        # a separate target so annotation record I/O stays hydraulics-free.
+        add_library(aowis-dvmdb-annotation-integrity STATIC
+            src/map_annotation_snapshot_validation.cpp)
+        add_library(AOWIS::DvmdbAnnotationIntegrity ALIAS aowis-dvmdb-annotation-integrity)
+        target_compile_features(aowis-dvmdb-annotation-integrity PUBLIC cxx_std_20)
+        target_include_directories(aowis-dvmdb-annotation-integrity PUBLIC
+            "${CMAKE_CURRENT_SOURCE_DIR}/include")
+        target_link_libraries(aowis-dvmdb-annotation-integrity PUBLIC
+            aowis-dvmdb-annotations aowis-dvmdb-hydraulic)
+        if(BUILD_TESTING)
+            add_executable(aowis-dvmdb-annotation-integrity-tests
+                tests/map_annotation_snapshot_validation_tests.cpp)
+            target_link_libraries(aowis-dvmdb-annotation-integrity-tests PRIVATE
+                aowis-dvmdb-annotation-integrity)
+            add_test(NAME aowis-dvmdb-annotation-integrity-tests
+                COMMAND aowis-dvmdb-annotation-integrity-tests)
+            set_tests_properties(aowis-dvmdb-annotation-integrity-tests PROPERTIES
+                LABELS "aowis;annotations;integrity")
+            add_dependencies(aowis-dvmdb-tests aowis-dvmdb-annotation-integrity-tests)
+        endif()
         if(BUILD_TESTING)
             add_executable(aowis-dvmdb-annotation-record-tests
                 tests/map_annotation_persistence_tests.cpp)

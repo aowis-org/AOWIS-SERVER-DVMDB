@@ -206,3 +206,37 @@ candidate-wide ownership closure, referential integrity, and trusted layer
 creation for every new network remain **B2/B3**, respectively. In particular,
 `fullDraftHydraulicDistributionNetworkChanges` is not yet an all-domain
 project initializer and must not be mistaken for one.
+
+## B2 — Candidate-wide semantic integrity validator
+
+`AOWIS::DvmdbAnnotationIntegrity` now provides
+`annotations::validateAnnotationSnapshot(const MergeCandidate&)`. It accepts
+**the complete pinned candidate**, not a delta, and returns a diagnostic on
+failure. It checks:
+
+- Every format-3 Distribution root has **exactly one** layer; two networks may
+  not claim the same layer. The pre-network Drainage scope allows zero or one
+  separate, ownerless layer.
+- Canonical, typed hydraulic aggregates and native annotation layers are
+  reconstructed through their existing adapters before trusting references.
+  Their exact native record closure is checked against the enumerated keys:
+  no unowned member, dangling chunk, reused member, or unknown record kind.
+- Attached annotations can refer only to junctions, reservoirs, tanks or
+  demand points **in the layer's own Distribution network**, with an exact
+  canonical MODEL `entity_type`, not merely a matching UUID or record kind.
+- The independent layer adapter continues to check exact canonical root,
+  membership and member bytes, serialized references, and anchor existence.
+  Native reverse-index consistency remains the responsibility of the native
+  store's existing physical/reference verifier.
+
+This validation is an explicit **pre-publication prerequisite**, not a
+retroactive guarantee that all current `commitModel`, working-copy save,
+import, merge or history paths invoke it. The old hydraulic-only merge
+validator will still fail closed on annotation records until B3/B4 integrate
+annotation-aware reconciliation. **Never expose an untrusted annotation writer
+before wiring this validator to the actual fenced publication boundary**;
+validating one layer alone does not establish project-wide consistency.
+
+The B2 tests construct full in-memory candidates including real canonical
+hydraulic roots and typed entities; they include adversarial duplicate layers,
+missing owners, orphans, wrong kinds, cross-network anchors and mixed scopes.

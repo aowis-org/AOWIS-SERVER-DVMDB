@@ -20,13 +20,16 @@ different claims.
 | Commit/working-copy integrity versus solver feasibility | [Validation boundary](model-validity-boundary-audit.md) |
 | Clone/Fetch primitives, tracking and merge | [Offline synchronization](offline-repository-synchronization.md), [tracking](repository-tracking.md), [merge](native-hydraulic-merging.md) |
 
-## Revisioned map annotation records (B1)
+## Revisioned map annotation records (B1–B2)
 
 The [annotation persistence design](map-annotation-persistence-design.md)
 defines separate revisioned annotation-layer roots and records alongside
 engineering network roots. Native record kinds 110–112 are implemented.
-The candidate-wide integrity gate, editable API, and History integration
-remain B2–B4; this is not yet a user-facing annotation feature.
+`AOWIS::DvmdbAnnotationIntegrity` verifies full pinned candidates for
+network/layer cardinality, typed anchor scope, orphan records, and exact
+record ownership. **B3/B4 must still wire this gate to fenced publication,
+imports and merges**, then implement editable APIs and History integration;
+this is not yet a user-facing annotation feature.
 
 ## APIs, deployment and validation
 
