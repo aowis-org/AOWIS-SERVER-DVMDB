@@ -185,8 +185,7 @@ void testDraftDefaultsAreValid() {
            native::validateHydraulicEntityValues(HydraulicLinkPump{}).valid() &&
            native::validateHydraulicEntityValues(HydraulicLinkValve{}).valid() &&
            native::validateHydraulicEntityValues(HydraulicControlSimple{}).valid() &&
-           native::validateHydraulicEntityValues(HydraulicControlRule{}).valid() &&
-           native::validateHydraulicEntityValues(HydraulicMapLabel{}).valid(),
+           native::validateHydraulicEntityValues(HydraulicControlRule{}).valid(),
            "a default-constructed entity violates the value rules");
     NetworkHydraulicDistribution network;
     network.uuid = QUuid::createUuid();
@@ -353,8 +352,6 @@ void testRuleTable() {
              r.actions_else.append(HydraulicControlRuleAction{}); r.actions_else[0].setting.pump_speed_ratio = -1.0; }),
          ".actions_else[0].setting.pump_speed_ratio"},
         {"rule priority NaN", entity<HydraulicControlRule>([](HydraulicControlRule& r) { r.priority = nan; }), ".priority"},
-        {"label longitude 200", entity<HydraulicMapLabel>([](HydraulicMapLabel& l) {
-             l.coordinate_wgs84.longitude_deg = 200; }), ".coordinate_wgs84.longitude_deg"},
         // Network options
         {"hydraulic timestep 0", network([](NetworkHydraulicDistribution& n) { n.timestep_hydraulic_s = 0; }), ".timestep_hydraulic_s"},
         {"quality timestep 0", network([](NetworkHydraulicDistribution& n) { n.timestep_quality_s = 0; }), ".timestep_quality_s"},

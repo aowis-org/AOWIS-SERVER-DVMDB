@@ -101,7 +101,7 @@ ambiguous responses using the **same** operation ID and parameters; query
 persisted status rather than issuing a different Undo. Lost responses,
 conflicting writers and stale images fail closed.
 
-All 18 hydraulic collections, root metadata and native membership order
+All 17 hydraulic collections, root metadata and native membership order
 must round-trip byte-identically on Undo → Redo. Canonical model and UUID
 reference integrity remains mandatory. **Hydraulic solver feasibility is
 not** an Undo/Redo, Save or Commit gate.

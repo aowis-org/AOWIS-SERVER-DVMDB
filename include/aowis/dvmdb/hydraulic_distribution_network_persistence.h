@@ -193,7 +193,7 @@ std::optional<NetworkHydraulicDistribution> previewVerifiedHydraulicActionBounda
     const std::vector<Bytes>& oldestFirstFrames, std::size_t boundary,
     QString* error = nullptr);
 
-// Exactly the 18 top-level types persisted by saveHydraulicDistributionNetwork().
+// Exactly the 17 top-level types persisted by saveHydraulicDistributionNetwork().
 // The alternative order follows the manifest's collection order.
 using HydraulicEntity = std::variant<
     HydraulicPipeMaterial, HydraulicPatternTime, HydraulicCurveTankVolume,
@@ -201,7 +201,7 @@ using HydraulicEntity = std::variant<
     HydraulicCurveValveCharacteristic, HydraulicCurveGeneric, HydraulicNodeReservoir,
     HydraulicNodeJunction, HydraulicNodeTank, HydraulicDemandPoint, HydraulicLinkPipe,
     HydraulicLinkPump, HydraulicLinkValve, HydraulicControlSimple,
-    HydraulicControlRule, HydraulicMapLabel>;
+    HydraulicControlRule>;
 
 // Ordinal matches the corresponding alternative in HydraulicEntity, and the
 // canonical NetworkHydraulicDistribution collection order. This is an API enum, not a
@@ -223,8 +223,7 @@ enum class HydraulicEntityType : std::size_t {
     Pump,
     Valve,
     SimpleControl,
-    RuleControl,
-    MapLabel
+    RuleControl
 };
 
 struct HydraulicEntityChange {

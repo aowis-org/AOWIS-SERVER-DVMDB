@@ -35,7 +35,7 @@ unsupported structural merges rather than losing data.
 
 ## 4. Complete editor/import and working-copy qualification
 
-End-to-end verify `NetworkHydraulicDistribution` canonical bytes for all 18 collections
+End-to-end verify `NetworkHydraulicDistribution` canonical bytes for all 17 collections
 and root metadata under live GUI HTTP, embedded Standalone, process restart
 and lost Save/Commit acknowledgements. Test leases, generation/HEAD fencing,
 branch and revision deletion, first untouched-unborn import, large atomic

@@ -12,7 +12,7 @@ Prove a complete GUI session against an **independent server process**:
 create/edit a network, Commit twice, Undo/Redo and jump across the markers,
 edit from an archived position, Commit the fork and verify the original
 immutable revisions/action archives and correct logical ancestry. Test
-structural changes, all 18 hydraulic collections, network-root settings,
+structural changes, all 17 hydraulic collections, network-root settings,
 selection/renderer refresh and very long paginated branch History.
 
 ## Failure injection and recovery

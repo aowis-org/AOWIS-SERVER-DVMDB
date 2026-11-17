@@ -846,7 +846,7 @@ QJsonObject verifiedHistoryNetworkDelta(const NetworkHydraulicDistribution& befo
         } \
         requireInput(projected == desired, "History membership move verification failed"); \
     }
-    // Keep in sync with the 18 canonical hydraulic collections used by the
+    // Keep in sync with the 17 canonical hydraulic collections used by the
     // native manifest and the GUI's typed MODEL registry.
     HISTORY_COLLECTION_DIFF(pipe_materials, HydraulicPipeMaterial, 8)
     HISTORY_COLLECTION_DIFF(patterns_time, HydraulicPatternTime, 9)
@@ -865,7 +865,6 @@ QJsonObject verifiedHistoryNetworkDelta(const NetworkHydraulicDistribution& befo
     HISTORY_COLLECTION_DIFF(links_valves, HydraulicLinkValve, 6)
     HISTORY_COLLECTION_DIFF(controls_simple, HydraulicControlSimple, 16)
     HISTORY_COLLECTION_DIFF(controls_rules, HydraulicControlRule, 17)
-    HISTORY_COLLECTION_DIFF(map_labels, HydraulicMapLabel, 18)
 #undef HISTORY_COLLECTION_DIFF
     return QJsonObject{{"version", 1}, {"networkId", uuidString(before.uuid)},
                        {"fromSha256", historyNetworkDigest(before)},
@@ -1212,7 +1211,6 @@ QJsonObject hydraulicDistributionNetworkSummaryJson(const NetworkHydraulicDistri
         {"demandPoints", network.demand_points.size()},
         {"controls", network.controls_simple.size()},
         {"rules", network.controls_rules.size()},
-        {"mapLabels", network.map_labels.size()},
         {"pipeMaterials", network.pipe_materials.size()},
         {"timePatterns", network.patterns_time.size()},
         {"tankVolumeCurves", network.curves_tank_volume.size()},
@@ -2469,7 +2467,7 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                     // Every membership transition must be the exact
                     // before/after image in the MODEL event journal. Otherwise
                     // future undo/redo could reverse a different model.
-                    const std::array<QString, 18> memberTypes = {
+                    const std::array<QString, 17> memberTypes = {
                         QStringLiteral("HydraulicPipeMaterial"),
                         QStringLiteral("HydraulicPatternTime"),
                         QStringLiteral("HydraulicCurveTankVolume"),
@@ -2486,8 +2484,7 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                         QStringLiteral("HydraulicLinkPump"),
                         QStringLiteral("HydraulicLinkValve"),
                         QStringLiteral("HydraulicControlSimple"),
-                        QStringLiteral("HydraulicControlRule"),
-                        QStringLiteral("HydraulicMapLabel")
+                        QStringLiteral("HydraulicControlRule")
                     };
                     std::map<Key, aowis::model::ModelEntityEdit> eventMembership;
                     std::set<Key> intentKeys;

@@ -27,7 +27,7 @@
 namespace aowis::dvmdb::hydraulic {
 namespace {
 
-// Persist all 18 canonical hydraulic entity types using native numeric
+// Persist all 17 canonical hydraulic entity types using native numeric
 // kind IDs for the native engine. The original junction/pipe
 // values remain unchanged. These are NOT public stable wire type tags.
 #define AOWIS_DVMDB_HYDRAULIC_COLLECTIONS(X) \
@@ -47,14 +47,13 @@ namespace {
     X(links_pumps, HydraulicLinkPump, 5) \
     X(links_valves, HydraulicLinkValve, 6) \
     X(controls_simple, HydraulicControlSimple, 16) \
-    X(controls_rules, HydraulicControlRule, 17) \
-    X(map_labels, HydraulicMapLabel, 18)
+    X(controls_rules, HydraulicControlRule, 17)
 
 constexpr quint32 manifestMagic = 0x414E5835U;
-constexpr quint32 manifestVersion = 2; // pre-release format: chunk references, not flat lists
+constexpr quint32 manifestVersion = 3; // pre-release format: chunk references, not flat lists
 constexpr quint32 chunkMagic = 0x41434B32U; // ACK2
 constexpr quint32 chunkVersion = 1;
-constexpr std::size_t collectionCount = 18;
+constexpr std::size_t collectionCount = 17;
 constexpr qsizetype maxManifestBytes = 256 * 1024 * 1024;
 constexpr qsizetype chunkCapacity = 256;
 constexpr std::uint16_t chunkKind = 101;
@@ -459,21 +458,10 @@ bool scalarOnlyChange(const HydraulicEntity& proposed, const ModelRecord& old,
         return ModelCodec<HydraulicNodeJunction>::encode(expected) ==
                ModelCodec<HydraulicNodeJunction>::encode(*changed);
     }
-    if (const HydraulicMapLabel* changed = std::get_if<HydraulicMapLabel>(&proposed)) {
-        if (old.kind != 18) return false;
-        QString error;
-        const std::optional<HydraulicMapLabel> prior = ModelCodec<HydraulicMapLabel>::decode(
-            qByteArrayFromBytes(old.payload), &error);
-        if (!prior || prior->uuid != uuid) return false;
-        HydraulicMapLabel expected = *prior;
-        expected.text = changed->text;
-        return ModelCodec<HydraulicMapLabel>::encode(expected) ==
-               ModelCodec<HydraulicMapLabel>::encode(*changed);
-    }
     return false;
 }
 
-// Exactly match the canonical validator's reference extraction for the three
+// Exactly match the canonical validator's reference extraction for the two
 // scalar-edit types. An invalid or noncanonical old reference index must not
 // be propagated by the fast path, even if the new payload changes no links.
 std::vector<Key> scalarReferences(const HydraulicEntity& entity) {
@@ -488,8 +476,6 @@ std::vector<Key> scalarReferences(const HydraulicEntity& entity) {
     } else if (const HydraulicNodeJunction* node = std::get_if<HydraulicNodeJunction>(&entity)) {
         for (const HydraulicDemand& demand : node->demands) append(demand.pattern_uuid);
         append(node->quality_source.pattern_uuid);
-    } else if (const HydraulicMapLabel* label = std::get_if<HydraulicMapLabel>(&entity)) {
-        append(label->anchor_node_uuid);
     }
     std::sort(references.begin(), references.end());
     references.erase(std::unique(references.begin(), references.end()), references.end());
@@ -759,8 +745,7 @@ std::optional<RevisionType> tryIndexedMembershipEditsUsing(
                 !std::holds_alternative<HydraulicLinkValve>(*change.value) &&
                 !std::holds_alternative<HydraulicDemandPoint>(*change.value) &&
                 !std::holds_alternative<HydraulicControlSimple>(*change.value) &&
-                !std::holds_alternative<HydraulicControlRule>(*change.value) &&
-                !std::holds_alternative<HydraulicMapLabel>(*change.value)) return std::nullopt;
+                !std::holds_alternative<HydraulicControlRule>(*change.value)) return std::nullopt;
             if (readModel(key)) return std::nullopt;
             const aowis::dvmdb::ModelValidationReport values =
                 std::visit(ValidateMembershipEntity{}, *change.value);
@@ -811,7 +796,7 @@ std::optional<RevisionType> tryIndexedMembershipEditsUsing(
                     ModelCodec<HydraulicLinkPipe>::decode(qByteArrayFromBytes(old->payload), &error);
                 if (!value || value->uuid != change.uuid) return std::nullopt;
                 decoded = HydraulicEntity{*value};
-            } else if (old->kind == 7 || old->kind == 16 || old->kind == 17 || old->kind == 18) {
+            } else if (old->kind == 7 || old->kind == 16 || old->kind == 17) {
                 switch (old->kind) {
 #define DECODE_DEPENDENT(type, expectedKind, ordinal) \
                     case expectedKind: { \
@@ -825,7 +810,6 @@ std::optional<RevisionType> tryIndexedMembershipEditsUsing(
                     DECODE_DEPENDENT(HydraulicDemandPoint, 7, HydraulicEntityType::DemandPoint)
                     DECODE_DEPENDENT(HydraulicControlSimple, 16, HydraulicEntityType::SimpleControl)
                     DECODE_DEPENDENT(HydraulicControlRule, 17, HydraulicEntityType::RuleControl)
-                    DECODE_DEPENDENT(HydraulicMapLabel, 18, HydraulicEntityType::MapLabel)
 #undef DECODE_DEPENDENT
                     default: return std::nullopt;
                 }
@@ -968,8 +952,6 @@ std::optional<RevisionType> tryIndexedMembershipEditsUsing(
                 if (!validTarget(action.link_uuid, {pipeKind, 5, 6})) return std::nullopt;
             for (const HydraulicControlRuleAction& action : rule->actions_else)
                 if (!validTarget(action.link_uuid, {pipeKind, 5, 6})) return std::nullopt;
-        } else if (const HydraulicMapLabel* label = std::get_if<HydraulicMapLabel>(&*change.value)) {
-            if (!nodeTarget(label->anchor_node_uuid)) return std::nullopt;
         } else if (change.value->index() >= 8) return std::nullopt;
         // Catalogue entries have no outgoing refs.
     }
@@ -1414,15 +1396,13 @@ std::optional<RevisionId> tryIndexedUuidScalarEdits(
             change.uuid.isNull() || change.uuid == networkUuid) return std::nullopt;
         const Key key = keyFromUuid(change.uuid);
         if (!seen.insert(key).second) return std::nullopt;
-        // Only the three scalar-whitelisted entity types are eligible.
+        // Only the two scalar-whitelisted entity types are eligible.
         // Use concrete types, never an unchecked variant alternative.
         const HydraulicLinkPipe* pipe = std::get_if<HydraulicLinkPipe>(&*change.value);
         const HydraulicNodeJunction* junction =
             std::get_if<HydraulicNodeJunction>(&*change.value);
-        const HydraulicMapLabel* label = std::get_if<HydraulicMapLabel>(&*change.value);
         if ((!pipe || pipe->uuid != change.uuid) &&
-            (!junction || junction->uuid != change.uuid) &&
-            (!label || label->uuid != change.uuid)) return std::nullopt;
+            (!junction || junction->uuid != change.uuid)) return std::nullopt;
         if (!ownerChunkAtRevision(repository, project, expectedHead, networkUuid, key))
             return std::nullopt;
         const std::optional<ModelRecord> old =
@@ -1438,9 +1418,6 @@ std::optional<RevisionId> tryIndexedUuidScalarEdits(
         } else if (junction) {
             values = aowis::dvmdb::validateHydraulicEntityValues(*junction);
             updated.payload = bytesFromQByteArray(ModelCodec<HydraulicNodeJunction>::encode(*junction));
-        } else {
-            values = aowis::dvmdb::validateHydraulicEntityValues(*label);
-            updated.payload = bytesFromQByteArray(ModelCodec<HydraulicMapLabel>::encode(*label));
         }
         if (!values.valid())
             throw StorageError(StorageErrorKind::InvalidInput,
@@ -2176,7 +2153,7 @@ std::optional<NetworkHydraulicDistribution> previewVerifiedHydraulicActionBounda
 // network. MODEL frames do not contain a network owner for a new member; in
 // multi-network drafts that owner must be proved rather than guessed. Multiple
 // roots therefore remain ineligible for this API until cross-network
-// attribution is implemented. All 18 member kinds and root metadata use the
+// attribution is implemented. All 17 member kinds and root metadata use the
 // same already-verified canonical transaction replay below.
 std::optional<VerifiedHydraulicDraftActionNavigationPlan>
 planVerifiedHydraulicDraftActionNavigation(
@@ -2519,7 +2496,7 @@ ModelChange materializeDraftRootEdit(
     if (!validation.report.valid())
         throw StorageError(StorageErrorKind::InvalidInput,
                            "invalid network-root metadata: " + validation.report.summary().toStdString());
-    manifest.metadata = *after; // all 18 member lists remain in existing chunks
+    manifest.metadata = *after; // all 17 member lists remain in existing chunks
     ModelRecord changed = *root;
     changed.payload = bytesFromQByteArray(encodeManifest(manifest));
     return ModelChange{rootKey, std::move(changed)};
@@ -2620,9 +2597,10 @@ void materializeDraftMembership(
     if (intents.empty()) return;
     if (intents.size() > 128)
         throw StorageError(StorageErrorKind::InvalidInput, "too many hydraulic membership intents");
-    constexpr std::array<std::uint16_t, collectionCount> kinds = {
-        8, 9, 10, 11, 12, 13, 14, 15, 2, junctionKind, 3, 7,
-        pipeKind, 5, 6, 16, 17, 18
+    static constexpr std::array<std::uint16_t, collectionCount> kinds = {
+#define MEMBERSHIP_KIND(name, type, kind) static_cast<std::uint16_t>(kind),
+        AOWIS_DVMDB_HYDRAULIC_COLLECTIONS(MEMBERSHIP_KIND)
+#undef MEMBERSHIP_KIND
     };
     const std::function<void(std::uint16_t, const Key&, const ModelRecord&)> validatePayload =
         [](std::uint16_t expectedKind, const Key& entityId, const ModelRecord& record) {
@@ -3183,7 +3161,7 @@ MergeResolution resolveHydraulicRecord(const Key& key, const ModelRecord& base,
         "hydraulic.curve_generic", "hydraulic.reservoir", "hydraulic.junction",
         "hydraulic.tank", "hydraulic.demand_point", "hydraulic.pipe",
         "hydraulic.pump", "hydraulic.valve", "hydraulic.control_simple",
-        "hydraulic.control_rule", "hydraulic.map_label"
+        "hydraulic.control_rule"
     };
     const std::array<std::uint16_t, collectionCount> kinds = {
 #define MERGE_CODE(name, type, kind) static_cast<std::uint16_t>(kind),

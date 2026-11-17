@@ -1407,7 +1407,7 @@ paths:
       operationId: getCommittedHydraulicDistributionNetworkSummary
       description: |
         Revision-pinned inventory of canonical hydraulic distribution network roots and
-        their 18 collection counts. This is the COMMITTED snapshot only; an
+        their 17 collection counts. This is the COMMITTED snapshot only; an
         unborn HEAD returns zero committed networks, which does not prove a
         private working copy contains no network or changes. Clients must
         not use this endpoint to authorize destructive draft imports.

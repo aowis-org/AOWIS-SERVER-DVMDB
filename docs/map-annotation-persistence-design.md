@@ -1,19 +1,19 @@
 # Versioned map annotation layers — DVMDB storage design (A1)
 
-**Status:** B1, increment 1/2 has implemented an isolated native annotation
+**Status:** B1, increment 2/2 has completed the native annotation
 record adapter (`map_annotation_persistence.h/.cpp`) with kinds 110/111/112,
 bounded 256-member chunks, canonical MODEL payloads, deterministic chunk IDs,
 exact reference-index checks, pinned-revision reads and native-record tests.
-The project-wide candidate verifier, hydraulic 18-to-17 removal, layer discovery,
-logical membership edits, HTTP/draft publication and history integration are
-**not yet implemented** and remain B1.2–B4. These standalone format builders
+The 18-to-17 hydraulic collection break is complete in B1.2. Project-wide
+format/owner closure, layer discovery, logical membership edits, HTTP/draft
+publication and history integration remain **B2–B4**. These standalone format builders
 are not HTTP/GUI write APIs. The canonical MODEL contract is in the MODEL
 repository at `docs/map-annotations-contract.md`.
 
 ## Storage boundary
 
 An annotation is project data with an engineering-domain scope, **not a member
-of the hydraulic network's 18-collection manifest**. A project repository's
+of the hydraulic network's 17-collection manifest**. A project repository's
 immutable revision already holds a UUID-keyed model trie and reverse-reference
 trie. Add a separate `MapAnnotationLayer` root and independently addressed
 annotation members to that *same* revision snapshot. No separate database,
@@ -185,3 +185,24 @@ MODEL contract as part of the **coordinated B1.2 update**. That step must also
 remove the old 18th hydraulic collection from DVMDB's adapter and fixtures;
 otherwise a full build with A3 MODEL will intentionally fail. No legacy shim
 will be added.
+
+## B1.2 — clean hydraulic contract transition
+
+The native hydraulic collection manifest is now **17** collections (member
+kinds `1..17`; kind `18` is retired), with manifest version **3**. This is an
+intentional pre-release format break; old 18-collection manifolds are rejected,
+not migrated. The canonical MODEL dependency must provide the **A3** types,
+with the independent annotation codecs and without `HydraulicMapLabel`.
+CMake rejects a stale MODEL submodule at configure time. Tests previously
+using labels to exercise general membership/merge/history behavior now use
+ordinary hydraulic generic curves; annotation-specific storage is tested in
+its independent record suite.
+
+The B1 record tests also commit a real hydraulic distribution root and its
+annotation layer in **one immutable revision**, then reload both at that
+pinned revision. This proves the record formats coexist, not that the
+exactly-one-layer ownership rule is enforced on all ingress paths. Mandatory
+candidate-wide ownership closure, referential integrity, and trusted layer
+creation for every new network remain **B2/B3**, respectively. In particular,
+`fullDraftHydraulicDistributionNetworkChanges` is not yet an all-domain
+project initializer and must not be mistaken for one.

@@ -174,23 +174,24 @@ int main(int argc, char** argv) {
         newPipe.uuid = uuid(4000011);
         newPipe.node_uuid_from = network.nodes_junctions[0].uuid;
         newPipe.node_uuid_to = newNode.uuid;
-        HydraulicMapLabel newLabel;
-        newLabel.uuid = uuid(4000012);
-        newLabel.anchor_node_uuid = newNode.uuid;
+        HydraulicControlSimple newControl;
+        newControl.uuid = uuid(4000012);
+        newControl.link_uuid = newPipe.uuid;
+        newControl.trigger_node_uuid = newNode.uuid;
         const std::chrono::steady_clock::time_point insertStart = std::chrono::steady_clock::now();
         hydraulic::HydraulicEditDiagnostics membershipStats;
         editMain(
             {{newPipe.uuid, hydraulic::HydraulicEntity{newPipe}},
              {newNode.uuid, hydraulic::HydraulicEntity{newNode}},
-             {newLabel.uuid, hydraulic::HydraulicEntity{newLabel}}}, &membershipStats);
+             {newControl.uuid, hydraulic::HydraulicEntity{newControl}}}, &membershipStats);
         if (!membershipStats.indexedMembershipFastPath || membershipStats.validatedEntities != 3)
             throw std::runtime_error("expected indexed membership insertion");
         const double insertionMs = elapsedMs(insertStart);
         const std::chrono::steady_clock::time_point removalStart = std::chrono::steady_clock::now();
         editMain(
-            {{newLabel.uuid, std::nullopt}}, &membershipStats);
+            {{newControl.uuid, std::nullopt}}, &membershipStats);
         if (!membershipStats.indexedMembershipFastPath || membershipStats.validatedEntities != 1)
-            throw std::runtime_error("expected indexed label removal");
+            throw std::runtime_error("expected indexed control removal");
         const double removalMs = elapsedMs(removalStart);
         const std::chrono::steady_clock::time_point deleteBatchStart = std::chrono::steady_clock::now();
         editMain(

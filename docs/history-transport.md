@@ -15,7 +15,7 @@ the original MODEL frames and destination, then atomically publishes the
 HEAD-relative private candidate and the cursor. Its HTTP `historyDelta`
 contains the source and destination **canonical SHA-256** digests, changed
 typed entity before/after images (including network-root metadata) and
-ordered membership moves across the 18 collections. It does **not** return
+ordered membership moves across the 17 collections. It does **not** return
 every unchanged entity or a full `NetworkHydraulicDistribution` just to Undo one action.
 
 The server can reconstruct full snapshots internally; this is not a full

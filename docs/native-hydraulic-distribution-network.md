@@ -37,12 +37,13 @@ hydraulic network supertype.
 * The reverse-reference index answers "who refers to this entity" for
   ownership and deletion checks.
 
-The 18 top-level collections, in their fixed order (the `type` /
-`collectionIndex` 0–17 used by the API): pipe materials; time patterns; tank
+The 17 top-level collections, in their fixed order (the `type` /
+`collectionIndex` 0–16 used by the API): pipe materials; time patterns; tank
 volume, pump head, pump efficiency, valve headloss, valve characteristic and
 general curves; reservoirs, junctions, tanks; demand points; pipes, pumps,
-valves; simple controls, rule controls and map labels. Nested MSX settings and
-map backdrop data live inside the appropriate records.
+valves; simple controls and rule controls. Map annotations are stored in
+independent revisioned layer/member records, not in the hydraulic manifest.
+Nested MSX settings and map backdrop data live inside their respective records.
 
 Encoding validates UUID kind and uniqueness, finite values, reference closure,
 membership order and the MODEL value rules. An entity UUID never silently
@@ -137,7 +138,7 @@ GUI activation and unborn-base navigation remain outstanding. See
 
 ## Tests
 
-`aowis-dvmdb-hydraulic-distribution-network-tests` covers all 18 collections, the 256-member
+`aowis-dvmdb-hydraulic-distribution-network-tests` covers all 17 collections, the 256-member
 chunk boundaries, indexed and fallback edits, stale pins, physical and
 reference validation, merge choices and ancestry, fast-forward validation,
 concurrent immutable snapshots, compaction, reopening and archived-action

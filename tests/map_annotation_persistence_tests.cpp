@@ -1,4 +1,5 @@
 #include "aowis/dvmdb/map_annotation_persistence.h"
+#include "aowis/dvmdb/hydraulic_distribution_network_persistence.h"
 #include "aowis/dvmdb/model_record_conversion.h"
 #include "aowis/dvmdb/storage_error.h"
 #include "project_repository.h"
@@ -171,17 +172,44 @@ void testNativeRevisionRoundtrip() {
         db::test::ProjectRepository store(location);
         store.createBranch("main");
         const MapAnnotationLayer layer = distributionLayer();
-        db::ModelRecord owner;
-        owner.kind = 100;
-        owner.payload = {1};
+        // The owner is an actual 17-collection, format-3 hydraulic root,
+        // committed atomically with its annotation layer and members.
         std::vector<db::ModelChange> changes = ann::fullDraftAnnotationLayerChanges(
             layer, {annotation(11), annotation(12)});
-        changes.insert(changes.begin(), db::ModelChange{db::record::keyFromUuid(uuid(1)), owner});
+        changes.insert(changes.begin(),
+            aowis::dvmdb::hydraulic::emptyDraftHydraulicDistributionNetworkRoot(
+                uuid(1), QStringLiteral("B1 distribution network")));
         store.commitModel("main", changes);
         const db::RevisionId revision = store.head("main");
         const std::optional<ann::AnnotationLayerSnapshot> loaded =
             ann::loadAnnotationLayerAtRevision(store.native(), store.project(), revision, layer.uuid);
         require(loaded && loaded->annotations.size() == 2, "immutable revision lost annotation records");
+        const std::optional<NetworkHydraulicDistribution> network =
+            aowis::dvmdb::hydraulic::loadHydraulicDistributionNetworkAtRevision(
+                store.native(), store.project(), revision, uuid(1));
+        require(network && network->uuid == uuid(1),
+                "immutable revision lost owning hydraulic network");
+        // A later revision changes only presentation data. Historical
+        // annotation and network reads must remain pinned to their revision.
+        MapAnnotation modified = annotation(11);
+        modified.text = QStringLiteral("Annotation edited in newer revision");
+        store.commitModel("main", ann::fullDraftAnnotationLayerChanges(
+            layer, {modified, annotation(12)}));
+        const db::RevisionId newerRevision = store.head("main");
+        require(newerRevision != revision, "annotation edit did not create a new revision");
+        const std::optional<ann::AnnotationLayerSnapshot> previous =
+            ann::loadAnnotationLayerAtRevision(store.native(), store.project(), revision, layer.uuid);
+        const std::optional<ann::AnnotationLayerSnapshot> newer =
+            ann::loadAnnotationLayerAtRevision(store.native(), store.project(), newerRevision, layer.uuid);
+        require(previous && newer &&
+                previous->annotations.first().text == annotation(11).text &&
+                newer->annotations.first().text == modified.text,
+                "newer annotation revision modified historical records");
+        const std::optional<NetworkHydraulicDistribution> unchangedNetwork =
+            aowis::dvmdb::hydraulic::loadHydraulicDistributionNetworkAtRevision(
+                store.native(), store.project(), newerRevision, uuid(1));
+        require(unchangedNetwork && unchangedNetwork->uuid == uuid(1),
+                "annotation-only revision lost its hydraulic network");
         require(store.verifyRepository().revisions >= 1, "native reverse-reference verification failed");
     } catch (...) {
         std::filesystem::remove_all(location);

@@ -16,16 +16,17 @@ different claims.
 | Personal draft, Save and local Commit | [Working copies](working-copies.md), [private repositories](private-working-repositories.md) |
 | Continuous Undo/Redo and action archives | [History contract](history-contract.md), [original MODEL action archive](commit-action-archive.md) |
 | Sparse MODEL updates and SHA-256 recovery | [History transport/reconciliation](history-transport.md) |
-| Hydraulic root, 18 collections and references | [Hydraulic persistence](native-hydraulic-distribution-network.md), [MODEL records](model-records.md) |
+| Hydraulic root, 17 collections and references | [Hydraulic persistence](native-hydraulic-distribution-network.md), [MODEL records](model-records.md) |
 | Commit/working-copy integrity versus solver feasibility | [Validation boundary](model-validity-boundary-audit.md) |
 | Clone/Fetch primitives, tracking and merge | [Offline synchronization](offline-repository-synchronization.md), [tracking](repository-tracking.md), [merge](native-hydraulic-merging.md) |
 
-## Planned map annotation storage (A1, not implemented)
+## Revisioned map annotation records (B1)
 
 The [annotation persistence design](map-annotation-persistence-design.md)
 defines separate revisioned annotation-layer roots and records alongside
-engineering network roots. It is a **future implementation contract**, not
-a description of currently available DVMDB record kinds or endpoints.
+engineering network roots. Native record kinds 110–112 are implemented.
+The candidate-wide integrity gate, editable API, and History integration
+remain B2–B4; this is not yet a user-facing annotation feature.
 
 ## APIs, deployment and validation
 

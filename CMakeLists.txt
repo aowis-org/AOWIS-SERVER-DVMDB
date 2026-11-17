@@ -516,6 +516,24 @@ if(AOWIS_DVMDB_WITH_MODEL_CODEC)
                 "The MODEL submodule has an outdated distribution-root edit type. "
                 "Update it to the corrected NetworkHydraulicDistributionRoot version.")
         endif()
+        # An initialized but stale MODEL submodule still exports HydraulicMapLabel
+        # and does not provide the independent annotation codecs. Fail at configure
+        # time instead of leaving this inconsistency to dependent C++ targets.
+        if(NOT EXISTS "${AOWIS_DVMDB_MODEL_SOURCE_DIR}/include/aowis/model/map/map_annotation.h"
+           OR NOT EXISTS "${AOWIS_DVMDB_MODEL_SOURCE_DIR}/include/aowis/model/serialization/model_codec.h")
+            message(FATAL_ERROR
+                "DVMDB requires MODEL A3 (MapAnnotation/MapAnnotationLayer). "
+                "Update external/AOWIS-SERVER-MODEL before building.")
+        endif()
+        file(STRINGS
+            "${AOWIS_DVMDB_MODEL_SOURCE_DIR}/include/aowis/model/hydraulic/network_hydraulic_distribution.h"
+            AOWIS_DVMDB_LEGACY_MAP_LABEL
+            REGEX "map_labels|HydraulicMapLabel")
+        if(AOWIS_DVMDB_LEGACY_MAP_LABEL)
+            message(FATAL_ERROR
+                "DVMDB B1 requires MODEL A3 (17 hydraulic collections, format 2). "
+                "The checked-out MODEL still has legacy map labels; update the submodule.")
+        endif()
         if(NOT TARGET AOWIS::Model)
             add_subdirectory("${AOWIS_DVMDB_MODEL_SOURCE_DIR}"
                 "${CMAKE_CURRENT_BINARY_DIR}/aowis-server-model")
@@ -551,7 +569,7 @@ if(AOWIS_DVMDB_WITH_MODEL_CODEC)
             add_executable(aowis-dvmdb-annotation-record-tests
                 tests/map_annotation_persistence_tests.cpp)
             target_link_libraries(aowis-dvmdb-annotation-record-tests PRIVATE
-                aowis-dvmdb-annotations)
+                aowis-dvmdb-annotations aowis-dvmdb-hydraulic)
             add_test(NAME aowis-dvmdb-annotation-record-tests
                 COMMAND aowis-dvmdb-annotation-record-tests)
             set_tests_properties(aowis-dvmdb-annotation-record-tests PROPERTIES

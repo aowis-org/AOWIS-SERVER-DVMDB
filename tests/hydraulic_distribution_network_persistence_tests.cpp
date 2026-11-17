@@ -88,7 +88,8 @@ NetworkHydraulicDistribution completeNetwork() {
     n.curves_pump_efficiency.append(item<HydraulicCurvePumpEfficiency>(14));
     n.curves_valve_headloss.append(item<HydraulicCurveValveHeadloss>(15));
     n.curves_valve_characteristic.append(item<HydraulicCurveValveCharacteristic>(16));
-    n.curves_generic.append(item<HydraulicCurveGeneric>(17));
+    n.curves_generic.append(item<HydraulicCurveGeneric>(28));
+    n.curves_generic[0].id = QStringLiteral("Fixture curve Ω");
     n.nodes_reservoirs.append(item<HydraulicNodeReservoir>(18));
     n.nodes_junctions.append(item<HydraulicNodeJunction>(19));
     n.nodes_junctions.append(item<HydraulicNodeJunction>(20));
@@ -119,9 +120,6 @@ NetworkHydraulicDistribution completeNetwork() {
     HydraulicControlRuleAction action;
     action.link_uuid = uuid(24);
     n.controls_rules[0].actions_then.append(action);
-    n.map_labels.append(item<HydraulicMapLabel>(28));
-    n.map_labels[0].anchor_node_uuid = uuid(20);
-    n.map_labels[0].text = QStringLiteral("Well Ω");
     NetworkPresentationUnits units;
     units.name = QStringLiteral("Projekt-Einheiten µ");
     units.derived_from_profile = QStringLiteral("LPS");
@@ -171,7 +169,6 @@ void compareNetworks(const NetworkHydraulicDistribution& source, const NetworkHy
     CHECK_LIST(links_valves, HydraulicLinkValve)
     CHECK_LIST(controls_simple, HydraulicControlSimple)
     CHECK_LIST(controls_rules, HydraulicControlRule)
-    CHECK_LIST(map_labels, HydraulicMapLabel)
 #undef CHECK_LIST
 }
 
@@ -344,20 +341,17 @@ void exerciseUuidV7Hydraulic() {
             NetworkHydraulicDistribution scalarNetwork = baseline;
             scalarNetwork.links_pipes[0].diameter_mm = 143.25;
             scalarNetwork.nodes_junctions[0].elevation_m = 17.0;
-            scalarNetwork.map_labels[0].text = QStringLiteral("UUIDv7 indexed label");
             const std::vector<hydraulic::HydraulicEntityChange> scalarChanges{
                 {scalarNetwork.links_pipes[0].uuid,
                  hydraulic::HydraulicEntity{scalarNetwork.links_pipes[0]}},
                 {scalarNetwork.nodes_junctions[0].uuid,
-                 hydraulic::HydraulicEntity{scalarNetwork.nodes_junctions[0]}},
-                {scalarNetwork.map_labels[0].uuid,
-                 hydraulic::HydraulicEntity{scalarNetwork.map_labels[0]}}};
+                 hydraulic::HydraulicEntity{scalarNetwork.nodes_junctions[0]}}};
             hydraulic::HydraulicEditDiagnostics scalarStats;
             const native::RevisionId scalarHead = hydraulic::editHydraulicDistributionNetwork(
                 repository, project, "indexed-scalars", baseline.uuid,
                 scalarChanges, saved, commitMetadata(), &scalarStats);
             require(scalarHead != saved && scalarStats.indexedScalarFastPath &&
-                    scalarStats.validatedEntities == 3,
+                    scalarStats.validatedEntities == 2,
                     "UUIDv7 safe scalar edit did not use indexed records");
             require(repository.head(project, "main") == saved,
                     "UUIDv7 scalar edit moved unrelated branch HEAD");
@@ -644,8 +638,8 @@ void exerciseUuidV7IndexedReferences() {
                     "UUIDv7 dependent path accepted invalid assigned junction");
             // A mixed dependent/property batch cannot bypass whole-model
             // validation, and a rejected batch must not publish its valid part.
-            HydraulicMapLabel changedLabel = dependentExpected.map_labels[0];
-            changedLabel.text = QStringLiteral("UUIDv7 reference fallback");
+            HydraulicCurveGeneric changedLabel = dependentExpected.curves_generic[0];
+            changedLabel.id = QStringLiteral("UUIDv7 reference fallback");
             HydraulicControlSimple changedControl = control;
             changedControl.trigger_node_uuid = uuid(20);
             const native::RevisionId mixedHead = hydraulic::editHydraulicDistributionNetwork(
@@ -656,7 +650,7 @@ void exerciseUuidV7IndexedReferences() {
             require(mixedHead != dependentHead && !dependentStats.indexedDependentUpdateFastPath,
                     "UUIDv7 mixed dependent batch bypassed canonical validation");
             dependentExpected.controls_simple[0] = changedControl;
-            dependentExpected.map_labels[0] = changedLabel;
+            dependentExpected.curves_generic[0] = changedLabel;
             dependentHead = mixedHead;
             compareNetworks(dependentExpected, *hydraulic::loadHydraulicDistributionNetworkAtRevision(
                 repository, project, dependentHead, baseline.uuid));
@@ -719,9 +713,8 @@ void exerciseUuidV7IndexedMembership() {
             addedPipe.node_uuid_from = uuid(19);
             addedPipe.node_uuid_to = addedNode.uuid;
             addedPipe.material_uuid = uuid(10);
-            HydraulicMapLabel addedLabel = item<HydraulicMapLabel>(31112);
-            addedLabel.anchor_node_uuid = addedNode.uuid;
-            addedLabel.text = QStringLiteral("UUIDv7 new junction");
+            HydraulicCurveGeneric addedLabel = item<HydraulicCurveGeneric>(31112);
+            addedLabel.id = QStringLiteral("UUIDv7 new junction");
             const std::vector<hydraulic::HydraulicEntityChange> insertions{
                 {addedPipe.uuid, hydraulic::HydraulicEntity{addedPipe}},
                 {addedNode.uuid, hydraulic::HydraulicEntity{addedNode}},
@@ -738,7 +731,7 @@ void exerciseUuidV7IndexedMembership() {
                     "UUIDv7 insertion missed bounded membership path or changed source HEAD");
             expected.nodes_junctions.append(addedNode);
             expected.links_pipes.append(addedPipe);
-            expected.map_labels.append(addedLabel);
+            expected.curves_generic.append(addedLabel);
             compareNetworks(expected, *hydraulic::loadHydraulicDistributionNetworkAtRevision(
                 repository, project, membershipHead, baseline.uuid));
             const native::ModelRecord insertedRoot = *repository.getModelAtRevision(
@@ -774,9 +767,7 @@ void exerciseUuidV7IndexedMembership() {
             const std::vector<native::Key> incoming = repository.referencingModelAtRevision(
                 project, membershipHead, hydraulic::keyFromUuid(addedNode.uuid));
             require(std::find(incoming.begin(), incoming.end(),
-                             hydraulic::keyFromUuid(addedPipe.uuid)) != incoming.end() &&
-                    std::find(incoming.begin(), incoming.end(),
-                             hydraulic::keyFromUuid(addedLabel.uuid)) != incoming.end(),
+                             hydraulic::keyFromUuid(addedPipe.uuid)) != incoming.end(),
                     "UUIDv7 membership insertion lost dependent reference edges");
             require(throwsStorageError(native::StorageErrorKind::Conflict, [&] {
                 (void)hydraulic::editHydraulicDistributionNetwork(repository, project, "uuid-membership",
@@ -815,8 +806,8 @@ void exerciseUuidV7IndexedMembership() {
             require(afterLabel != membershipHead && stats.indexedMembershipFastPath &&
                     !repository.getModelAtRevision(
                         project, afterLabel, hydraulic::keyFromUuid(addedLabel.uuid)),
-                    "UUIDv7 independent label deletion missed indexed membership path");
-            expected.map_labels.removeLast();
+                    "UUIDv7 independent generic-curve deletion missed indexed membership path");
+            expected.curves_generic.removeLast();
             membershipHead = hydraulic::editHydraulicDistributionNetwork(
                 repository, project, "uuid-membership", baseline.uuid,
                 {{addedNode.uuid, std::nullopt}, {addedPipe.uuid, std::nullopt}},
@@ -837,8 +828,7 @@ void exerciseUuidV7IndexedMembership() {
             expected = baseline;
             // Mixed existing-record update and insertion is not a membership
             // fast path; it must use the complete canonical validator.
-            HydraulicMapLabel mixedLabel = item<HydraulicMapLabel>(31114);
-            mixedLabel.anchor_node_uuid = uuid(20);
+            HydraulicCurveGeneric mixedLabel = item<HydraulicCurveGeneric>(31114);
             HydraulicNodeJunction changedNode = baseline.nodes_junctions[0];
             changedNode.metadata.description = QStringLiteral("mixed batch");
             const native::RevisionId mixedHead = hydraulic::editHydraulicDistributionNetwork(
@@ -849,7 +839,7 @@ void exerciseUuidV7IndexedMembership() {
             require(mixedHead != membershipHead && !stats.indexedMembershipFastPath,
                     "UUIDv7 mixed structural batch bypassed full validation");
             expected.nodes_junctions[0] = changedNode;
-            expected.map_labels.append(mixedLabel);
+            expected.curves_generic.append(mixedLabel);
             membershipHead = mixedHead;
             compareNetworks(expected, *hydraulic::loadHydraulicDistributionNetworkAtRevision(
                 repository, project, membershipHead, baseline.uuid));
@@ -1101,12 +1091,10 @@ void exerciseUuidV7CoordinatedMembershipMerges() {
                     repository.createBranch(project, "append-right", "main") == base,
                     "UUIDv7 membership merge branches did not share the same base");
 
-            HydraulicMapLabel labelA = item<HydraulicMapLabel>(8501);
-            HydraulicMapLabel labelB = item<HydraulicMapLabel>(8502);
-            labelA.text = QStringLiteral("uuidv7 left append");
-            labelB.text = QStringLiteral("uuidv7 right append");
-            labelA.anchor_node_uuid = baseline.nodes_junctions[0].uuid;
-            labelB.anchor_node_uuid = baseline.nodes_junctions[0].uuid;
+            HydraulicCurveGeneric labelA = item<HydraulicCurveGeneric>(8501);
+            HydraulicCurveGeneric labelB = item<HydraulicCurveGeneric>(8502);
+            labelA.id = QStringLiteral("uuidv7 left append");
+            labelB.id = QStringLiteral("uuidv7 right append");
             const native::RevisionId leftHead = hydraulic::editHydraulicDistributionNetwork(
                 repository, project, "append-left", baseline.uuid,
                 {{labelA.uuid, hydraulic::HydraulicEntity{labelA}}}, base, commitMetadata());
@@ -1130,8 +1118,8 @@ void exerciseUuidV7CoordinatedMembershipMerges() {
                     appendRecord.parents[1].id == rightHead,
                     "UUIDv7 concurrent append merge lost parent ancestry");
             NetworkHydraulicDistribution combined = baseline;
-            combined.map_labels.append(labelA);
-            combined.map_labels.append(labelB);
+            combined.curves_generic.append(labelA);
+            combined.curves_generic.append(labelB);
             const std::optional<NetworkHydraulicDistribution> mergedAppend =
                 hydraulic::loadHydraulicDistributionNetworkAtRevision(
                     repository, project, mergedAppendHead, baseline.uuid);
@@ -1170,7 +1158,7 @@ void exerciseUuidV7CoordinatedMembershipMerges() {
             require(repository.createBranch(project, "empty-labels", "main") == base,
                     "UUIDv7 empty-label branch has an unexpected base");
             NetworkHydraulicDistribution withoutLabels = baseline;
-            withoutLabels.map_labels.clear();
+            withoutLabels.curves_generic.clear();
             const native::RevisionId emptyLabelsHead = hydraulic::saveHydraulicDistributionNetwork(
                 repository, project, "empty-labels", withoutLabels, base, commitMetadata());
             require(repository.createBranch(project, "first-left", "empty-labels") ==
@@ -1190,8 +1178,8 @@ void exerciseUuidV7CoordinatedMembershipMerges() {
                     repository.head(project, "first-right") == firstRightHead,
                     "UUIDv7 concurrent initial membership chunks did not reconcile");
             mergedInitialChunkHead = *firstChunk.resultHead;
-            withoutLabels.map_labels.append(labelA);
-            withoutLabels.map_labels.append(labelB);
+            withoutLabels.curves_generic.append(labelA);
+            withoutLabels.curves_generic.append(labelB);
             const std::optional<NetworkHydraulicDistribution> mergedInitialChunk =
                 hydraulic::loadHydraulicDistributionNetworkAtRevision(
                     repository, project, mergedInitialChunkHead, baseline.uuid);
@@ -1205,11 +1193,10 @@ void exerciseUuidV7CoordinatedMembershipMerges() {
                     repository.createBranch(project, "order-right", "append-left") ==
                     mergedAppendHead, "UUIDv7 reorder branches have different bases");
             NetworkHydraulicDistribution reordered = combined;
-            reordered.map_labels.swapItemsAt(0, 1);
+            reordered.curves_generic.swapItemsAt(0, 1);
             const native::RevisionId orderLeft = hydraulic::saveHydraulicDistributionNetwork(
                 repository, project, "order-left", reordered, mergedAppendHead, commitMetadata());
-            HydraulicMapLabel labelC = item<HydraulicMapLabel>(8503);
-            labelC.anchor_node_uuid = baseline.nodes_junctions[1].uuid;
+            HydraulicCurveGeneric labelC = item<HydraulicCurveGeneric>(8503);
             const native::RevisionId orderRight = hydraulic::editHydraulicDistributionNetwork(
                 repository, project, "order-right", baseline.uuid,
                 {{labelC.uuid, hydraulic::HydraulicEntity{labelC}}}, mergedAppendHead, commitMetadata());
@@ -1337,8 +1324,8 @@ void exerciseUuidV7MergeChoiceQualification() {
             // Test both keeping the modified object and keeping its deletion.
             fork("object-deleted", base);
             fork("object-modified", base);
-            HydraulicMapLabel modifiedLabel = baseline.map_labels[0];
-            modifiedLabel.text = QStringLiteral("edited label retained");
+            HydraulicCurveGeneric modifiedLabel = baseline.curves_generic[0];
+            modifiedLabel.id = QStringLiteral("edited label retained");
             const native::RevisionId deleted = hydraulic::editHydraulicDistributionNetwork(
                 repository, project, "object-deleted", baseline.uuid,
                 {{modifiedLabel.uuid, std::nullopt}}, base, commitMetadata());
@@ -1352,7 +1339,7 @@ void exerciseUuidV7MergeChoiceQualification() {
             reject("object-deleted", "object-modified", duplicateObject,
                    "duplicate UUIDv7 object choice was accepted");
             hydraulic::HydraulicMergeSelections overlapping = deleteChoice;
-            overlapping.fields.push_back({modifiedLabel.uuid, QStringLiteral("text"),
+            overlapping.fields.push_back({modifiedLabel.uuid, QStringLiteral("id"),
                                           hydraulic::HydraulicMergeSide::Source});
             reject("object-deleted", "object-modified", overlapping,
                    "UUIDv7 field and object choice overlapped");
@@ -1366,7 +1353,7 @@ void exerciseUuidV7MergeChoiceQualification() {
                     repository.head(project, "object-modified") == modified,
                     "UUIDv7 delete-side object selection failed");
             NetworkHydraulicDistribution withoutLabel = baseline;
-            withoutLabel.map_labels.clear();
+            withoutLabel.curves_generic.clear();
             const std::optional<NetworkHydraulicDistribution> deletion = hydraulic::loadHydraulicDistributionNetworkAtRevision(
                 repository, project, *deleteMerge.resultHead, baseline.uuid);
             require(deletion.has_value(), "UUIDv7 deleted label network missing");
@@ -1388,7 +1375,7 @@ void exerciseUuidV7MergeChoiceQualification() {
                     repository.head(project, "object-remove") == removed,
                     "UUIDv7 surviving-side object selection failed");
             NetworkHydraulicDistribution withLabel = baseline;
-            withLabel.map_labels[0] = modifiedLabel;
+            withLabel.curves_generic[0] = modifiedLabel;
             const std::optional<NetworkHydraulicDistribution> surviving = hydraulic::loadHydraulicDistributionNetworkAtRevision(
                 repository, project, *keepMerge.resultHead, baseline.uuid);
             require(surviving.has_value(), "UUIDv7 kept label network missing");
@@ -1407,10 +1394,10 @@ void exerciseUuidV7MergeChoiceQualification() {
             require(deletedNetwork.has_value() && keptNetwork.has_value(),
                     "UUIDv7 chosen merge result disappeared after compaction");
             NetworkHydraulicDistribution withoutLabel = baseline;
-            withoutLabel.map_labels.clear();
+            withoutLabel.curves_generic.clear();
             compareNetworks(withoutLabel, *deletedNetwork);
             NetworkHydraulicDistribution withLabel = baseline;
-            withLabel.map_labels[0].text = QStringLiteral("edited label retained");
+            withLabel.curves_generic[0].id = QStringLiteral("edited label retained");
             compareNetworks(withLabel, *keptNetwork);
             (void)reopened.verifyRepository();
         }
@@ -1492,11 +1479,10 @@ void exerciseUuidV7ConcurrentSnapshots() {
         NetworkHydraulicDistribution baseline = completeNetwork();
         baseline.title_line_1 = QStringLiteral("2");
         baseline.nodes_junctions[0].metadata.description = QStringLiteral("2");
-        baseline.map_labels[0].text = QStringLiteral("2");
-        HydraulicMapLabel secondLabel = item<HydraulicMapLabel>(9102);
-        secondLabel.text = QStringLiteral("2");
-        secondLabel.anchor_node_uuid = baseline.nodes_junctions[1].uuid;
-        baseline.map_labels.append(secondLabel);
+        baseline.curves_generic[0].id = QStringLiteral("2");
+        HydraulicCurveGeneric secondLabel = item<HydraulicCurveGeneric>(9102);
+        secondLabel.id = QStringLiteral("2");
+        baseline.curves_generic.append(secondLabel);
         {
             native::Repository repository(folder);
             const native::RevisionId raw = repository.createRootBranch(project, "main", commitMetadata());
@@ -1525,21 +1511,21 @@ void exerciseUuidV7ConcurrentSnapshots() {
                         const int generation = marker.toInt(&valid);
                         require(valid && generation >= 2 && generation <= 24 &&
                                 observed->nodes_junctions[0].metadata.description == marker &&
-                                observed->map_labels[0].text == marker &&
-                                observed->map_labels.size() == (generation % 2 == 0 ? 2 : 1),
+                                observed->curves_generic[0].id == marker &&
+                                observed->curves_generic.size() == (generation % 2 == 0 ? 2 : 1),
                                 "UUIDv7 pinned aggregate mixed generations");
                         const std::optional<QList<QUuid>> ids =
                             hydraulic::listHydraulicEntityIdsAtRevisionLimited(
                                 repository, project, pinned, baseline.uuid,
-                                hydraulic::HydraulicEntityType::MapLabel, 2);
+                                hydraulic::HydraulicEntityType::GenericCurve, 2);
                         const std::optional<hydraulic::HydraulicEntity> label =
                             hydraulic::loadHydraulicEntityAtRevision(
                                 repository, project, pinned, baseline.uuid,
-                                baseline.map_labels[0].uuid);
-                        require(ids && ids->size() == observed->map_labels.size() &&
-                                ids->front() == baseline.map_labels[0].uuid &&
-                                label && std::holds_alternative<HydraulicMapLabel>(*label) &&
-                                std::get<HydraulicMapLabel>(*label).text == marker,
+                                baseline.curves_generic[0].uuid);
+                        require(ids && ids->size() == observed->curves_generic.size() &&
+                                ids->front() == baseline.curves_generic[0].uuid &&
+                                label && std::holds_alternative<HydraulicCurveGeneric>(*label) &&
+                                std::get<HydraulicCurveGeneric>(*label).id == marker,
                                 "UUIDv7 revision-pinned indexed readers mixed generations");
                         ++checks;
                         std::this_thread::yield();
@@ -1557,13 +1543,13 @@ void exerciseUuidV7ConcurrentSnapshots() {
                         const QString marker = QString::number(generation);
                         next.title_line_1 = marker;
                         next.nodes_junctions[0].metadata.description = marker;
-                        next.map_labels[0].text = marker;
-                        if (generation % 2 != 0) next.map_labels.removeLast();
-                        else if (next.map_labels.size() == 1) {
-                            secondLabel.text = marker;
-                            next.map_labels.append(secondLabel);
+                        next.curves_generic[0].id = marker;
+                        if (generation % 2 != 0) next.curves_generic.removeLast();
+                        else if (next.curves_generic.size() == 1) {
+                            secondLabel.id = marker;
+                            next.curves_generic.append(secondLabel);
                         } else {
-                            next.map_labels[1].text = marker;
+                            next.curves_generic[1].id = marker;
                         }
                         expectedHead = hydraulic::saveHydraulicDistributionNetwork(
                             repository, project, "main", next, expectedHead, commitMetadata());
@@ -1592,8 +1578,8 @@ void exerciseUuidV7ConcurrentSnapshots() {
                     reopened, project, latest, baseline.uuid);
             require(last && last->title_line_1 == QStringLiteral("24") &&
                     last->nodes_junctions[0].metadata.description == QStringLiteral("24") &&
-                    last->map_labels.size() == 2 &&
-                    last->map_labels[0].text == QStringLiteral("24"),
+                    last->curves_generic.size() == 2 &&
+                    last->curves_generic[0].id == QStringLiteral("24"),
                     "UUIDv7 concurrent writer result missing after compaction/reopen");
             (void)reopened.verifyRepository();
         }
@@ -1625,7 +1611,7 @@ void exerciseUuidV7ChunkBoundaries() {
         }
     }
     for (int index = 0; index < 260; ++index)
-        baseline.map_labels.append(item<HydraulicMapLabel>(803000 + index));
+        baseline.curves_generic.append(item<HydraulicCurveGeneric>(803000 + index));
     require(aowis::dvmdb::validateHydraulicDistributionNetwork(baseline).valid(),
             "UUIDv7 chunk fixture failed MODEL validation");
     native::RevisionId saved = native::RevisionId::generate();
@@ -1657,17 +1643,17 @@ void exerciseUuidV7ChunkBoundaries() {
             for (int index = 0; index < 7; ++index) {
                 finalHead = hydraulic::editHydraulicDistributionNetwork(
                     repository, project, "feature", baseline.uuid,
-                    {{baseline.map_labels[index].uuid, std::nullopt}}, finalHead, commitMetadata(), &stats);
-                require(stats.indexedMembershipFastPath, "UUIDv7 chunk label deletion missed indexed path");
-                expected.map_labels.removeFirst();
+                    {{baseline.curves_generic[index].uuid, std::nullopt}}, finalHead, commitMetadata(), &stats);
+                require(stats.indexedMembershipFastPath, "UUIDv7 chunk generic-curve deletion missed indexed path");
+                expected.curves_generic.removeFirst();
             }
             std::vector<hydraulic::HydraulicEntityChange> finalChunkRemoval;
             for (int index = 256; index < 260; ++index)
-                finalChunkRemoval.push_back({baseline.map_labels[index].uuid, std::nullopt});
+                finalChunkRemoval.push_back({baseline.curves_generic[index].uuid, std::nullopt});
             finalHead = hydraulic::editHydraulicDistributionNetwork(
                 repository, project, "feature", baseline.uuid, finalChunkRemoval, finalHead, commitMetadata(), &stats);
             require(stats.indexedMembershipFastPath, "UUIDv7 empty final chunk missed indexed retirement");
-            for (int index = 0; index < 4; ++index) expected.map_labels.removeLast();
+            for (int index = 0; index < 4; ++index) expected.curves_generic.removeLast();
             const std::optional<native::ModelRecord> root = repository.getModelAtRevision(
                 project, finalHead, hydraulic::keyFromUuid(baseline.uuid));
             require(root && root->references.size() == 7,
@@ -1677,9 +1663,9 @@ void exerciseUuidV7ChunkBoundaries() {
             compareNetworks(baseline, *hydraulic::loadHydraulicDistributionNetworkAtRevision(
                 repository, project, saved, baseline.uuid));
             const std::optional<QList<QUuid>> labels = hydraulic::listHydraulicEntityIdsAtRevisionLimited(
-                repository, project, finalHead, baseline.uuid, hydraulic::HydraulicEntityType::MapLabel, 255);
-            require(labels && labels->size() == expected.map_labels.size() &&
-                    labels->first() == expected.map_labels.first().uuid,
+                repository, project, finalHead, baseline.uuid, hydraulic::HydraulicEntityType::GenericCurve, 255);
+            require(labels && labels->size() == expected.curves_generic.size() &&
+                    labels->first() == expected.curves_generic.first().uuid,
                     "UUIDv7 chunked membership order was not preserved");
             require(throwsStorageError(native::StorageErrorKind::LimitExceeded, [&] {
                 (void)hydraulic::listHydraulicEntityIdsAtRevisionLimited(
@@ -1915,7 +1901,7 @@ void exerciseAtomicRootMetadataEdit() {
     require(saved.has_value() &&
             aowis::dvmdb::ModelCodec<NetworkHydraulicDistribution>::encode(*saved) ==
             aowis::dvmdb::ModelCodec<NetworkHydraulicDistribution>::encode(changed),
-            "INT-05 metadata update preserves all 18 collections and every root byte");
+            "INT-05 metadata update preserves all 17 collections and every root byte");
     // Exercise native persistence, immutable Commit and a newly opened
     // repository, not only an in-memory manifest materialization.
     const std::filesystem::path rootPath = tempDir();
@@ -1977,7 +1963,7 @@ void exerciseAtomicRootMetadataEdit() {
 
 // HIST-03c2: prove image continuity before any draft cursor could use it.
 // This coverage is intentionally about already-existing objects (no
-// collection-position guessing), including all 18 canonical MODEL kinds.
+// collection-position guessing), including all 17 canonical MODEL kinds.
 void exerciseHistoricalScalarActionPreview() {
     const NetworkHydraulicDistribution original = completeNetwork();
     NetworkHydraulicDistribution edited = original;
@@ -2011,11 +1997,10 @@ void exerciseHistoricalScalarActionPreview() {
     HISTORY_UPDATE_COLLECTION(links_valves, HydraulicLinkValve, 6)
     HISTORY_UPDATE_COLLECTION(controls_simple, HydraulicControlSimple, 16)
     HISTORY_UPDATE_COLLECTION(controls_rules, HydraulicControlRule, 17)
-    HISTORY_UPDATE_COLLECTION(map_labels, HydraulicMapLabel, 18)
 #undef HISTORY_UPDATE_COLLECTION
-    require(first.edits.size() == 18, "HIST-03c2 must cover all 18 collections");
+    require(first.edits.size() == 17, "HIST-03c2 must cover all 17 collections");
     const QByteArray firstBytes = aowis::model::ModelEditTransactionCodec::encode(first);
-    require(!firstBytes.isEmpty(), "HIST-03c2 18-collection MODEL action not encoded");
+    require(!firstBytes.isEmpty(), "HIST-03c2 17-collection MODEL action not encoded");
 
     aowis::model::ModelEditTransaction second;
     second.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
@@ -2096,7 +2081,7 @@ void exerciseVerifiedHydraulicActionBoundary() {
             states.push_back(current);
         };
 
-    // One logical action updates *all 18* existing collection types.
+    // One logical action updates *all 17* existing collection types.
     aowis::model::ModelEditTransaction fields;
     fields.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
     fields.operation = QStringLiteral("hydraulic.history.verified.all-collections");
@@ -2126,9 +2111,8 @@ void exerciseVerifiedHydraulicActionBoundary() {
     HISTORY_VERIFY_UPDATE(links_valves, HydraulicLinkValve)
     HISTORY_VERIFY_UPDATE(controls_simple, HydraulicControlSimple)
     HISTORY_VERIFY_UPDATE(controls_rules, HydraulicControlRule)
-    HISTORY_VERIFY_UPDATE(map_labels, HydraulicMapLabel)
 #undef HISTORY_VERIFY_UPDATE
-    require(fields.edits.size() == 18, "HIST-03c2b must update all collections");
+    require(fields.edits.size() == 17, "HIST-03c2b must update all collections");
     archive(fields);
 
     // One mixed root+creation event. The new member must be appended after
@@ -2170,23 +2154,22 @@ void exerciseVerifiedHydraulicActionBoundary() {
     aowis::model::ModelEditTransaction removal;
     removal.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
     removal.operation = QStringLiteral("hydraulic.history.verified.remove");
-    const HydraulicMapLabel oldLabel = current.map_labels.first();
+    const HydraulicCurveGeneric oldLabel = current.curves_generic.first();
     removal.edits.append(aowis::model::ModelEntityEdit{
-        oldLabel.uuid, QStringLiteral("HydraulicMapLabel"),
-        native::ModelCodec<HydraulicMapLabel>::encode(oldLabel), std::nullopt});
-    current.map_labels.clear();
+        oldLabel.uuid, QStringLiteral("HydraulicCurveGeneric"),
+        native::ModelCodec<HydraulicCurveGeneric>::encode(oldLabel), std::nullopt});
+    current.curves_generic.clear();
     archive(removal);
 
     aowis::model::ModelEditTransaction insertion;
     insertion.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
     insertion.operation = QStringLiteral("hydraulic.history.verified.insert");
-    HydraulicMapLabel newLabel = item<HydraulicMapLabel>(553);
-    newLabel.anchor_node_uuid = uuid(20);
-    newLabel.text = QStringLiteral("Historical label");
+    HydraulicCurveGeneric newLabel = item<HydraulicCurveGeneric>(553);
+    newLabel.id = QStringLiteral("Historical label");
     insertion.edits.append(aowis::model::ModelEntityEdit{
-        newLabel.uuid, QStringLiteral("HydraulicMapLabel"), std::nullopt,
-        native::ModelCodec<HydraulicMapLabel>::encode(newLabel)});
-    current.map_labels.append(newLabel);
+        newLabel.uuid, QStringLiteral("HydraulicCurveGeneric"), std::nullopt,
+        native::ModelCodec<HydraulicCurveGeneric>::encode(newLabel)});
+    current.curves_generic.append(newLabel);
     archive(insertion);
 
     const NetworkHydraulicDistribution committed = current;
@@ -2252,11 +2235,13 @@ void exerciseVerifiedHydraulicActionBoundary() {
     aowis::model::ModelEditTransaction collision;
     collision.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
     collision.operation = QStringLiteral("hydraulic.history.verified.uuid-collision");
-    HydraulicMapLabel duplicate = item<HydraulicMapLabel>(19);
-    duplicate.anchor_node_uuid = uuid(20);
+    // The UUID already belongs to a junction in the parent network. A
+    // distinct generic curve carrying that UUID must be rejected regardless
+    // of the entity's unrelated field values.
+    HydraulicCurveGeneric duplicate = item<HydraulicCurveGeneric>(19);
     collision.edits.append(aowis::model::ModelEntityEdit{
-        duplicate.uuid, QStringLiteral("HydraulicMapLabel"), std::nullopt,
-        native::ModelCodec<HydraulicMapLabel>::encode(duplicate)});
+        duplicate.uuid, QStringLiteral("HydraulicCurveGeneric"), std::nullopt,
+        native::ModelCodec<HydraulicCurveGeneric>::encode(duplicate)});
     const QByteArray collisionBytes = aowis::model::ModelEditTransactionCodec::encode(collision);
     require(!collisionBytes.isEmpty() &&
             !hydraulic::previewVerifiedHydraulicActionBoundary(
@@ -2703,20 +2688,20 @@ void exerciseVerifiedActiveDraftActionNavigation() {
                 return event;
             };
         NetworkHydraulicDistribution stepOne = base;
-        stepOne.map_labels[0].text = QStringLiteral("History journal edit");
-        aowis::model::ModelEditTransaction first = newAction(QStringLiteral("hydraulic.label.update"));
+        stepOne.curves_generic[0].id = QStringLiteral("History journal edit");
+        aowis::model::ModelEditTransaction first = newAction(QStringLiteral("hydraulic.curve.update"));
         first.edits.append(aowis::model::ModelEntityEdit{
-            stepOne.map_labels[0].uuid, QStringLiteral("HydraulicMapLabel"),
-            native::ModelCodec<HydraulicMapLabel>::encode(base.map_labels[0]),
-            native::ModelCodec<HydraulicMapLabel>::encode(stepOne.map_labels[0])});
+            stepOne.curves_generic[0].uuid, QStringLiteral("HydraulicCurveGeneric"),
+            native::ModelCodec<HydraulicCurveGeneric>::encode(base.curves_generic[0]),
+            native::ModelCodec<HydraulicCurveGeneric>::encode(stepOne.curves_generic[0])});
         const QByteArray firstBytes = aowis::model::ModelEditTransactionCodec::encode(first);
         native::ModelChange labelChange;
-        labelChange.key = hydraulic::keyFromUuid(stepOne.map_labels[0].uuid);
+        labelChange.key = hydraulic::keyFromUuid(stepOne.curves_generic[0].uuid);
         labelChange.record = readBase(labelChange.key);
-        require(labelChange.record.has_value() && labelChange.record->kind == 18,
-                "HDB-03b missing canonical map-label native record");
+        require(labelChange.record.has_value() && labelChange.record->kind == 15,
+                "HDB-03b missing canonical generic-curve native record");
         labelChange.record->payload = hydraulic::bytesFromQByteArray(
-            native::ModelCodec<HydraulicMapLabel>::encode(stepOne.map_labels[0]));
+            native::ModelCodec<HydraulicCurveGeneric>::encode(stepOne.curves_generic[0]));
         require(!firstBytes.isEmpty() &&
                 service->saveWorkingCopyTransactions(draftId, session, token, 0,
                     {labelChange},
@@ -2999,43 +2984,43 @@ void exerciseArchivedHistoryForkedHydraulicEdit() {
             "Hydraulic editor forks after crossing Commit markers").id;
         const std::string session = native::UuidV7::generate().toString();
         const NetworkHydraulicDistribution original = completeNetwork();
-        require(!original.map_labels.isEmpty(), "History fork fixture needs a map label");
+        require(!original.curves_generic.isEmpty(), "History fork fixture needs a generic curve");
         const native::RevisionId baseline = service->commitModelAtExpectedHead(
             projectId, "main", hydraulic::fullDraftHydraulicDistributionNetworkChanges(original),
             commitMetadata(), std::nullopt);
 
         const std::function<aowis::model::ModelEditTransaction(
-            const HydraulicMapLabel&, const HydraulicMapLabel&)> encodeEdit =
-            [](const HydraulicMapLabel& before, const HydraulicMapLabel& after)
+            const HydraulicCurveGeneric&, const HydraulicCurveGeneric&)> encodeEdit =
+            [](const HydraulicCurveGeneric& before, const HydraulicCurveGeneric& after)
                     -> aowis::model::ModelEditTransaction {
                 aowis::model::ModelEditTransaction event;
                 event.transactionId = QUuid(QString::fromStdString(
                     native::UuidV7::generate().toString()));
-                event.operation = QStringLiteral("hydraulic.map-label.update");
+                event.operation = QStringLiteral("hydraulic.generic-curve.update");
                 event.edits.append(aowis::model::ModelEntityEdit{
-                    before.uuid, QStringLiteral("HydraulicMapLabel"),
-                    native::ModelCodec<HydraulicMapLabel>::encode(before),
-                    native::ModelCodec<HydraulicMapLabel>::encode(after)});
+                    before.uuid, QStringLiteral("HydraulicCurveGeneric"),
+                    native::ModelCodec<HydraulicCurveGeneric>::encode(before),
+                    native::ModelCodec<HydraulicCurveGeneric>::encode(after)});
                 return event;
             };
-        const std::function<native::ModelChange(const HydraulicMapLabel&,
+        const std::function<native::ModelChange(const HydraulicCurveGeneric&,
             const native::RevisionId&)> nativeLabelChange =
-            [&service, &projectId](const HydraulicMapLabel& label,
+            [&service, &projectId](const HydraulicCurveGeneric& label,
                 const native::RevisionId& source) -> native::ModelChange {
                 native::ModelChange change;
                 change.key = hydraulic::keyFromUuid(label.uuid);
                 change.record = service->getModelAtRevision(projectId, source, change.key);
-                require(change.record && change.record->kind == 18,
-                        "History fork fixture has no stored label record");
+                require(change.record && change.record->kind == 15,
+                        "History fork fixture has no stored generic-curve record");
                 change.record->payload = hydraulic::bytesFromQByteArray(
-                    native::ModelCodec<HydraulicMapLabel>::encode(label));
+                    native::ModelCodec<HydraulicCurveGeneric>::encode(label));
                 return change;
             };
 
         NetworkHydraulicDistribution firstNetwork = original;
-        firstNetwork.map_labels[0].text = QStringLiteral("Committed action one");
+        firstNetwork.curves_generic[0].id = QStringLiteral("Committed action one");
         const aowis::model::ModelEditTransaction firstAction =
-            encodeEdit(original.map_labels[0], firstNetwork.map_labels[0]);
+            encodeEdit(original.curves_generic[0], firstNetwork.curves_generic[0]);
         const QByteArray firstFrame =
             aowis::model::ModelEditTransactionCodec::encode(firstAction);
         const std::string firstDraft = service->createWorkingCopy(
@@ -3044,9 +3029,9 @@ void exerciseArchivedHistoryForkedHydraulicEdit() {
             firstDraft, session, 120).token;
         require(!firstFrame.isEmpty() &&
                 service->saveWorkingCopyTransactions(firstDraft, session, firstToken, 0,
-                    {nativeLabelChange(firstNetwork.map_labels[0], baseline)},
+                    {nativeLabelChange(firstNetwork.curves_generic[0], baseline)},
                     {hydraulic::bytesFromQByteArray(firstFrame)}).generation == 1,
-                "Cannot Save first MODEL map-label action");
+                "Cannot Save first MODEL generic-curve action");
         const std::string firstOperation = native::UuidV7::generate().toString();
         const native::LocalCommitInfo firstCommit = service->commitWorkingCopy(
             firstOperation, firstDraft, session, firstToken, 1, baseline,
@@ -3058,9 +3043,9 @@ void exerciseArchivedHistoryForkedHydraulicEdit() {
         require(firstRevision.has_value(), "First MODEL revision was not created");
 
         NetworkHydraulicDistribution secondNetwork = firstNetwork;
-        secondNetwork.map_labels[0].text = QStringLiteral("Abandoned committed action");
+        secondNetwork.curves_generic[0].id = QStringLiteral("Abandoned committed action");
         const aowis::model::ModelEditTransaction secondAction =
-            encodeEdit(firstNetwork.map_labels[0], secondNetwork.map_labels[0]);
+            encodeEdit(firstNetwork.curves_generic[0], secondNetwork.curves_generic[0]);
         const QByteArray secondFrame =
             aowis::model::ModelEditTransactionCodec::encode(secondAction);
         const std::string secondDraft = service->createWorkingCopy(
@@ -3069,9 +3054,9 @@ void exerciseArchivedHistoryForkedHydraulicEdit() {
             secondDraft, session, 120).token;
         require(!secondFrame.isEmpty() &&
                 service->saveWorkingCopyTransactions(secondDraft, session, secondToken, 0,
-                    {nativeLabelChange(secondNetwork.map_labels[0], *firstRevision)},
+                    {nativeLabelChange(secondNetwork.curves_generic[0], *firstRevision)},
                     {hydraulic::bytesFromQByteArray(secondFrame)}).generation == 1,
-                "Cannot Save second MODEL map-label action");
+                "Cannot Save second MODEL generic-curve action");
         const native::LocalCommitInfo secondCommit = service->commitWorkingCopy(
             native::UuidV7::generate().toString(), secondDraft, session,
             secondToken, 1, *firstRevision, commitMetadata());
@@ -3095,15 +3080,15 @@ void exerciseArchivedHistoryForkedHydraulicEdit() {
                 ("Cannot Undo across Commit marker: " + error.toStdString()).c_str());
 
         NetworkHydraulicDistribution alternativeNetwork = original;
-        alternativeNetwork.map_labels[0].text = QStringLiteral("New edit from old History");
+        alternativeNetwork.curves_generic[0].id = QStringLiteral("New edit from old History");
         const aowis::model::ModelEditTransaction alternativeAction =
-            encodeEdit(original.map_labels[0], alternativeNetwork.map_labels[0]);
+            encodeEdit(original.curves_generic[0], alternativeNetwork.curves_generic[0]);
         const QByteArray alternativeFrame =
             aowis::model::ModelEditTransactionCodec::encode(alternativeAction);
         require(!alternativeFrame.isEmpty(), "Cannot encode alternative MODEL action");
         const native::WorkingCopyInfo saved = service->saveWorkingCopyTransactions(
             forkDraft, session, forkToken, 1,
-            {nativeLabelChange(alternativeNetwork.map_labels[0], *secondRevision)},
+            {nativeLabelChange(alternativeNetwork.curves_generic[0], *secondRevision)},
             {hydraulic::bytesFromQByteArray(alternativeFrame)});
         require(saved.generation == 2 && saved.journalCount == 1 &&
                 saved.historyForkRevisionId == firstRevision->toString() &&
@@ -3151,10 +3136,10 @@ void exerciseArchivedHistoryForkedHydraulicEdit() {
                 "New logical editing History still includes abandoned Commit actions");
         const std::optional<native::ModelRecord> immutableSecond =
             service->getModelAtRevision(projectId, *secondRevision,
-                hydraulic::keyFromUuid(original.map_labels[0].uuid));
+                hydraulic::keyFromUuid(original.curves_generic[0].uuid));
         require(immutableSecond && immutableSecond->payload ==
                 hydraulic::bytesFromQByteArray(
-                    native::ModelCodec<HydraulicMapLabel>::encode(secondNetwork.map_labels[0])),
+                    native::ModelCodec<HydraulicCurveGeneric>::encode(secondNetwork.curves_generic[0])),
                 "New editing History modified the abandoned immutable Commit");
         service.reset();
         native::ProjectService recovered(folder);
