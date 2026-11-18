@@ -285,6 +285,16 @@ void testDirectAnnotationCommitValidation() {
         (void)service.commitModel(project.id, "main", {{ordinaryKey, record(23)}},
                                   commitMetadata(), committed);
     }, ProjectErrorKind::InvalidInput, "existing annotation layer bypassed direct validator");
+    // Removing the last annotation through a direct MODEL call also requires
+    // validation: ownership, reverse references and layer consistency must be
+    // checked against the exact source revision, not only the final payload.
+    rejects([&] {
+        (void)service.commitModel(project.id, "main", {{layerKey, std::nullopt}},
+                                  commitMetadata(), committed);
+    }, ProjectErrorKind::InvalidInput,
+       "deleting the final annotation layer bypassed direct validation");
+    check(service.head(project.id, "main") == committed,
+          "rejected final-annotation deletion changed HEAD");
     rejects([&] {
         (void)service.commitModel(project.id, "main", {{ordinaryKey, record(23)}},
                                   commitMetadata(), generic, accept);

@@ -597,6 +597,11 @@ private:
     // changed subtrees instead of scanning unchanged local model records.
     // Cached booleans never replace the source objects or semantic validator.
     std::map<Hash, bool> engineeringTrieCache_;
+    // Separate volatile SHA-256 subtree classification for local MODEL Commit.
+    // A cached false is proved by inspecting every descendant leaf. Unlike
+    // engineeringTrieCache_, this detects only native annotation kinds:
+    // legacy root-only hydraulic writers do not acquire a new requirement.
+    std::map<Hash, bool> annotationTrieCache_;
     std::uint32_t indexFingerprint(const Hash& hash) const noexcept;
     void reserveIndexEntries(std::uint64_t entries);
     void indexEntry(const Hash& hash, std::uint64_t position);
@@ -652,6 +657,9 @@ private:
                    std::size_t begin, std::size_t end, unsigned minDepth);
     std::optional<Hash> lookup(const Hash& root, const Key& key);
     void listHashes(const Hash& root, std::vector<std::pair<Key, Hash>>& output);
+    // Call only under mutex_ and the repository file lock. Immutable trie
+    // subtrees retain their classification across successive MODEL Commits.
+    bool containsAnnotationInTreeLocked(const Hash& root);
     void diffHashes(const Hash& from, const Hash& to, std::vector<Difference>& output,
                     std::size_t limit = std::numeric_limits<std::size_t>::max());
     void diffWholeSubtree(const Hash& root, bool added, std::vector<Difference>& output,

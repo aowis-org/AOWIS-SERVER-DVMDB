@@ -4166,6 +4166,36 @@ std::vector<Key> Repository::readReferrers(const Hash& root, const Key& target) 
     return decodeReferrers(load(*indexValue));
 }
 
+bool Repository::containsAnnotationInTreeLocked(const Hash& root) {
+    if (isZero(root)) return false;
+    const std::map<Hash, bool>::const_iterator cached =
+        this->annotationTrieCache_.find(root);
+    if (cached != this->annotationTrieCache_.end()) return cached->second;
+
+    // A tree hash is immutable and authenticated by load()/readNode(). Only
+    // previously unseen branches and leaves are visited on subsequent commits.
+    const TreeNode node = readNode(root);
+    bool containsAnnotation = false;
+    if (node.leaf) {
+        const Bytes encoded = load(node.value);
+        require(Err::Corruption, !encoded.empty() && encoded.front() == 'V',
+                "invalid native MODEL object during annotation classification");
+        const ModelRecord record = decodeModelRecord(
+            Bytes(encoded.begin() + 1, encoded.end()));
+        containsAnnotation = record.kind >= 110 && record.kind <= 112;
+    } else {
+        for (const Hash& child : node.children) {
+            if (isZero(child)) continue;
+            const bool childContainsAnnotation = containsAnnotationInTreeLocked(child);
+            containsAnnotation = containsAnnotation || childContainsAnnotation;
+        }
+    }
+    if (this->annotationTrieCache_.size() >= 262144U)
+        this->annotationTrieCache_.clear();
+    this->annotationTrieCache_.emplace(root, containsAnnotation);
+    return containsAnnotation;
+}
+
 RevisionId Repository::commitModel(const ProjectId& project, std::string_view branch,
                                       std::vector<ModelChange> changes,
                                       const CommitMetadata& metadata,
@@ -4200,46 +4230,50 @@ RevisionId Repository::commitModel(const ProjectId& project, std::string_view br
     require(Err::InvalidInput, !previous || previous->modelIndexed || isZero(previous->root),
             "cannot enable model indexing on a populated raw branch");
 
-    // Repository is also a public, Qt-free native API. Do not assume callers
-    // passed through HTTP or ProjectService: an annotation record can be
-    // inserted, updated, removed, or left untouched by unrelated edits here.
-    // Preflight against this exact locked HEAD, before prepareModelCommitLocked
-    // writes any reference-index or pack objects.
-    std::map<Key, ModelRecord> candidateRecords;
-    bool annotationPresent = false;
-    const std::function<bool(const ModelRecord&)> annotationKind =
-        [](const ModelRecord& record) {
-            return record.kind >= 110 && record.kind <= 112;
-        };
-    if (previous && !isZero(previous->root)) {
-        std::vector<std::pair<Key, Hash>> hashes;
-        listHashes(previous->root, hashes);
-        for (const std::pair<Key, Hash>& entry : hashes) {
-            const Bytes stored = load(entry.second);
-            require(Err::Corruption, !stored.empty() && stored.front() == 'V',
-                    "invalid MODEL object during commit preflight");
-            const ModelRecord record = decodeModelRecord(
-                Bytes(stored.begin() + 1, stored.end()));
-            annotationPresent = annotationPresent || annotationKind(record);
-            candidateRecords.emplace(entry.first, record);
-        }
-    }
+    // Annotation presence is an immutable trie property. Previously this
+    // preflight decoded EVERY prior MODEL record on EVERY Commit, even for a
+    // generic one-record edit. SHA-256 subtree classification retains the
+    // fail-closed rule without turning generic writes into O(repository size).
+    bool annotationPresent = previous && !isZero(previous->root) &&
+        containsAnnotationInTreeLocked(previous->root);
     for (const ModelChange& change : changes) {
-        if (change.record) {
-            ModelRecord record = *change.record;
-            std::sort(record.references.begin(), record.references.end());
-            record.references.erase(std::unique(record.references.begin(),
-                record.references.end()), record.references.end());
-            annotationPresent = annotationPresent || annotationKind(record);
-            candidateRecords[change.key] = std::move(record);
-        } else {
-            candidateRecords.erase(change.key);
-        }
+        if (change.record && change.record->kind >= 110 &&
+            change.record->kind <= 112)
+            annotationPresent = true;
     }
     if (annotationPresent && !validate)
         throw StorageError(Err::InvalidInput,
                            std::string(missingAnnotationCommitValidator));
+
+    // An explicit validator is authoritative for the complete proposed
+    // candidate. Preserve its invocation for generic MODEL callers too.
+    // No public Repository methods may be called by that callback while the
+    // writer lock is held.
     if (validate) {
+        std::map<Key, ModelRecord> candidateRecords;
+        if (previous && !isZero(previous->root)) {
+            std::vector<std::pair<Key, Hash>> hashes;
+            listHashes(previous->root, hashes);
+            for (const std::pair<Key, Hash>& entry : hashes) {
+                const Bytes stored = load(entry.second);
+                require(Err::Corruption, !stored.empty() && stored.front() == 'V',
+                        "invalid MODEL object during commit preflight");
+                const ModelRecord record = decodeModelRecord(
+                    Bytes(stored.begin() + 1, stored.end()));
+                candidateRecords.emplace(entry.first, record);
+            }
+        }
+        for (const ModelChange& change : changes) {
+            if (change.record) {
+                ModelRecord record = *change.record;
+                std::sort(record.references.begin(), record.references.end());
+                record.references.erase(std::unique(record.references.begin(),
+                    record.references.end()), record.references.end());
+                candidateRecords[change.key] = std::move(record);
+            } else {
+                candidateRecords.erase(change.key);
+            }
+        }
         MergeCandidate candidate;
         candidate.get = [&candidateRecords](const Key& key) -> std::optional<ModelRecord> {
             const std::map<Key, ModelRecord>::const_iterator found = candidateRecords.find(key);

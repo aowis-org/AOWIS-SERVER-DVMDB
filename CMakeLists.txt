@@ -113,6 +113,12 @@ target_link_libraries(aowis-dvmdb-replication-scaling-benchmark PRIVATE aowis-dv
 add_executable(aowis-dvmdb-model-benchmark benchmarks/model_network_benchmark.cpp)
 target_link_libraries(aowis-dvmdb-model-benchmark PRIVATE aowis-dvmdb-store)
 
+# Reproducible native-only measurement of MODEL Commit validation overhead.
+# Deliberately not a timed CTest: scheduling and storage affect absolute latency.
+add_executable(aowis-dvmdb-model-commit-gate-benchmark
+    benchmarks/native_model_commit_gate_benchmark.cpp)
+target_link_libraries(aowis-dvmdb-model-commit-gate-benchmark PRIVATE aowis-dvmdb-store)
+
 if(BUILD_TESTING)
     # Frozen pre-release bytes built by a previous native engine, not generated
     # by the executable under test. Reopen the historical pack and import its

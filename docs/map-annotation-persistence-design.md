@@ -526,11 +526,20 @@ When retrying an already durable pending local Commit after a crash, a missing
 annotation validator returns a caller error **without** permanently rejecting
 the intent; retry with the real domain adapter to complete it.
 
-**Performance and scope:** This correctness-first guard currently scans the
-entire pinned base snapshot for annotation kinds on each native MODEL Commit.
-Large-project benchmarks and an indexed kind-presence optimization remain
-necessary. Root-only legacy hydraulic fixtures (kind 100 without annotation
-records) and direct low-level `writeRevision()` publication still need explicit
+**Performance and scope:** The native Commit guard now classifies immutable
+SHA-256 MODEL trie subtrees for annotation kinds 110–112. A bounded volatile
+cache proves that unchanged subtrees contain no annotations. Generic MODEL
+Commits with no validator no longer enumerate the whole previous snapshot;
+new or modified subtrees are inspected, and final reference-index validation
+still runs in the normal Commit pipeline. A Commit involving annotations,
+including one that *deletes the final annotation*, still requires a semantic
+validator. If a validator is supplied explicitly, it receives the complete
+pinned candidate even for generic records; there is no semantic shortcut.
+
+The cache is not persisted and may be evicted; reopening a repository may
+require one full classification pass, never a weaker validation decision.
+Root-only legacy hydraulic fixtures (kind 100 without annotation records) and
+direct low-level `writeRevision()` publication still need explicit
 engineering-format policy. Neither network connectivity nor hydraulic solver
 feasibility is a persistence condition.
 
@@ -673,9 +682,23 @@ and old root-only fixtures remain outside the strict new annotation format.
 Those APIs must either accept and forward an explicit validator or be retired
 before being advertised as supported engineering publication interfaces.
 
-**Performance qualification still required:** the native Commit guard and
-revision-bundle semantic preflight enumerate complete MODEL snapshots;
-large-network timing, peak memory, cancellation/limits, and incremental sync
-throughput must be benchmarked before claiming production-scale performance.
-Imported immutable revisions without original locally indexed action archives
-are valid History checkpoints, not invented action-by-action Undo/Redo histories.
+**Performance qualification status:** the native Commit guard uses a bounded
+immutable-subtree cache to avoid whole-snapshot scans for generic no-validator
+Commits. `aowis-dvmdb-model-commit-gate-benchmark` measures median/max latency
+for repeated single-record Commits at two model sizes and reports process peak
+RSS on Linux. Run, for example:
+
+```bash
+cmake --build build-linux-tests --target aowis-dvmdb-model-commit-gate-benchmark -j 8
+./build-linux-tests/aowis-dvmdb-model-commit-gate-benchmark 1024 16384 12
+```
+
+One Qt-free Debug/portable SHA-256 run in the development container measured
+median 3.820 ms at 1,024 generic records versus 3.533 ms at 16,384 records
+(0.925x); peak process RSS was 4,828 KiB. This is a **generic MODEL no-validator**
+measurement, not a hydraulic/annotation semantic-validator benchmark or a
+production-scale guarantee. Large-network B2 validator throughput, peak memory,
+History replay cost, interrupted writes, and replication on slow storage still
+require workload qualification. Imported immutable revisions without original
+locally indexed action archives are valid History checkpoints, not invented
+action-by-action Undo/Redo histories.
