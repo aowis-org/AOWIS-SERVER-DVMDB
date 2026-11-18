@@ -879,32 +879,9 @@ QJsonObject verifiedHistoryNetworkDelta(const NetworkHydraulicDistribution& befo
                        {"edits", edits}, {"moves", moves}};
 }
 
-template <std::size_t Index = 0>
-HydraulicEntity decodeEntity(std::size_t requested, const QByteArray& payload) {
-    if constexpr (Index < std::variant_size_v<HydraulicEntity>) {
-        if (requested == Index) {
-            using Type = std::variant_alternative_t<Index, HydraulicEntity>;
-            QString error;
-            std::optional<Type> entity = ModelCodec<Type>::decode(payload, &error);
-            if (!entity) throw ProjectError(ProjectErrorKind::InvalidInput,
-                                            "invalid canonical hydraulic entity payload: " + error.toStdString());
-            return HydraulicEntity{std::move(*entity)};
-        }
-        return decodeEntity<Index + 1>(requested, payload);
-    } else {
-        throw ProjectError(ProjectErrorKind::InvalidInput, "invalid hydraulic entity type");
-    }
-}
-
 QByteArray encodeEntity(const HydraulicEntity& entity) {
     return std::visit([]<typename Type>(const Type& item) {
         return ModelCodec<Type>::encode(item);
-    }, entity);
-}
-
-QUuid entityUuid(const HydraulicEntity& entity) {
-    return std::visit([]<typename Type>(const Type& item) {
-        return item.uuid;
     }, entity);
 }
 
@@ -948,38 +925,6 @@ void requireModelIndexed(Repository& repository, const ProjectId& project,
     throw ProjectError(ProjectErrorKind::InvalidInput, "revision is not model-indexed");
 }
 
-std::vector<hydraulic::HydraulicEntityChange> parseHydraulicChanges(const QJsonObject& object) {
-    requireKeys(object, {"expectedHead", "changes", "author", "message"});
-    requireInput(object.value("changes").isArray(), "missing changes array");
-    const QJsonArray input = object.value("changes").toArray();
-    requireInput(input.size() <= 128, "hydraulic edit batch exceeds 128 entities");
-    std::vector<hydraulic::HydraulicEntityChange> changes;
-    std::set<QString> unique;
-    changes.reserve(static_cast<std::size_t>(input.size()));
-    for (const QJsonValue& value : input) {
-        requireInput(value.isObject(), "edit change must be an object");
-        const QJsonObject change = value.toObject();
-        requireKeys(change, {"uuid", "delete", "type", "payloadBase64"});
-        const QUuid uuid = parseUuid(requiredString(change, "uuid"));
-        requireInput(unique.insert(uuidString(uuid)).second, "duplicate entity UUID in edit batch");
-        if (change.value("delete") == QJsonValue(true)) {
-            requireInput(!change.contains("type") && !change.contains("payloadBase64"),
-                         "delete must not include an entity payload");
-            changes.push_back(hydraulic::HydraulicEntityChange{uuid, std::nullopt});
-        } else {
-            requireInput(!change.contains("delete"), "delete must be true or omitted");
-            requireInput(change.value("type").isDouble(), "missing entity type");
-            const int type = change.value("type").toInt(-1);
-            requireInput(type >= 0 && type < 17 && change.value("type").toDouble() == type,
-                         "invalid entity type");
-            HydraulicEntity decoded = decodeEntity(static_cast<std::size_t>(type),
-                                                   decodePayload(change, "payloadBase64"));
-            requireInput(entityUuid(decoded) == uuid, "entity payload UUID differs from edit UUID");
-            changes.push_back(hydraulic::HydraulicEntityChange{uuid, std::move(decoded)});
-        }
-    }
-    return changes;
-}
 #endif
 
 // Per-route JSON body ceilings, checked from Content-Length before the body
@@ -1560,28 +1505,15 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
             return Reply{200, result};
         });
     });
-    server.Post(routeNetworks, [&service](const httplib::Request& request, httplib::Response& response) {
-        guarded(response, [&]() {
-            const ProjectId project = requestProject(request);
-            const QJsonObject object = parseBody(request, maxJsonModelBytes);
-            requireKeys(object, {"expectedHead", "payloadBase64", "author", "message"});
-            const RevisionId expected = parseRevisionId(requiredString(object, "expectedHead"));
-            const CommitMetadata metadata = parseCommitMetadata(object);
-            QString error;
-            const std::optional<NetworkHydraulicDistribution> network = ModelCodec<NetworkHydraulicDistribution>::decode(
-                decodePayload(object, "payloadBase64"), &error);
-            if (!network) throw ProjectError(ProjectErrorKind::InvalidInput,
-                "invalid canonical hydraulic distribution network payload: " + error.toStdString());
-            requireInput(!network->uuid.isNull(), "hydraulic distribution network UUID is null");
-            RevisionId committed = expected;
-            service.withRepository(pathParam(request, "id"), [&](Repository& repository) {
-                const std::string branch = pathParam(request, "branch");
-                requireBranch(repository, branch);
-                committed = hydraulic::saveHydraulicDistributionNetwork(repository, project, branch, *network,
-                                                            expected, metadata);
-            });
-            return Reply{201, QJsonObject{{"id", revisionIdString(committed)}}};
-        });
+    // This legacy direct-to-branch writer bypassed the working-copy action
+    // journal and could publish Distribution roots without their required
+    // annotation layer. Keep a clear migration response rather than an
+    // unregistered/ambiguous 404; no revision or working copy is mutated.
+    server.Post(routeNetworks, [](const httplib::Request&, httplib::Response& response) {
+        send(response, errorReply(410, QStringLiteral("legacy_hydraulic_write_retired"),
+            QStringLiteral("Direct hydraulic branch writes are retired; use the "
+                           "working-copy initialize-network/import-network, save-events "
+                           "and local-commits endpoints")));
     });
     server.Get("/dvmdb/v1/projects/:id/branches/:branch/networks/:network/entities",
                [&service](const httplib::Request& request, httplib::Response& response) {
@@ -1630,24 +1562,14 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
             return Reply{200, result};
         });
     });
-    server.Post(routeEdits, [&service](const httplib::Request& request, httplib::Response& response) {
-        guarded(response, [&]() {
-            const ProjectId project = requestProject(request);
-            const QUuid networkUuid = parseUuid(pathParam(request, "network"));
-            const QJsonObject object = parseBody(request, maxJsonModelBytes);
-            const RevisionId expected = parseRevisionId(requiredString(object, "expectedHead"));
-            const std::vector<hydraulic::HydraulicEntityChange> changes = parseHydraulicChanges(object);
-            const CommitMetadata metadata = parseCommitMetadata(object);
-            RevisionId committed = expected;
-            service.withRepository(pathParam(request, "id"), [&](Repository& repository) {
-                const std::string branch = pathParam(request, "branch");
-                requireBranch(repository, branch);
-                committed = hydraulic::editHydraulicDistributionNetwork(repository, project, branch, networkUuid,
-                                                               changes, expected, metadata);
-            });
-            return Reply{200, QJsonObject{{"id", revisionIdString(committed)}}};
-        });
+    // See the /networks POST retirement above. All engineering edits must
+    // participate in one MODEL action journal with annotation changes.
+    server.Post(routeEdits, [](const httplib::Request&, httplib::Response& response) {
+        send(response, errorReply(410, QStringLiteral("legacy_hydraulic_write_retired"),
+            QStringLiteral("Direct hydraulic branch edits are retired; use "
+                           "working-copy save-events and local-commits")));
     });
+
 
 
 }

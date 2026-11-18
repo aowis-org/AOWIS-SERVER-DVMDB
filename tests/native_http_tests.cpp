@@ -1630,6 +1630,23 @@ void exerciseUuidv7HistoryHttp() {
     check(head.status == 200 && native::RevisionId::parse(head.json.value("id").toString().toStdString()),
           "HTTP branch HEAD is not UUIDv7");
     const QString rootId = head.json.value("id").toString();
+#ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
+    // Retired direct-to-branch write routes must not publish a network
+    // without annotation ownership, or bypass the MODEL History journal.
+    const QString obsoleteNetworkPost = basePath + "/branches/main/networks";
+    const QString obsoleteEntityPost = basePath + "/branches/main/networks/" +
+        QString::fromStdString(native::ProjectId::generate().toString()) + "/edits";
+    for (const QString& route : {obsoleteNetworkPost, obsoleteEntityPost}) {
+        const Response rejected = client.call("POST", route,
+            QJsonObject{{"expectedHead", rootId}, {"payloadBase64", ""}});
+        check(rejected.status == 410 &&
+              rejected.json.value("error").toObject().value("code") ==
+                  "legacy_hydraulic_write_retired",
+              "retired direct hydraulic branch write is still reachable");
+        check(client.call("GET", mainHeadPath).json.value("id").toString() == rootId,
+              "retired hydraulic write changed immutable branch HEAD");
+    }
+#endif
     check(client.call("GET", basePath + "/branches/main/head-v2").status == 404,
           "obsolete HEAD alias still registered");
     check(client.call("GET", basePath + "/revisions/" + QString(64, '0')).status == 400,

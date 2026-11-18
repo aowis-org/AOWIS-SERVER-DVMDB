@@ -27,6 +27,12 @@ def main() -> None:
     if re.search(r"target_link_libraries\(aowis-dvmdb-http-tests\s+PRIVATE\s+"
                  r"aowis-dvmdb-annotation-action-replay", cmake):
         raise AssertionError("replay linkage must not be test-only")
+    # Old direct branch hydraulic writes cannot publish unjournaled
+    # Distribution revisions or omit the mandatory annotation layer.
+    for route in ("routeNetworks", "routeEdits"):
+        require(routes, rf"server\.Post\({route},\s*\[\]\(.*?"
+                rf"errorReply\(410,\s*QStringLiteral\(\"legacy_hydraulic_write_retired\"\)",
+                f"legacy hydraulic branch POST must remain permanently retired: {route}")
     for route in ("routeAnnotationLayers", "routeAnnotationLayer", "routeDraftAnnotationLayer"):
         require(routes, rf"server\.Get\(\s*{route}\s*,", f"missing GET registration: {route}")
     for symbol in (

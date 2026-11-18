@@ -1411,28 +1411,15 @@ paths:
       - {$ref: '#/components/parameters/ProjectId'}
       - {$ref: '#/components/parameters/Branch'}
     post:
-      operationId: saveHydraulicDistributionNetwork
+      operationId: retiredSaveHydraulicDistributionNetwork
+      deprecated: true
       description: |
-        Create/replace a complete, canonically validated hydraulic distribution network on
-        a UUIDv7 project and branch. The exact expected revision HEAD must
-        match at atomic publication. Revision UUID and content SHA are separate.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [expectedHead, payloadBase64, author, message]
-              properties:
-                author: {$ref: '#/components/schemas/CommitAuthor'}
-                message: {$ref: '#/components/schemas/CommitMessage'}
-                expectedHead: {type: string, format: uuid, description: UUIDv7 revision}
-                payloadBase64: {type: string, contentEncoding: base64, description: Canonical NetworkHydraulicDistribution model bytes}
+        Permanently retired direct-to-branch hydraulic writer. It could not
+        preserve the MODEL action journal or create the mandatory annotation
+        layer. Always returns HTTP 410 without changing HEAD. Use working-copy
+        initialize-network/import-network, save-events and local-commits.
       responses:
-        '201': {description: '{"id":"<new UUIDv7 revision>"}'}
-        '400': {$ref: '#/components/responses/BadRequest'}
-        '409': {$ref: '#/components/responses/Conflict'}
+        '410': {description: Direct hydraulic branch write retired; JSON error code `legacy_hydraulic_write_retired`}
   /projects/{projectId}/branches/{branch}/networks/summary:
     parameters:
       - {$ref: '#/components/parameters/ProjectId'}
@@ -1517,36 +1504,14 @@ paths:
       - {$ref: '#/components/parameters/Branch'}
       - {$ref: '#/components/parameters/NetworkId'}
     post:
-      operationId: editHydraulicDistributionNetwork
+      operationId: retiredEditHydraulicDistributionNetwork
+      deprecated: true
       description: |
-        Apply at most 128 entity changes to one branch at an exact
-        expectedHead. Scalar, physical, catalogue, topology, dependent-reference
-        and membership edits are validated incrementally against the pinned
-        revision; other edits fall back to full network validation. A batch
-        that changes nothing creates no revision.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [expectedHead, changes, author, message]
-              properties:
-                author: {$ref: '#/components/schemas/CommitAuthor'}
-                message: {$ref: '#/components/schemas/CommitMessage'}
-                expectedHead: {type: string, format: uuid}
-                changes:
-                  type: array
-                  maxItems: 128
-                  items:
-                    oneOf:
-                      - {type: object, additionalProperties: false, required: [uuid, delete], properties: {uuid: {type: string, format: uuid}, delete: {const: true}}}
-                      - {type: object, additionalProperties: false, required: [uuid, type, payloadBase64], properties: {uuid: {type: string, format: uuid}, type: {type: integer, minimum: 0, maximum: 17}, payloadBase64: {type: string, contentEncoding: base64}}}
+        Permanently retired direct-to-branch hydraulic entity writer. Always
+        returns HTTP 410 without changing HEAD. Use the MODEL working-copy
+        save-events and local-commits flow for hydraulic and annotation edits.
       responses:
-        '200': {description: '{"id":"<new or unchanged UUIDv7 revision>"}'}
-        '400': {$ref: '#/components/responses/BadRequest'}
-        '409': {$ref: '#/components/responses/Conflict'}
+        '410': {description: Direct hydraulic branch edit retired; JSON error code `legacy_hydraulic_write_retired`}
 
 components:
   schemas:

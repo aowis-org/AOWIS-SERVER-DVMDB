@@ -702,3 +702,20 @@ History replay cost, interrupted writes, and replication on slow storage still
 require workload qualification. Imported immutable revisions without original
 locally indexed action archives are valid History checkpoints, not invented
 action-by-action Undo/Redo histories.
+
+## B4 closeout — retirement of direct hydraulic HTTP writers
+
+The two old branch-level HTTP POST routes (`/networks` and
+`/networks/{networkId}/edits`) now return **410 Gone** with
+`legacy_hydraulic_write_retired`. They do not decode a payload, write a
+revision, or move HEAD. Their original direct-commit behavior bypassed the
+MODEL action journal and could create a Distribution root without its
+required annotation layer. Revision-pinned GET routes remain supported.
+
+All supported HTTP engineering writes use the working-copy initialization /
+import, journaled `save-events`, and fenced `local-commits` APIs. This is a
+breaking retirement (no production compatibility guarantee). The legacy
+**native** hydraulic save/edit helpers remain available for historical test
+fixtures and benchmarks, not as supported production publication paths;
+their low-level engineering-root policy still requires a separate audit.
+Hydraulic solvability is never a storage validation prerequisite.
