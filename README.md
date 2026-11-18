@@ -122,7 +122,7 @@ Linux keeps OpenSSL's accelerated digest by default. Both produce identical
 digests, and the Linux suite passes with either setting.
 
 ```bash
-./compile_linux_tests.sh          # current test build and CTest suite
+./compile_linux_tests.sh          # build ALL targets and run the complete CTest suite (including MODEL)
 ./compile_linux_tests.sh --both   # optional: independent Debug and Release suites
 ./compile_linux.sh --build-only   # build only the Release server and dependencies
 ```

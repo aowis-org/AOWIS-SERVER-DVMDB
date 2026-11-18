@@ -160,6 +160,14 @@ if(BUILD_TESTING)
     set_tests_properties(aowis-dvmdb-http-uuidv7-route-contract-tests PROPERTIES
         LABELS "aowis;http;qualification" TIMEOUT 30)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # The tests helper must compile and execute submodule tests, not just
+        # the DVMDB-specific targets selected by the 'aowis' CTest label.
+        add_test(NAME aowis-dvmdb-complete-suite-build-tests
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/compile_linux_tests_contract_tests.py"
+                --script "${CMAKE_CURRENT_SOURCE_DIR}/compile_linux_tests.sh")
+        set_tests_properties(aowis-dvmdb-complete-suite-build-tests PROPERTIES
+            LABELS "aowis;qualification" TIMEOUT 30)
         add_test(NAME aowis-dvmdb-build-launch-guard-tests
             COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/compile_linux_guard_tests.py"

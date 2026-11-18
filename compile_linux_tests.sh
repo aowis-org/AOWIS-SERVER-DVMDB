@@ -16,14 +16,20 @@ run_suite() {
         arguments+=("-DCMAKE_BUILD_TYPE=$build_type")
     fi
     cmake "${arguments[@]}"
-    cmake --build "$build_dir" --target aowis-dvmdb-tests --parallel
+    # Build the default ALL target: aowis-dvmdb-tests only aggregates DVMDB
+    # targets, not the test executables registered by nested MODEL submodules.
+    # ALL also covers future submodule test executables without maintaining a
+    # fragile list of test target names here.
+    cmake --build "$build_dir" --parallel
     local registered
-    registered="$(ctest --test-dir "$build_dir" -N -L '^aowis$')"
+    registered="$(ctest --test-dir "$build_dir" -N)"
     if ! grep -Eq 'Total Tests: [1-9][0-9]*' <<< "$registered"; then
-        printf 'ERROR: no AOWIS native tests registered\n%s\n' "$registered" >&2
+        printf 'ERROR: no tests registered\n%s\n' "$registered" >&2
         exit 1
     fi
-    ctest --test-dir "$build_dir" --output-on-failure -L '^aowis$'
+    # Do not filter on the DVMDB-specific 'aowis' label: MODEL tests belong
+    # to the same configured CTest suite but have no such label.
+    ctest --test-dir "$build_dir" --output-on-failure
 }
 case "${1:-}" in
     '') run_suite "$project_dir/build-linux-tests" '' ;;
