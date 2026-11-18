@@ -582,11 +582,29 @@ History publisher serve combined archives, including transactions that contain
 edits from both domains. HTTP dispatch derives domain classification only from
 the authenticated MODEL frames.
 
-This is deliberately **not yet unrestricted mixed History**: hydraulic member
-insertion/deletion, member reassignment, network creation/deletion, imported
-revisions lacking authenticated action archives, and archived History forks
-remain checkpoint-only. There is no event-level membership/ownership provenance
-for transient hydraulic members comparable to the annotation `ownerLayerId`.
+### B4.3 — Verified native hydraulic membership replay
+
+The mixed replay verifier now also applies hydraulic member creation and deletion
+through `materializeDraftMembership()`, the same deterministic native-owned
+kind-100/kind-101 chunk/manifest writer used by ordinary draft Saves. Each
+canonical MODEL edit supplies its own before/after image and type, while the
+native helper derives the exact entity reference index. Member insertions
+append in the MODEL event's order, and deletions preserve surviving member
+order. Every complete action is structurally validated, and the full replayed
+snapshot (including chunk serials, indices and member payloads) must match the
+authenticated immutable revision byte-for-byte. A mismatch in insertion order
+or unjournaled native mutation is rejected, not approximated.
+
+Hydraulic MODEL member events currently lack an authenticated network-owner
+field. For this reason the replay verifier proves ownership from the original
+and committed native membership graphs. A transient member absent at both
+endpoints can be replayed only when the revision has **exactly one** surviving
+network root; with two or more roots it is rejected as ambiguous. Cross-network
+member reassignment, network creation/deletion, imported revisions lacking
+authenticated action archives, and unsupported History forks remain
+checkpoint-only. Old reverse-preview APIs remain conservative and are not
+used as the new mixed archived History publisher.
+
 Unsupported changes fail before any working-copy cursor or overlay publication;
 they are never silently dropped. Structural/model-integrity constraints are
 unchanged, and neither connectivity nor successful hydraulic simulation is

@@ -450,6 +450,178 @@ void testCombinedHydraulicAndAnnotationReplay() {
            "mixed archive accepted invalid action position");
 }
 
+
+// Exercise the real native membership materializer, including its persistent
+// chunk serials. Synthetic record-only edits would conceal a replay mismatch.
+void applyHydraulicMembershipEvent(Records& records, const model::ModelEntityEdit& edit,
+                                   const QUuid& networkId = uuid(1)) {
+    ensure(edit.before.has_value() != edit.after.has_value(),
+           "test membership requires one image");
+    const hydraulic::CanonicalHydraulicMemberImage encoded =
+        hydraulic::canonicalHydraulicMemberImage(
+            edit, edit.after ? *edit.after : *edit.before);
+    std::vector<db::ModelChange> changes{
+        db::ModelChange{db::record::keyFromUuid(edit.entityId),
+                        edit.after ? std::optional<db::ModelRecord>(encoded.record) : std::nullopt}};
+    const std::vector<hydraulic::DraftMembershipIntent> intents{
+        hydraulic::DraftMembershipIntent{
+            db::record::keyFromUuid(networkId), db::record::keyFromUuid(edit.entityId),
+            encoded.record.kind, encoded.collection, edit.after.has_value()}};
+    hydraulic::materializeDraftMembership(view(records).get, intents, changes);
+    applyChanges(records, changes);
+}
+
+model::ModelEntityEdit hydraulicJunctionEdit(const std::optional<HydraulicNodeJunction>& before,
+                                              const std::optional<HydraulicNodeJunction>& after) {
+    model::ModelEntityEdit result;
+    result.entityType = QStringLiteral("HydraulicNodeJunction");
+    result.entityId = after ? after->uuid : before->uuid;
+    if (before) result.before = db::ModelCodec<HydraulicNodeJunction>::encode(*before);
+    if (after) result.after = db::ModelCodec<HydraulicNodeJunction>::encode(*after);
+    return result;
+}
+
+HydraulicNodeJunction junction(std::uint32_t ordinal) {
+    HydraulicNodeJunction item;
+    item.uuid = uuid(ordinal);
+    item.id = QStringLiteral("J-%1").arg(static_cast<int>(ordinal));
+    item.coordinate_wgs84.latitude_deg = 14.1;
+    item.coordinate_wgs84.longitude_deg = 32.2;
+    return item;
+}
+
+void testCombinedHydraulicMembershipReplay() {
+    const Records parent = makeParent(false);
+    Records child = parent;
+    const HydraulicNodeJunction initial = junction(70);
+    HydraulicNodeJunction modified = initial;
+    modified.elevation_m = 13.25;
+    const model::ModelEntityEdit insertion = hydraulicJunctionEdit(std::nullopt, initial);
+    const model::ModelEntityEdit updateNode = hydraulicJunctionEdit(initial, modified);
+    const model::ModelEntityEdit deletion = hydraulicJunctionEdit(modified, std::nullopt);
+    const model::ModelEntityEdit addAnnotation = create(annotation(70));
+    const std::vector<db::WorkingCopyEvent> actions = {
+        event(90, {insertion, addAnnotation}),
+        event(91, {updateNode}),
+        event(92, {deletion})};
+    applyHydraulicMembershipEvent(child, insertion);
+    applyEvent(child, layer().uuid, {addAnnotation});
+    const db::Key key = db::record::keyFromUuid(initial.uuid);
+    const hydraulic::CanonicalHydraulicMemberImage updated =
+        hydraulic::canonicalHydraulicMemberImage(updateNode, *updateNode.after);
+    child[key] = updated.record;
+    applyHydraulicMembershipEvent(child, deletion);
+    const std::function<std::optional<ann::VerifiedAnnotationActionBoundary>(
+            std::size_t, QString*)> verify = [&](std::size_t index, QString* error) {
+        return ann::replayVerifiedCombinedActionBoundary(
+            view(parent), view(child), actions, difference(parent, child),
+            trustedActionChain(actions), index, error);
+    };
+    QString error;
+    const std::optional<ann::VerifiedAnnotationActionBoundary> zero = verify(0, &error);
+    ensure(zero && zero->changesFromParent.empty(),
+           "membership replay failed immutable parent boundary");
+    const std::optional<ann::VerifiedAnnotationActionBoundary> first = verify(1, &error);
+    const std::optional<ann::VerifiedAnnotationActionBoundary> second = verify(2, &error);
+    const std::optional<ann::VerifiedAnnotationActionBoundary> final = verify(3, &error);
+    ensure(first && second && final, "membership replay failed verified action" );
+    const std::function<std::optional<db::ModelRecord>(
+            const ann::VerifiedAnnotationActionBoundary&)> changedNode =
+        [&key](const ann::VerifiedAnnotationActionBoundary& boundary) {
+            for (const db::ModelChange& change : boundary.changesFromParent)
+                if (change.key == key) return change.record;
+            return std::optional<db::ModelRecord>{};
+        };
+    ensure(changedNode(*first) && changedNode(*first)->payload ==
+               db::record::bytesFromQByteArray(*insertion.after) &&
+           changedNode(*second) && changedNode(*second)->payload ==
+               db::record::bytesFromQByteArray(*updateNode.after) &&
+           !changedNode(*final) &&
+           final->changesFromParent.size() == difference(parent, child).size(),
+           "hydraulic membership boundaries have incorrect entity state");
+    ensure(!ann::replayVerifiedCombinedActionBoundary(
+               view(parent), view(child), {actions.front(), actions.back()},
+               difference(parent, child), trustedActionChain(actions), 2, &error),
+           "mixed membership replay accepted a missing scalar action");
+}
+
+void testHydraulicMembershipOrderPreserved() {
+    Records parent = makeParent(false);
+    NetworkHydraulicDistribution network;
+    network.uuid = uuid(1);
+    network.id = QStringLiteral("Distribution");
+    network.nodes_junctions = QList<HydraulicNodeJunction>{
+        junction(71), junction(72), junction(73)};
+    applyChanges(parent, hydraulic::fullDraftHydraulicDistributionNetworkChanges(network));
+    Records child = parent;
+    const model::ModelEntityEdit deletion =
+        hydraulicJunctionEdit(junction(72), std::nullopt);
+    const model::ModelEntityEdit insertion =
+        hydraulicJunctionEdit(std::nullopt, junction(74));
+    applyHydraulicMembershipEvent(child, deletion);
+    applyHydraulicMembershipEvent(child, insertion);
+    const model::ModelEntityEdit annotationEdit = create(annotation(72));
+    applyEvent(child, layer().uuid, {annotationEdit});
+    const std::vector<db::WorkingCopyEvent> actions = {
+        event(95, {deletion, insertion, annotationEdit})};
+    QString error;
+    const std::optional<ann::VerifiedAnnotationActionBoundary> final =
+        ann::replayVerifiedCombinedActionBoundary(
+            view(parent), view(child), actions, difference(parent, child),
+            trustedActionChain(actions), 1, &error);
+    ensure(final && final->changesFromParent.size() == difference(parent, child).size(),
+           "combined membership replay did not preserve native surviving-member order");
+    const std::optional<NetworkHydraulicDistribution> checked =
+        hydraulic::loadDraftHydraulicDistributionNetwork(view(child).get, uuid(1));
+    ensure(checked && checked->nodes_junctions.size() == 3 &&
+           checked->nodes_junctions[0].uuid == uuid(71) &&
+           checked->nodes_junctions[1].uuid == uuid(73) &&
+           checked->nodes_junctions[2].uuid == uuid(74),
+           "native membership test fixture has wrong surviving-member ordering");
+}
+
+void testTwoNetworkEndpointOwnedInsertion() {
+    Records parent = makeParent(false);
+    applyChanges(parent, {hydraulic::emptyDraftHydraulicDistributionNetworkRoot(
+        uuid(10), QStringLiteral("Another network"))});
+    applyChanges(parent, ann::fullDraftAnnotationLayerChanges(layer(20, 10), {}));
+    Records child = parent;
+    const model::ModelEntityEdit addNode =
+        hydraulicJunctionEdit(std::nullopt, junction(85));
+    model::ModelEntityEdit addAnnotation = create(annotation(85));
+    addAnnotation.ownerLayerId = layer(20, 10).uuid;
+    applyHydraulicMembershipEvent(child, addNode, uuid(10));
+    applyEvent(child, layer(20, 10).uuid, {addAnnotation});
+    const std::vector<db::WorkingCopyEvent> actions = {
+        event(96, {addNode, addAnnotation})};
+    QString error;
+    const std::optional<ann::VerifiedAnnotationActionBoundary> verified =
+        ann::replayVerifiedCombinedActionBoundary(
+            view(parent), view(child), actions, difference(parent, child),
+            trustedActionChain(actions), 1, &error);
+    ensure(verified && verified->changesFromParent.size() == difference(parent, child).size(),
+           "surviving hydraulic member ownership not recovered from child snapshot");
+}
+
+void testAmbiguousHydraulicMembershipOwnership() {
+    Records parent = makeParent(false);
+    applyChanges(parent, {hydraulic::emptyDraftHydraulicDistributionNetworkRoot(
+        uuid(10), QStringLiteral("Another network"))});
+    applyChanges(parent, ann::fullDraftAnnotationLayerChanges(layer(20, 10), {}));
+    const model::ModelEntityEdit addNode = hydraulicJunctionEdit(std::nullopt, junction(90));
+    const model::ModelEntityEdit removeNode = hydraulicJunctionEdit(junction(90), std::nullopt);
+    // The member exists in neither endpoint, and MODEL currently carries no
+    // hydraulic owner UUID. Replaying it into either network would be a guess.
+    const std::vector<db::WorkingCopyEvent> actions = {
+        event(93, {addNode, create(annotation(90))}),
+        event(94, {removeNode, remove(annotation(90))})};
+    QString error;
+    ensure(!ann::replayVerifiedCombinedActionBoundary(
+               view(parent), view(parent), actions, {}, trustedActionChain(actions),
+               1, &error) && error.contains(QStringLiteral("transient hydraulic member")),
+           "transient hydraulic member of ambiguous network was accepted");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -462,6 +634,10 @@ int main(int argc, char** argv) {
         testNativeWitnessMismatch();
         testMultipleLayers();
         testCombinedHydraulicAndAnnotationReplay();
+        testCombinedHydraulicMembershipReplay();
+        testHydraulicMembershipOrderPreserved();
+        testTwoNetworkEndpointOwnedInsertion();
+        testAmbiguousHydraulicMembershipOwnership();
         std::cout << "B4.3 annotation-only archive replay proofs passed\n";
         return 0;
     } catch (const std::exception& error) {

@@ -145,62 +145,162 @@ Hash archiveActionChain(const std::vector<WorkingCopyEvent>& actions) {
     return chained;
 }
 
-// B4.3 mixed replay begins with existing hydraulic entity updates only.
-// Membership changes must go through the native chunk materializer, never a
-// blind MODEL image replacement.  Retaining stored reference indices is safe
-// only because candidate-wide semantic validation checks them after each
-// complete action, including dependency changes.
-template<typename Entity>
-void applyHydraulicScalar(Records& current, const aowis::model::ModelEntityEdit& edit,
-                          std::uint16_t expectedKind) {
-    require(edit.before.has_value() && edit.after.has_value(),
-            "mixed hydraulic member creation/deletion requires verified membership replay");
-    const Key key = record::keyFromUuid(edit.entityId);
-    const Records::iterator existing = current.find(key);
-    require(existing != current.end() && existing->second.kind == expectedKind &&
-            record::qByteArrayFromBytes(existing->second.payload) == *edit.before,
-            "stale or wrong-kind mixed hydraulic before-image");
-    QString error;
-    const std::optional<Entity> after = ModelCodec<Entity>::decode(*edit.after, &error);
-    require(after.has_value() && after->uuid == edit.entityId &&
-            ModelCodec<Entity>::encode(*after) == *edit.after,
-            "noncanonical mixed hydraulic after-image");
-    existing->second.payload = record::bytesFromQByteArray(*edit.after);
+// A hydraulic member edit does not yet carry network provenance in MODEL.
+// Immutable native endpoint membership may prove its owning network, and a
+// single-root revision has an unambiguous owner for transient creations.
+// Never guess an owner when multiple network roots are present.
+struct HydraulicOwner final {
+    Key network;
+    std::uint16_t collection = 0;
+    std::uint16_t kind = 0;
+};
+
+struct HydraulicOwnership final {
+    std::set<Key> roots;
+    std::map<Key, HydraulicOwner> members;
+};
+
+HydraulicOwnership knownHydraulicOwners(const Records& parent, const Records& committed) {
+    HydraulicOwnership result;
+    std::set<Key> parentRoots;
+    std::set<Key> committedRoots;
+    for (const std::pair<const Key, ModelRecord>& entry : parent)
+        if (entry.second.kind == hydraulic::hydraulicDistributionNetworkKind)
+            parentRoots.insert(entry.first);
+    for (const std::pair<const Key, ModelRecord>& entry : committed)
+        if (entry.second.kind == hydraulic::hydraulicDistributionNetworkKind)
+            committedRoots.insert(entry.first);
+    require(parentRoots == committedRoots,
+            "mixed history cannot replay hydraulic network root creation/deletion");
+    result.roots = parentRoots;
+    const std::function<void(const Records&)> collect = [&result](const Records& snapshot) {
+        const MergeCandidate candidate = view(snapshot);
+        for (const Key& root : result.roots) {
+            const std::optional<NetworkHydraulicDistribution> network =
+                hydraulic::loadDraftHydraulicDistributionNetwork(
+                    candidate.get, record::uuidFromKey(root));
+            require(network.has_value(), "unreadable hydraulic network in history checkpoint");
+            std::uint16_t collection = 0;
+#define REGISTER_HISTORY_MEMBER(name, type, memberKind) \
+            for (const type& item : network->name) { \
+                const Key key = record::keyFromUuid(item.uuid); \
+                const HydraulicOwner owner{root, collection, static_cast<std::uint16_t>(memberKind)}; \
+                const std::map<Key, HydraulicOwner>::const_iterator existing = result.members.find(key); \
+                require(existing == result.members.end() || \
+                        (existing->second.network == owner.network && \
+                         existing->second.collection == owner.collection && \
+                         existing->second.kind == owner.kind), \
+                        "hydraulic member ownership changed across archived endpoints"); \
+                result.members[key] = owner; \
+            } \
+            ++collection;
+            REGISTER_HISTORY_MEMBER(pipe_materials, HydraulicPipeMaterial, 8)
+            REGISTER_HISTORY_MEMBER(patterns_time, HydraulicPatternTime, 9)
+            REGISTER_HISTORY_MEMBER(curves_tank_volume, HydraulicCurveTankVolume, 10)
+            REGISTER_HISTORY_MEMBER(curves_pump_head, HydraulicCurvePumpHead, 11)
+            REGISTER_HISTORY_MEMBER(curves_pump_efficiency, HydraulicCurvePumpEfficiency, 12)
+            REGISTER_HISTORY_MEMBER(curves_valve_headloss, HydraulicCurveValveHeadloss, 13)
+            REGISTER_HISTORY_MEMBER(curves_valve_characteristic, HydraulicCurveValveCharacteristic, 14)
+            REGISTER_HISTORY_MEMBER(curves_generic, HydraulicCurveGeneric, 15)
+            REGISTER_HISTORY_MEMBER(nodes_reservoirs, HydraulicNodeReservoir, 2)
+            REGISTER_HISTORY_MEMBER(nodes_junctions, HydraulicNodeJunction, 1)
+            REGISTER_HISTORY_MEMBER(nodes_tanks, HydraulicNodeTank, 3)
+            REGISTER_HISTORY_MEMBER(demand_points, HydraulicDemandPoint, 7)
+            REGISTER_HISTORY_MEMBER(links_pipes, HydraulicLinkPipe, 4)
+            REGISTER_HISTORY_MEMBER(links_pumps, HydraulicLinkPump, 5)
+            REGISTER_HISTORY_MEMBER(links_valves, HydraulicLinkValve, 6)
+            REGISTER_HISTORY_MEMBER(controls_simple, HydraulicControlSimple, 16)
+            REGISTER_HISTORY_MEMBER(controls_rules, HydraulicControlRule, 17)
+#undef REGISTER_HISTORY_MEMBER
+        }
+    };
+    collect(parent);
+    collect(committed);
+    return result;
 }
 
-void applyHydraulicEdit(Records& current, const aowis::model::ModelEntityEdit& edit) {
-    require(!edit.entityId.isNull() && !edit.ownerLayerId,
-            "mixed hydraulic edit has invalid UUID or annotation ownership");
-    if (edit.entityType == QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType)) {
+void applyHydraulicScalar(Records& current, const aowis::model::ModelEntityEdit& edit) {
+    require(edit.before && edit.after,
+            "mixed hydraulic creation/deletion must use native membership materializer");
+    const hydraulic::CanonicalHydraulicMemberImage previous =
+        hydraulic::canonicalHydraulicMemberImage(edit, *edit.before);
+    const hydraulic::CanonicalHydraulicMemberImage next =
+        hydraulic::canonicalHydraulicMemberImage(edit, *edit.after);
+    require(previous.collection == next.collection &&
+            previous.record.kind == next.record.kind,
+            "hydraulic entity cannot change collection in-place");
+    const Records::iterator stored = current.find(record::keyFromUuid(edit.entityId));
+    require(stored != current.end() && equalRecord(stored->second, previous.record),
+            "stale or noncanonical mixed hydraulic before-image/reference index");
+    stored->second = next.record;
+}
+
+// Use the same indexed chunk/manifest materializer as an ordinary HTTP Save.
+// The original MODEL event's edit order provides insertion order. If an HTTP
+// request originally used a different membership order, immutable child-byte
+// equality will reject the archive rather than guessing an ordering.
+void applyHydraulicMembership(Records& current,
+        const std::vector<aowis::model::ModelEntityEdit>& edits,
+        HydraulicOwnership& ownership) {
+    struct Group final {
+        std::vector<ModelChange> changes;
+        std::vector<hydraulic::DraftMembershipIntent> intents;
+    };
+    std::map<Key, Group> byNetwork;
+    for (const aowis::model::ModelEntityEdit& edit : edits) {
+        require(edit.before.has_value() != edit.after.has_value(),
+                "invalid hydraulic membership action images");
+        const QByteArray& image = edit.after ? *edit.after : *edit.before;
+        const hydraulic::CanonicalHydraulicMemberImage decoded =
+            hydraulic::canonicalHydraulicMemberImage(edit, image);
+        const Key member = record::keyFromUuid(edit.entityId);
+        const Records::const_iterator stored = current.find(member);
+        if (edit.before)
+            require(stored != current.end() && equalRecord(stored->second, decoded.record),
+                    "stale hydraulic membership removal before-image");
+        else
+            require(stored == current.end(),
+                    "hydraulic membership creation collides with existing record");
+        const std::map<Key, HydraulicOwner>::const_iterator owner =
+            ownership.members.find(member);
+        HydraulicOwner selected;
+        if (owner != ownership.members.end()) {
+            selected = owner->second;
+        } else {
+            require(ownership.roots.size() == 1,
+                    "transient hydraulic member lacks authenticated network provenance");
+            selected = HydraulicOwner{*ownership.roots.begin(), decoded.collection,
+                                       decoded.record.kind};
+            ownership.members.emplace(member, selected);
+        }
+        require(selected.collection == decoded.collection &&
+                selected.kind == decoded.record.kind,
+                "hydraulic archive member kind/collection disagrees with ownership");
+        Group& group = byNetwork[selected.network];
+        group.changes.push_back(ModelChange{member,
+            edit.after ? std::optional<ModelRecord>(decoded.record) : std::nullopt});
+        group.intents.push_back(hydraulic::DraftMembershipIntent{
+            selected.network, member, decoded.record.kind, decoded.collection,
+            edit.after.has_value()});
+    }
+    for (std::pair<const Key, Group>& part : byNetwork) {
         const MergeCandidate pinned = view(current);
-        const ModelChange change = hydraulic::materializeDraftRootEdit(pinned.get, edit);
-        current[change.key] = *change.record;
-        return;
+        hydraulic::materializeDraftMembership(pinned.get, part.second.intents,
+                                             part.second.changes);
+        for (const ModelChange& change : part.second.changes) {
+            if (change.record) current[change.key] = *change.record;
+            else current.erase(change.key);
+        }
     }
-#define REPLAY_MIXED_SCALAR(type, kind) \
-    if (edit.entityType == QStringLiteral(#type)) { \
-        applyHydraulicScalar<type>(current, edit, static_cast<std::uint16_t>(kind)); \
-        return; \
-    }
-    REPLAY_MIXED_SCALAR(HydraulicPipeMaterial, 8)
-    REPLAY_MIXED_SCALAR(HydraulicPatternTime, 9)
-    REPLAY_MIXED_SCALAR(HydraulicCurveTankVolume, 10)
-    REPLAY_MIXED_SCALAR(HydraulicCurvePumpHead, 11)
-    REPLAY_MIXED_SCALAR(HydraulicCurvePumpEfficiency, 12)
-    REPLAY_MIXED_SCALAR(HydraulicCurveValveHeadloss, 13)
-    REPLAY_MIXED_SCALAR(HydraulicCurveValveCharacteristic, 14)
-    REPLAY_MIXED_SCALAR(HydraulicCurveGeneric, 15)
-    REPLAY_MIXED_SCALAR(HydraulicNodeReservoir, 2)
-    REPLAY_MIXED_SCALAR(HydraulicNodeJunction, 1)
-    REPLAY_MIXED_SCALAR(HydraulicNodeTank, 3)
-    REPLAY_MIXED_SCALAR(HydraulicDemandPoint, 7)
-    REPLAY_MIXED_SCALAR(HydraulicLinkPipe, 4)
-    REPLAY_MIXED_SCALAR(HydraulicLinkPump, 5)
-    REPLAY_MIXED_SCALAR(HydraulicLinkValve, 6)
-    REPLAY_MIXED_SCALAR(HydraulicControlSimple, 16)
-    REPLAY_MIXED_SCALAR(HydraulicControlRule, 17)
-#undef REPLAY_MIXED_SCALAR
-    throw std::runtime_error("unsupported entity type in mixed hydraulic/annotation archive");
+}
+
+void applyHydraulicRoot(Records& current, const aowis::model::ModelEntityEdit& edit) {
+    require(!edit.entityId.isNull() && !edit.ownerLayerId,
+            "mixed hydraulic root has invalid identity or annotation ownership");
+    const MergeCandidate pinned = view(current);
+    const ModelChange change = hydraulic::materializeDraftRootEdit(pinned.get, edit);
+    require(change.record.has_value(), "hydraulic root metadata edit removed its manifest");
+    current[change.key] = *change.record;
 }
 
 void applyChanges(Records& records, const std::vector<ModelChange>& changes) {
@@ -243,6 +343,8 @@ static std::optional<VerifiedAnnotationActionBoundary> replayActionBoundary(
         validate(before);
         validate(after);
         std::map<Key, Key> owners = knownOwners(before, after);
+        HydraulicOwnership hydraulicOwners;
+        if (combined) hydraulicOwners = knownHydraulicOwners(before, after);
         const std::vector<ModelChange> nativeDelta = changesBetween(before, after);
         requireSameChanges(nativeDelta, actualNativeChanges);
 
@@ -292,15 +394,22 @@ static std::optional<VerifiedAnnotationActionBoundary> replayActionBoundary(
                 owners.emplace(entityId, claimedLayer);
                 byLayer[claimedLayer].push_back(edit);
             }
-            // Scalar payload edits first; root metadata is applied against the
-            // resulting network. The complete candidate is validated only
-            // after the whole atomic MODEL transaction, not between edits.
-            for (const aowis::model::ModelEntityEdit& edit : hydraulicEdits)
-                if (edit.entityType != QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType))
-                    applyHydraulicEdit(current, edit);
+            // Apply member updates, then native-owned membership changes,
+            // then root metadata. Validate the complete atomic action only
+            // after all domain edits are materialized.
+            std::vector<aowis::model::ModelEntityEdit> membershipEdits;
+            for (const aowis::model::ModelEntityEdit& edit : hydraulicEdits) {
+                if (edit.entityType == QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType))
+                    continue;
+                require(!edit.entityId.isNull() && !edit.ownerLayerId,
+                        "invalid hydraulic archive identity or annotation owner");
+                if (edit.before && edit.after) applyHydraulicScalar(current, edit);
+                else membershipEdits.push_back(edit);
+            }
+            applyHydraulicMembership(current, membershipEdits, hydraulicOwners);
             for (const aowis::model::ModelEntityEdit& edit : hydraulicEdits)
                 if (edit.entityType == QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType))
-                    applyHydraulicEdit(current, edit);
+                    applyHydraulicRoot(current, edit);
             // All layer-specific native deltas are materialized against the
             // same semantic event. Each layer retains its own membership order.
             for (const std::pair<const Key, std::vector<aowis::model::ModelEntityEdit>>& part : byLayer) {

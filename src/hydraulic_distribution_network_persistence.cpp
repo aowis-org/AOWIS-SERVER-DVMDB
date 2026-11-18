@@ -1443,6 +1443,33 @@ std::optional<RevisionId> tryIndexedUuidScalarEdits(
 
 } // namespace
 
+CanonicalHydraulicMemberImage canonicalHydraulicMemberImage(
+        const aowis::model::ModelEntityEdit& edit, const QByteArray& image) {
+    if (edit.entityId.isNull() || edit.ownerLayerId || image.isEmpty())
+        throw StorageError(StorageErrorKind::InvalidInput,
+                           "invalid canonical hydraulic member identity or image");
+    std::uint16_t collection = 0;
+#define CANONICAL_HISTORY_MEMBER(name, type, memberKind) \
+    if (edit.entityType == QStringLiteral(#type)) { \
+        QString error; \
+        const std::optional<type> decoded = ModelCodec<type>::decode(image, &error); \
+        if (!decoded || decoded->uuid != edit.entityId || \
+            ModelCodec<type>::encode(*decoded) != image) \
+            throw StorageError(StorageErrorKind::InvalidInput, \
+                               "noncanonical hydraulic member MODEL image"); \
+        ModelRecord record; \
+        record.kind = static_cast<std::uint16_t>(memberKind); \
+        record.payload = bytesFromQByteArray(image); \
+        record.references = membershipReferences(HydraulicEntity{*decoded}); \
+        return CanonicalHydraulicMemberImage{collection, std::move(record)}; \
+    } \
+    ++collection;
+    AOWIS_DVMDB_HYDRAULIC_COLLECTIONS(CANONICAL_HISTORY_MEMBER)
+#undef CANONICAL_HISTORY_MEMBER
+    throw StorageError(StorageErrorKind::InvalidInput,
+                       "unsupported hydraulic member MODEL entity type");
+}
+
 // HIST-03c2: MODEL-aware reverse replay of immutable original action frames.
 // This is intentionally a read-only *preview*. A MODEL event records canonical
 // entity values but not the original ordered membership position of a newly

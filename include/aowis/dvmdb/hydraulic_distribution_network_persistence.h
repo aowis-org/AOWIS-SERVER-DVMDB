@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 
 // Optional Qt/hydraulic persistence adapter for a complete NetworkHydraulicDistribution aggregate. The
@@ -225,6 +226,17 @@ enum class HydraulicEntityType : std::size_t {
     SimpleControl,
     RuleControl
 };
+
+// Decode one canonical MODEL hydraulic member image into its exact native
+// payload/reference representation and manifest collection ordinal. History
+// replay uses this same encoder as the native membership writer; it never
+// invents root/chunk records or trusts the client's reference index.
+struct CanonicalHydraulicMemberImage final {
+    std::uint16_t collection = 0;
+    ModelRecord record;
+};
+CanonicalHydraulicMemberImage canonicalHydraulicMemberImage(
+    const aowis::model::ModelEntityEdit& edit, const QByteArray& image);
 
 struct HydraulicEntityChange {
     QUuid uuid;
