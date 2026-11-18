@@ -2219,11 +2219,11 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                     before = historyNetworkAtDraft(service, source, *networkId);
                 }
             }
-            // Classify from the authenticated immutable MODEL frames, never
-            // from an untrusted client-supplied annotationLayerId. Mixed
-            // archives remain unsupported until combined hydraulic/annotation
-            // replay proves their complete native delta.
+            // The authenticated MODEL frame identities determine the archive
+            // domain, never a client-supplied layer/network ID. Combined
+            // navigation independently verifies the entire native revision.
             bool annotationArchive = false;
+            bool hydraulicArchive = false;
             if (archived) {
                 const WorkingCopyInfo pinned = service.workingCopy(draftId, false);
                 if (pinned.lastHistoryNavigationOperationId != operationId) {
@@ -2235,24 +2235,29 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                     const RevisionNativeActionWitness witness =
                         service.verifiedRevisionNativeActionWitness(
                             pinned.projectId, selectedBranch->name, *revision);
-                    annotationArchive = !witness.actions.empty();
                     for (const WorkingCopyEvent& frame : witness.actions) {
                         QString decodedError;
                         const std::optional<aowis::model::ModelEditTransaction> transaction =
                             aowis::model::ModelEditTransactionCodec::decode(
                                 record::qByteArrayFromBytes(frame.encoded), &decodedError);
-                        if (!transaction || transaction->edits.empty()) {
-                            annotationArchive = false;
-                            break;
+                        if (!transaction || transaction->edits.empty())
+                            throw ProjectError(ProjectErrorKind::Conflict,
+                                               "invalid archived MODEL transaction");
+                        for (const aowis::model::ModelEntityEdit& edit : transaction->edits) {
+                            if (edit.entityType == QStringLiteral("map.annotation"))
+                                annotationArchive = true;
+                            else
+                                hydraulicArchive = true;
                         }
-                        for (const aowis::model::ModelEntityEdit& edit : transaction->edits)
-                            if (edit.entityType != QStringLiteral("map.annotation"))
-                                annotationArchive = false;
                     }
                 }
             }
             QString reason;
-            const std::optional<WorkingCopyInfo> result = archived && annotationArchive
+            const std::optional<WorkingCopyInfo> result = archived && annotationArchive && hydraulicArchive
+                ? annotations::navigateVerifiedCombinedAction(service, operationId,
+                      draftId, sessionId, fencingToken, *expectedHead, *revision,
+                      static_cast<std::size_t>(position), generation, &reason)
+                : archived && annotationArchive
                 ? annotations::navigateVerifiedAnnotationAction(service, operationId,
                       draftId, sessionId, fencingToken, *expectedHead, *revision,
                       static_cast<std::size_t>(position), generation, &reason)

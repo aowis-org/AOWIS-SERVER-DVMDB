@@ -2836,6 +2836,127 @@ void exerciseAnnotationDraftHttp() {
           service.workingCopy(navigationDraft.id).generation == 3,
           "annotation archived History accepted a boundary beyond original Commit");
 
+    // B4.3 combined History: one immutable action changes both the
+    // Distribution root's metadata and an annotation. The authoritative
+    // MODEL archive (not a client-supplied classification) selects the mixed
+    // verifier, and the common native History publisher fences its overlay.
+    const std::function<std::optional<native::ModelRecord>(const native::Key&)> readSecond =
+        [&service, &project, &secondRevision](const native::Key& key) {
+            return service.getModelAtRevision(project.id, *secondRevision, key);
+        };
+    const std::optional<NetworkHydraulicDistribution> mixedBefore =
+        native::hydraulic::loadDraftHydraulicDistributionNetwork(readSecond, QUuid(networkId));
+    check(mixedBefore.has_value(), "mixed History lacks a committed Distribution root");
+    NetworkHydraulicDistribution mixedAfter = *mixedBefore;
+    mixedAfter.title_line_1 = QStringLiteral("Combined annotation and hydraulic History");
+    const QByteArray rootBeforeImage = aowis::model::hydraulicDistributionRootImage(*mixedBefore);
+    const QByteArray rootAfterImage = aowis::model::hydraulicDistributionRootImage(mixedAfter);
+    MapAnnotation combinedAnnotation = changed;
+    combinedAnnotation.text = QStringLiteral("Combined annotation action");
+    const QByteArray combinedAnnotationImage = native::ModelCodec<MapAnnotation>::encode(combinedAnnotation);
+    aowis::model::ModelEditTransaction combinedEvent;
+    combinedEvent.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+    combinedEvent.operation = QStringLiteral("hydraulic.annotation.combined");
+    combinedEvent.edits.append(aowis::model::ModelEntityEdit{
+        QUuid(networkId), QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType),
+        rootBeforeImage, rootAfterImage, std::nullopt});
+    combinedEvent.edits.append(aowis::model::ModelEntityEdit{
+        annotation.uuid, QStringLiteral("map.annotation"),
+        revised, combinedAnnotationImage, layerUuid});
+    const QByteArray combinedFrame = aowis::model::ModelEditTransactionCodec::encode(combinedEvent);
+    check(!combinedFrame.isEmpty(), "could not encode mixed MODEL edit frame");
+    const native::WorkingCopyInfo mixedDraft = service.createWorkingCopy(
+        project.id, "main", secondRevision, session.toStdString());
+    const native::WorkingCopyLease mixedLease = service.acquireWorkingCopyLease(
+        mixedDraft.id, session.toStdString(), 90);
+    const QString mixedPath = QStringLiteral("/dvmdb/v1/working-copies/") +
+        QString::fromStdString(mixedDraft.id);
+    const Response mixedSaved = client.call("POST", mixedPath + "/save-events",
+        QJsonObject{{"sessionId", session},
+            {"fencingToken", QString::fromStdString(mixedLease.token)},
+            {"expectedGeneration", "0"}, {"annotationLayerId", layerId},
+            {"changes", QJsonArray{}},
+            {"events", QJsonArray{QString::fromLatin1(combinedFrame.toBase64())}}});
+    check(mixedSaved.status == 200 && mixedSaved.json.value("generation") == "1",
+          "mixed hydraulic/annotation MODEL event could not be saved atomically");
+    const QString combinedOperation = QString::fromStdString(native::UuidV7::generate().toString());
+    const Response mixedCommit = client.call("POST", commitPath,
+        QJsonObject{{"operationId", combinedOperation},
+            {"draftId", QString::fromStdString(mixedDraft.id)},
+            {"sessionId", session},
+            {"fencingToken", QString::fromStdString(mixedLease.token)},
+            {"expectedGeneration", "1"}, {"expectedHead", secondCommittedRevision},
+            {"author", Client::testAuthor()}, {"message", "Combined History proof"}});
+    const QString mixedRevisionText = mixedCommit.json.value("revision").toString();
+    const std::optional<native::RevisionId> mixedRevision =
+        native::RevisionId::parse(mixedRevisionText.toStdString());
+    check(mixedCommit.status == 200 && mixedRevision.has_value(),
+          "mixed hydraulic/annotation local Commit failed");
+    const std::optional<native::annotations::VerifiedIndexedAnnotationActionBoundary> mixedProof =
+        native::annotations::verifyIndexedCombinedActionBoundary(
+            service, project.id, "main", *mixedRevision, 1, &historyError);
+    check(mixedProof && mixedProof->boundary.actionCount == 1 &&
+          mixedProof->boundary.changedLayerIds.size() == 1 &&
+          !native::annotations::verifyIndexedAnnotationActionBoundary(
+              service, project.id, "main", *mixedRevision, 1, &historyError),
+          "combined immutable action was not verified by the mixed-only replay engine");
+    const native::WorkingCopyInfo combinedNavigation = service.createWorkingCopy(
+        project.id, "main", mixedRevision, session.toStdString());
+    const native::WorkingCopyLease combinedLease = service.acquireWorkingCopyLease(
+        combinedNavigation.id, session.toStdString(), 90);
+    const QString combinedPath = QStringLiteral("/dvmdb/v1/working-copies/") +
+        QString::fromStdString(combinedNavigation.id);
+    const std::function<QJsonObject(const QString&, const QString&, const QString&)> combinedRequest =
+        [&](const QString& operationId, const QString& generation, const QString& boundary) {
+            return QJsonObject{{"operationId", operationId},
+                {"sessionId", session},
+                {"fencingToken", QString::fromStdString(combinedLease.token)},
+                {"expectedGeneration", generation}, {"expectedHead", mixedRevisionText},
+                {"revisionId", mixedRevisionText}, {"actionPosition", boundary}};
+        };
+    const QString combinedNavigateOperation =
+        QString::fromStdString(native::UuidV7::generate().toString());
+    const QJsonObject combinedZeroRequest = combinedRequest(combinedNavigateOperation, "0", "0");
+    const Response combinedZero = client.call("POST", combinedPath + "/history/navigate",
+                                              combinedZeroRequest);
+    const Response combinedZeroLayer = client.call("GET", combinedPath + "/annotation-layers/" + layerId);
+    const Response combinedZeroNetwork = client.call("GET", combinedPath + "/networks/" + networkId);
+    const std::optional<NetworkHydraulicDistribution> restoredBefore =
+        native::ModelCodec<NetworkHydraulicDistribution>::decode(
+            QByteArray::fromBase64(combinedZeroNetwork.json.value("payloadBase64").toString().toLatin1()));
+    check(combinedZero.status == 200 && combinedZero.json.value("generation") == "1" &&
+          combinedZeroLayer.status == 200 && combinedZeroNetwork.status == 200 &&
+          restoredBefore && restoredBefore->title_line_1 == mixedBefore->title_line_1 &&
+          !combinedZeroLayer.json.value("annotations").toArray().isEmpty() &&
+          combinedZeroLayer.json.value("annotations").toArray().first().toObject()
+              .value("payloadBase64").toString().toLatin1() == revised.toBase64() &&
+          service.optionalHead(project.id, "main") == mixedRevision,
+          "combined action boundary 0 failed to restore hydraulic and annotation values");
+    check(client.call("POST", combinedPath + "/history/navigate", combinedZeroRequest).status == 200 &&
+          service.workingCopy(combinedNavigation.id).generation == 1,
+          "combined History lost-response retry changed the generation twice");
+    const Response combinedOne = client.call("POST", combinedPath + "/history/navigate",
+        combinedRequest(QString::fromStdString(native::UuidV7::generate().toString()), "1", "1"));
+    const Response combinedOneLayer = client.call("GET", combinedPath + "/annotation-layers/" + layerId);
+    const Response combinedOneNetwork = client.call("GET", combinedPath + "/networks/" + networkId);
+    const std::optional<NetworkHydraulicDistribution> restoredAfter =
+        native::ModelCodec<NetworkHydraulicDistribution>::decode(
+            QByteArray::fromBase64(combinedOneNetwork.json.value("payloadBase64").toString().toLatin1()));
+    check(combinedOne.status == 200 && combinedOne.json.value("generation") == "2" &&
+          !combinedOne.json.value("dirty").toBool() &&
+          combinedOneLayer.status == 200 && combinedOneNetwork.status == 200 &&
+          restoredAfter && restoredAfter->title_line_1 == mixedAfter.title_line_1 &&
+          !combinedOneLayer.json.value("annotations").toArray().isEmpty() &&
+          combinedOneLayer.json.value("annotations").toArray().first().toObject()
+              .value("payloadBase64").toString().toLatin1() == combinedAnnotationImage.toBase64() &&
+          service.optionalHead(project.id, "main") == mixedRevision,
+          "combined action boundary 1 failed to restore committed hydraulic and annotation values");
+    check(client.call("POST", combinedPath + "/history/navigate",
+              combinedRequest(QString::fromStdString(native::UuidV7::generate().toString()),
+                              "0", "0")).status == 409 &&
+          service.workingCopy(combinedNavigation.id).generation == 2,
+          "combined History accepted stale draft generation");
+
     // A direct native/library Save can bypass the HTTP event validator.
     // A new draft with an orphaned annotation must be refused at HTTP Commit,
     // without changing the immutable branch HEAD or the saved draft.
@@ -2845,8 +2966,13 @@ void exerciseAnnotationDraftHttp() {
     orphan.kind = native::annotations::annotationMemberKind;
     orphan.payload = native::record::bytesFromQByteArray(
         native::ModelCodec<MapAnnotation>::encode(unowned));
-    const std::optional<native::RevisionId> base = secondRevision;
-    check(base.has_value(), "committed annotation revision is invalid");
+    // The combined History Commit advanced HEAD beyond secondRevision. The
+    // invalid-candidate regression must start from the current immutable HEAD,
+    // otherwise draft creation fails on stale-base fencing before reaching
+    // the annotation integrity gate it is intended to exercise.
+    const std::optional<native::RevisionId> base = mixedRevision;
+    check(base.has_value() && service.optionalHead(project.id, "main") == base,
+          "orphan annotation fixture must start at the combined Commit HEAD");
     const native::WorkingCopyInfo unsafe = service.createWorkingCopy(
         project.id, "main", base, session.toStdString());
     const native::WorkingCopyLease unsafeLease = service.acquireWorkingCopyLease(
@@ -2862,7 +2988,7 @@ void exerciseAnnotationDraftHttp() {
                     {"sessionId", session},
                     {"fencingToken", QString::fromStdString(unsafeLease.token)},
                     {"expectedGeneration", "1"},
-                    {"expectedHead", secondCommittedRevision},
+                    {"expectedHead", mixedRevisionText},
                     {"author", Client::testAuthor()},
                     {"message", "Must not publish unowned annotation"}});
     check(blockedCommit.status == 400 &&

@@ -349,6 +349,107 @@ void testMultipleLayers() {
            "two-network annotation MODEL event was not partitioned by layer");
 }
 
+void testCombinedHydraulicAndAnnotationReplay() {
+    Records parent = makeParent(false);
+    NetworkHydraulicDistribution network;
+    network.uuid = uuid(1);
+    network.id = QStringLiteral("Distribution");
+    HydraulicNodeJunction junction;
+    junction.uuid = uuid(50);
+    junction.id = QStringLiteral("J-50");
+    junction.coordinate_wgs84.latitude_deg = 14.1;
+    junction.coordinate_wgs84.longitude_deg = 32.2;
+    network.nodes_junctions.append(junction);
+    applyChanges(parent, hydraulic::fullDraftHydraulicDistributionNetworkChanges(network));
+
+    HydraulicNodeJunction first = junction;
+    first.elevation_m = 11.5;
+    HydraulicNodeJunction second = first;
+    second.elevation_m = 17.25;
+    model::ModelEntityEdit hydraulicFirst;
+    hydraulicFirst.entityId = junction.uuid;
+    hydraulicFirst.entityType = QStringLiteral("HydraulicNodeJunction");
+    hydraulicFirst.before = db::ModelCodec<HydraulicNodeJunction>::encode(junction);
+    hydraulicFirst.after = db::ModelCodec<HydraulicNodeJunction>::encode(first);
+    model::ModelEntityEdit hydraulicSecond = hydraulicFirst;
+    hydraulicSecond.before = hydraulicFirst.after;
+    hydraulicSecond.after = db::ModelCodec<HydraulicNodeJunction>::encode(second);
+
+    const model::ModelEntityEdit createAnnotation = create(annotation(1));
+    MapAnnotation changed = annotation(1);
+    changed.text = QStringLiteral("Edited after hydraulic change");
+    const model::ModelEntityEdit updateAnnotation = update(annotation(1), changed);
+    const std::vector<db::WorkingCopyEvent> actions = {
+        event(80, {hydraulicFirst, createAnnotation}),
+        event(81, {updateAnnotation}),
+        event(82, {hydraulicSecond})};
+    Records child = parent;
+    const db::Key junctionKey = db::record::keyFromUuid(junction.uuid);
+    child[junctionKey].payload = db::record::bytesFromQByteArray(*hydraulicFirst.after);
+    applyEvent(child, layer().uuid, {createAnnotation});
+    applyEvent(child, layer().uuid, {updateAnnotation});
+    child[junctionKey].payload = db::record::bytesFromQByteArray(*hydraulicSecond.after);
+
+    const std::function<std::optional<ann::VerifiedAnnotationActionBoundary>(
+            std::size_t, QString*)> verify = [&](std::size_t boundary, QString* error) {
+        return ann::replayVerifiedCombinedActionBoundary(
+            view(parent), view(child), actions, difference(parent, child),
+            trustedActionChain(actions), boundary, error);
+    };
+    const std::optional<ann::VerifiedAnnotationActionBoundary> zero = verify(0, nullptr);
+    const std::optional<ann::VerifiedAnnotationActionBoundary> one = verify(1, nullptr);
+    const std::optional<ann::VerifiedAnnotationActionBoundary> two = verify(2, nullptr);
+    const std::optional<ann::VerifiedAnnotationActionBoundary> three = verify(3, nullptr);
+    ensure(zero && zero->changesFromParent.empty() &&
+           one && one->changedLayerIds.size() == 1 &&
+           two && two->changesFromParent.size() == one->changesFromParent.size() &&
+           three && three->actionCount == 3 &&
+           three->changesFromParent.size() == difference(parent, child).size(),
+           "mixed replay did not recover all original action boundaries");
+    const db::Key annotationKey = db::record::keyFromUuid(annotation(1).uuid);
+    std::optional<db::ModelRecord> firstAnnotationRecord;
+    std::optional<db::ModelRecord> secondAnnotationRecord;
+    for (const db::ModelChange& change : one->changesFromParent)
+        if (change.key == annotationKey) firstAnnotationRecord = change.record;
+    for (const db::ModelChange& change : two->changesFromParent)
+        if (change.key == annotationKey) secondAnnotationRecord = change.record;
+    ensure(firstAnnotationRecord && secondAnnotationRecord &&
+           firstAnnotationRecord->payload != secondAnnotationRecord->payload &&
+           secondAnnotationRecord->payload == db::record::bytesFromQByteArray(*updateAnnotation.after),
+           "mixed History middle action did not preserve the annotation before/after image");
+    QString error;
+    ensure(!ann::replayVerifiedAnnotationActionBoundary(
+               view(parent), view(child), actions, difference(parent, child),
+               trustedActionChain(actions), 1, &error) && !error.isEmpty(),
+           "annotation-only verifier incorrectly accepted a hydraulic action");
+    ensure(!ann::replayVerifiedCombinedActionBoundary(
+               view(parent), view(child), {actions[0], actions[2]}, difference(parent, child),
+               trustedActionChain(actions), 2, &error),
+           "mixed archive accepted missing annotation update");
+    ensure(!ann::replayVerifiedCombinedActionBoundary(
+               view(parent), view(child), {actions[1], actions[0], actions[2]},
+               difference(parent, child), trustedActionChain(actions), 3, &error),
+           "mixed archive accepted reordered actions");
+    std::vector<db::ModelChange> forgedDelta = difference(parent, child);
+    forgedDelta.pop_back();
+    ensure(!ann::replayVerifiedCombinedActionBoundary(
+               view(parent), view(child), actions, forgedDelta,
+               trustedActionChain(actions), 3, &error),
+           "mixed archive accepted incomplete native delta");
+    model::ModelEntityEdit unsupported = hydraulicFirst;
+    unsupported.before.reset();
+    ensure(!ann::replayVerifiedCombinedActionBoundary(
+               view(parent), view(child), {event(83, {unsupported, createAnnotation})},
+               difference(parent, child), trustedActionChain(actions), 1, &error),
+           "mixed history accepted unproven hydraulic membership creation");
+    ensure(!ann::replayVerifiedCombinedActionBoundary(
+               view(parent), view(child), {actions[1]},
+               difference(parent, child), trustedActionChain({actions[1]}), 1, &error),
+           "combined verifier accepted annotation-only archive");
+    ensure(!verify(4, &error) && !error.isEmpty(),
+           "mixed archive accepted invalid action position");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -360,6 +461,7 @@ int main(int argc, char** argv) {
         testFailClosedProvenance();
         testNativeWitnessMismatch();
         testMultipleLayers();
+        testCombinedHydraulicAndAnnotationReplay();
         std::cout << "B4.3 annotation-only archive replay proofs passed\n";
         return 0;
     } catch (const std::exception& error) {

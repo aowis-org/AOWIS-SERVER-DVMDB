@@ -45,6 +45,10 @@ def main() -> None:
             "conditional engineering candidate validation was lost")
     require(routes, r"annotations::navigateVerifiedAnnotationAction\(service, operationId",
             "annotation archived History lost its fenced HTTP publication adapter")
+    require(routes, r"annotations::navigateVerifiedCombinedAction\(service, operationId",
+            "combined hydraulic/annotation History lost its fenced navigation adapter")
+    require(tests, r"combined action boundary 1 failed to restore committed hydraulic and annotation values",
+            "mixed HTTP History publication regression was removed")
     require(tests, r"annotation archived Redo to tip did not recover clean committed HEAD",
             "annotation archived History publication regression was removed")
     require(routes, r"server\.Post\(routeModelCommits.*?service\.commitModel\(.*?"

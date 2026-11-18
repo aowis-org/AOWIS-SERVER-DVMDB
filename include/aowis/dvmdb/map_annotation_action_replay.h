@@ -1,6 +1,6 @@
 #pragma once
 
-// B4.3: authenticated, read-only replay of annotation-only MODEL archives.
+// B4.3: authenticated replay of annotation-only and bounded combined MODEL archives.
 //
 // This deliberately accepts COMPLETE immutable parent/child model candidates
 // plus the exact native delta proved by ProjectService's local Commit witness.
@@ -12,8 +12,9 @@
 //
 // The replay primitive is read-only. The separate verified annotation-only
 // navigation adapter uses the existing fenced native History publisher.
-// Mixed hydraulic/annotation events, layer creation/deletion, and archived
-// History forks still require integration in the general revision planner.
+// Combined existing-hydraulic-entity updates/root metadata and annotations are
+// supported by a separate verified path. Hydraulic membership changes, layer
+// creation/deletion, and archived History forks are not supported yet.
 
 #include "aowis/dvmdb/native_store.h"
 #include "aowis/dvmdb/project_service.h"
@@ -58,11 +59,25 @@ std::optional<VerifiedAnnotationActionBoundary> replayVerifiedAnnotationActionBo
     std::size_t actionPosition,
     QString* error = nullptr);
 
+// Combined read-only replay for canonical action streams containing both
+// annotations and existing hydraulic entity updates/root metadata. It verifies
+// every intermediate candidate and the full native revision delta in original
+// authenticated action order. Hydraulic member creation/deletion, membership
+// reparenting and archived forks fail closed until separately implemented.
+std::optional<VerifiedAnnotationActionBoundary> replayVerifiedCombinedActionBoundary(
+    const MergeCandidate& parent,
+    const MergeCandidate& committed,
+    const std::vector<WorkingCopyEvent>& actions,
+    const std::vector<ModelChange>& actualNativeChanges,
+    const Hash& authenticatedActionChain,
+    std::size_t actionPosition,
+    QString* error = nullptr);
+
 // B4.3 read-only bridge from a REAL indexed local Commit to the annotation
 // replay verifier. The project/branch, immutable first parent, exact native
 // delta, and SHA-256 action order are obtained from ProjectService, not from
 // caller-supplied snapshots or action arrays. Initial, imported, forked, and
-// mixed-domain archives remain checkpoint-only in this adapter.
+// nonlocal archives remain checkpoint-only in this adapter.
 struct VerifiedIndexedAnnotationActionBoundary final {
     std::string revisionId;
     std::string commitOperationId;
@@ -73,11 +88,26 @@ std::optional<VerifiedIndexedAnnotationActionBoundary> verifyIndexedAnnotationAc
     const RevisionId& revision, std::size_t actionPosition,
     QString* error = nullptr);
 
+std::optional<VerifiedIndexedAnnotationActionBoundary> verifyIndexedCombinedActionBoundary(
+    ProjectService& service, std::string_view projectId, std::string_view branch,
+    const RevisionId& revision, std::size_t actionPosition,
+    QString* error = nullptr);
+
 // Publish an annotation-only archived action boundary through the same atomic,
 // lease/generation/HEAD-fenced History writer used by hydraulic navigation.
 // Only the server can construct candidateChanges; callers supply coordinates,
-// never record deltas. Mixed archives and forks remain unsupported.
+// never record deltas. Forks and hydraulic membership changes remain unsupported.
 std::optional<WorkingCopyInfo> navigateVerifiedAnnotationAction(
+    ProjectService& service, std::string_view operationId,
+    std::string_view draftId, std::string_view sessionId,
+    std::string_view fencingToken, const RevisionId& expectedHead,
+    const RevisionId& revision, std::size_t actionPosition,
+    std::uint64_t expectedGeneration, QString* error = nullptr);
+
+// Mixed hydraulic scalar/root-metadata + annotation archived navigation.
+// Publication uses the same generation/HEAD/lease fenced writer and is
+// allowed only after complete MODEL image/native delta proof.
+std::optional<WorkingCopyInfo> navigateVerifiedCombinedAction(
     ProjectService& service, std::string_view operationId,
     std::string_view draftId, std::string_view sessionId,
     std::string_view fencingToken, const RevisionId& expectedHead,

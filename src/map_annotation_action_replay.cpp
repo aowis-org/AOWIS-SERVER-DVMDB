@@ -1,10 +1,12 @@
 #include "aowis/dvmdb/map_annotation_action_replay.h"
 
 #include "aowis/dvmdb/map_annotation_persistence.h"
+#include "aowis/dvmdb/hydraulic_distribution_network_persistence.h"
 #include "aowis/dvmdb/map_annotation_snapshot_validation.h"
 #include "aowis/dvmdb/model_record_conversion.h"
 
 #include <aowis/model/edit/model_edit_transaction.h>
+#include <aowis/model/edit/hydraulic_distribution_root_edit.h>
 
 #include <QByteArray>
 #include <QSet>
@@ -143,6 +145,64 @@ Hash archiveActionChain(const std::vector<WorkingCopyEvent>& actions) {
     return chained;
 }
 
+// B4.3 mixed replay begins with existing hydraulic entity updates only.
+// Membership changes must go through the native chunk materializer, never a
+// blind MODEL image replacement.  Retaining stored reference indices is safe
+// only because candidate-wide semantic validation checks them after each
+// complete action, including dependency changes.
+template<typename Entity>
+void applyHydraulicScalar(Records& current, const aowis::model::ModelEntityEdit& edit,
+                          std::uint16_t expectedKind) {
+    require(edit.before.has_value() && edit.after.has_value(),
+            "mixed hydraulic member creation/deletion requires verified membership replay");
+    const Key key = record::keyFromUuid(edit.entityId);
+    const Records::iterator existing = current.find(key);
+    require(existing != current.end() && existing->second.kind == expectedKind &&
+            record::qByteArrayFromBytes(existing->second.payload) == *edit.before,
+            "stale or wrong-kind mixed hydraulic before-image");
+    QString error;
+    const std::optional<Entity> after = ModelCodec<Entity>::decode(*edit.after, &error);
+    require(after.has_value() && after->uuid == edit.entityId &&
+            ModelCodec<Entity>::encode(*after) == *edit.after,
+            "noncanonical mixed hydraulic after-image");
+    existing->second.payload = record::bytesFromQByteArray(*edit.after);
+}
+
+void applyHydraulicEdit(Records& current, const aowis::model::ModelEntityEdit& edit) {
+    require(!edit.entityId.isNull() && !edit.ownerLayerId,
+            "mixed hydraulic edit has invalid UUID or annotation ownership");
+    if (edit.entityType == QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType)) {
+        const MergeCandidate pinned = view(current);
+        const ModelChange change = hydraulic::materializeDraftRootEdit(pinned.get, edit);
+        current[change.key] = *change.record;
+        return;
+    }
+#define REPLAY_MIXED_SCALAR(type, kind) \
+    if (edit.entityType == QStringLiteral(#type)) { \
+        applyHydraulicScalar<type>(current, edit, static_cast<std::uint16_t>(kind)); \
+        return; \
+    }
+    REPLAY_MIXED_SCALAR(HydraulicPipeMaterial, 8)
+    REPLAY_MIXED_SCALAR(HydraulicPatternTime, 9)
+    REPLAY_MIXED_SCALAR(HydraulicCurveTankVolume, 10)
+    REPLAY_MIXED_SCALAR(HydraulicCurvePumpHead, 11)
+    REPLAY_MIXED_SCALAR(HydraulicCurvePumpEfficiency, 12)
+    REPLAY_MIXED_SCALAR(HydraulicCurveValveHeadloss, 13)
+    REPLAY_MIXED_SCALAR(HydraulicCurveValveCharacteristic, 14)
+    REPLAY_MIXED_SCALAR(HydraulicCurveGeneric, 15)
+    REPLAY_MIXED_SCALAR(HydraulicNodeReservoir, 2)
+    REPLAY_MIXED_SCALAR(HydraulicNodeJunction, 1)
+    REPLAY_MIXED_SCALAR(HydraulicNodeTank, 3)
+    REPLAY_MIXED_SCALAR(HydraulicDemandPoint, 7)
+    REPLAY_MIXED_SCALAR(HydraulicLinkPipe, 4)
+    REPLAY_MIXED_SCALAR(HydraulicLinkPump, 5)
+    REPLAY_MIXED_SCALAR(HydraulicLinkValve, 6)
+    REPLAY_MIXED_SCALAR(HydraulicControlSimple, 16)
+    REPLAY_MIXED_SCALAR(HydraulicControlRule, 17)
+#undef REPLAY_MIXED_SCALAR
+    throw std::runtime_error("unsupported entity type in mixed hydraulic/annotation archive");
+}
+
 void applyChanges(Records& records, const std::vector<ModelChange>& changes) {
     for (const ModelChange& change : changes) {
         if (change.record) records[change.key] = *change.record;
@@ -152,12 +212,12 @@ void applyChanges(Records& records, const std::vector<ModelChange>& changes) {
 
 } // namespace
 
-std::optional<VerifiedAnnotationActionBoundary> replayVerifiedAnnotationActionBoundary(
+static std::optional<VerifiedAnnotationActionBoundary> replayActionBoundary(
         const MergeCandidate& parent, const MergeCandidate& committed,
         const std::vector<WorkingCopyEvent>& actions,
         const std::vector<ModelChange>& actualNativeChanges,
         const Hash& authenticatedActionChain,
-        std::size_t actionPosition, QString* error) {
+        std::size_t actionPosition, bool combined, QString* error) {
     if (error) error->clear();
     const std::function<std::optional<VerifiedAnnotationActionBoundary>(const QString&)> fail =
         [error](const QString& reason) -> std::optional<VerifiedAnnotationActionBoundary> {
@@ -189,6 +249,8 @@ std::optional<VerifiedAnnotationActionBoundary> replayVerifiedAnnotationActionBo
         Records current = before;
         Records selected = before;
         std::set<Key> changedLayers;
+        bool annotationSeen = false;
+        bool hydraulicSeen = false;
         QSet<QUuid> transactionsSeen;
         std::size_t totalBytes = 0;
         for (std::size_t index = 0; index < actions.size(); ++index) {
@@ -209,12 +271,18 @@ std::optional<VerifiedAnnotationActionBoundary> replayVerifiedAnnotationActionBo
             require(!transaction->edits.empty(), "empty archived annotation transaction");
             std::set<Key> actionEntities;
             std::map<Key, std::vector<aowis::model::ModelEntityEdit>> byLayer;
+            std::vector<aowis::model::ModelEntityEdit> hydraulicEdits;
             for (const aowis::model::ModelEntityEdit& edit : transaction->edits) {
-                require(edit.entityType == QStringLiteral("map.annotation"),
-                        "mixed/non-annotation archive needs multi-domain replay");
                 const Key entityId = record::keyFromUuid(edit.entityId);
                 require(!edit.entityId.isNull() && actionEntities.insert(entityId).second,
-                        "repeated or null annotation UUID within archived transaction");
+                        "repeated or null UUID within archived transaction");
+                if (edit.entityType != QStringLiteral("map.annotation")) {
+                    require(combined, "mixed/non-annotation archive needs multi-domain replay");
+                    hydraulicSeen = true;
+                    hydraulicEdits.push_back(edit);
+                    continue;
+                }
+                annotationSeen = true;
                 require(edit.ownerLayerId && !edit.ownerLayerId->isNull(),
                         "archived annotation edit lacks authenticated layer provenance");
                 const Key claimedLayer = record::keyFromUuid(*edit.ownerLayerId);
@@ -224,6 +292,15 @@ std::optional<VerifiedAnnotationActionBoundary> replayVerifiedAnnotationActionBo
                 owners.emplace(entityId, claimedLayer);
                 byLayer[claimedLayer].push_back(edit);
             }
+            // Scalar payload edits first; root metadata is applied against the
+            // resulting network. The complete candidate is validated only
+            // after the whole atomic MODEL transaction, not between edits.
+            for (const aowis::model::ModelEntityEdit& edit : hydraulicEdits)
+                if (edit.entityType != QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType))
+                    applyHydraulicEdit(current, edit);
+            for (const aowis::model::ModelEntityEdit& edit : hydraulicEdits)
+                if (edit.entityType == QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType))
+                    applyHydraulicEdit(current, edit);
             // All layer-specific native deltas are materialized against the
             // same semantic event. Each layer retains its own membership order.
             for (const std::pair<const Key, std::vector<aowis::model::ModelEntityEdit>>& part : byLayer) {
@@ -237,6 +314,9 @@ std::optional<VerifiedAnnotationActionBoundary> replayVerifiedAnnotationActionBo
             validate(current);
             if (index + 1 == actionPosition) selected = current;
         }
+        if (combined)
+            require(annotationSeen && hydraulicSeen,
+                    "combined history archive must contain both annotation and hydraulic edits");
         // Membership manifests, member bytes and unrelated native records
         // must ALL match the real immutable child, not just changed objects.
         require(current.size() == after.size(),
@@ -257,13 +337,33 @@ std::optional<VerifiedAnnotationActionBoundary> replayVerifiedAnnotationActionBo
     }
 }
 
+std::optional<VerifiedAnnotationActionBoundary> replayVerifiedAnnotationActionBoundary(
+        const MergeCandidate& parent, const MergeCandidate& committed,
+        const std::vector<WorkingCopyEvent>& actions,
+        const std::vector<ModelChange>& actualNativeChanges,
+        const Hash& authenticatedActionChain,
+        std::size_t actionPosition, QString* error) {
+    return replayActionBoundary(parent, committed, actions, actualNativeChanges,
+                                authenticatedActionChain, actionPosition, false, error);
+}
+
+std::optional<VerifiedAnnotationActionBoundary> replayVerifiedCombinedActionBoundary(
+        const MergeCandidate& parent, const MergeCandidate& committed,
+        const std::vector<WorkingCopyEvent>& actions,
+        const std::vector<ModelChange>& actualNativeChanges,
+        const Hash& authenticatedActionChain,
+        std::size_t actionPosition, QString* error) {
+    return replayActionBoundary(parent, committed, actions, actualNativeChanges,
+                                authenticatedActionChain, actionPosition, true, error);
+}
+
 // First integration of standalone annotation proof with a REAL persisted
 // local Commit. All state comes from pinned immutable revision IDs; archived
 // forks are rejected until the mixed-domain ancestry planner can reconstruct
 // their logical (non-first-parent) starting coordinate.
-std::optional<VerifiedIndexedAnnotationActionBoundary> verifyIndexedAnnotationActionBoundary(
+static std::optional<VerifiedIndexedAnnotationActionBoundary> verifyIndexedActionBoundary(
         ProjectService& service, std::string_view projectId, std::string_view branch,
-        const RevisionId& revision, std::size_t actionPosition, QString* error) {
+        const RevisionId& revision, std::size_t actionPosition, bool combined, QString* error) {
     if (error) error->clear();
     const std::function<std::optional<VerifiedIndexedAnnotationActionBoundary>(const QString&)> fail =
         [error](const QString& reason) -> std::optional<VerifiedIndexedAnnotationActionBoundary> {
@@ -303,9 +403,9 @@ std::optional<VerifiedIndexedAnnotationActionBoundary> verifyIndexedAnnotationAc
             require(after.emplace(entry.first, entry.second).second,
                     "duplicate MODEL record in immutable annotation child");
         const std::optional<VerifiedAnnotationActionBoundary> boundary =
-            replayVerifiedAnnotationActionBoundary(
+            replayActionBoundary(
                 view(before), view(after), witness.actions, witness.actualNativeChanges,
-                witness.authenticatedActionChain, actionPosition, error);
+                witness.authenticatedActionChain, actionPosition, combined, error);
         if (!boundary) return std::nullopt;
         return VerifiedIndexedAnnotationActionBoundary{
             witness.revisionId, witness.commitOperationId, *boundary};
@@ -315,12 +415,26 @@ std::optional<VerifiedIndexedAnnotationActionBoundary> verifyIndexedAnnotationAc
 }
 
 
-std::optional<WorkingCopyInfo> navigateVerifiedAnnotationAction(
+std::optional<VerifiedIndexedAnnotationActionBoundary> verifyIndexedAnnotationActionBoundary(
+        ProjectService& service, std::string_view projectId, std::string_view branch,
+        const RevisionId& revision, std::size_t actionPosition, QString* error) {
+    return verifyIndexedActionBoundary(service, projectId, branch, revision,
+                                       actionPosition, false, error);
+}
+
+std::optional<VerifiedIndexedAnnotationActionBoundary> verifyIndexedCombinedActionBoundary(
+        ProjectService& service, std::string_view projectId, std::string_view branch,
+        const RevisionId& revision, std::size_t actionPosition, QString* error) {
+    return verifyIndexedActionBoundary(service, projectId, branch, revision,
+                                       actionPosition, true, error);
+}
+
+static std::optional<WorkingCopyInfo> navigateVerifiedAction(
         ProjectService& service, std::string_view operationId,
         std::string_view draftId, std::string_view sessionId,
         std::string_view fencingToken, const RevisionId& expectedHead,
         const RevisionId& revision, std::size_t actionPosition,
-        std::uint64_t expectedGeneration, QString* error) {
+        std::uint64_t expectedGeneration, bool combined, QString* error) {
     if (error) error->clear();
     const std::function<std::optional<WorkingCopyInfo>(const QString&)> fail =
         [error](const QString& message) -> std::optional<WorkingCopyInfo> {
@@ -353,8 +467,8 @@ std::optional<WorkingCopyInfo> navigateVerifiedAnnotationAction(
             return fail(QStringLiteral("Annotation History branch HEAD changed"));
         QString replayError;
         const std::optional<VerifiedIndexedAnnotationActionBoundary> selected =
-            verifyIndexedAnnotationActionBoundary(service, draft.projectId,
-                branch->name, revision, actionPosition, &replayError);
+            verifyIndexedActionBoundary(service, draft.projectId,
+                branch->name, revision, actionPosition, combined, &replayError);
         if (!selected)
             return fail(QStringLiteral("Annotation History archive is not verified: ") + replayError);
         const RevisionNativeActionWitness witness =
@@ -437,6 +551,28 @@ std::optional<WorkingCopyInfo> navigateVerifiedAnnotationAction(
     } catch (const std::exception& exception) {
         return fail(QString::fromUtf8(exception.what()));
     }
+}
+
+std::optional<WorkingCopyInfo> navigateVerifiedAnnotationAction(
+        ProjectService& service, std::string_view operationId,
+        std::string_view draftId, std::string_view sessionId,
+        std::string_view fencingToken, const RevisionId& expectedHead,
+        const RevisionId& revision, std::size_t actionPosition,
+        std::uint64_t expectedGeneration, QString* error) {
+    return navigateVerifiedAction(service, operationId, draftId, sessionId, fencingToken,
+                                  expectedHead, revision, actionPosition,
+                                  expectedGeneration, false, error);
+}
+
+std::optional<WorkingCopyInfo> navigateVerifiedCombinedAction(
+        ProjectService& service, std::string_view operationId,
+        std::string_view draftId, std::string_view sessionId,
+        std::string_view fencingToken, const RevisionId& expectedHead,
+        const RevisionId& revision, std::size_t actionPosition,
+        std::uint64_t expectedGeneration, QString* error) {
+    return navigateVerifiedAction(service, operationId, draftId, sessionId, fencingToken,
+                                  expectedHead, revision, actionPosition,
+                                  expectedGeneration, true, error);
 }
 
 } // namespace aowis::dvmdb::annotations

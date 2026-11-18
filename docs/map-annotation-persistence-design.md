@@ -566,3 +566,28 @@ reuse the same operation UUID and never advance generation twice. Mixed
 hydraulic/annotation actions, forked archives and initial checkpoints are
 still refused for annotation action navigation until joint replay is proven.
 This is structural integrity validation, not a hydraulic simulation gate.
+
+### B4.3 — Verified combined hydraulic/annotation action boundaries (bounded scope)
+
+`replayVerifiedCombinedActionBoundary()` reuses the authenticated immutable
+local-Commit action chain and exact parent/child native delta proof, now applying
+both domains within the same chronological MODEL transaction. It accepts
+canonical annotation creates/updates/deletes (with authenticated `ownerLayerId`)
+and existing hydraulic entity **updates**, plus reversible hydraulic network-root
+metadata edits. Every complete intermediate candidate runs B2 semantic integrity
+validation; the terminal candidate must match **every byte and reference** of
+the immutable committed revision, and the native delta must match exactly.
+The same indexed Commit witness, checkpoint planner and fenced/idempotent
+History publisher serve combined archives, including transactions that contain
+edits from both domains. HTTP dispatch derives domain classification only from
+the authenticated MODEL frames.
+
+This is deliberately **not yet unrestricted mixed History**: hydraulic member
+insertion/deletion, member reassignment, network creation/deletion, imported
+revisions lacking authenticated action archives, and archived History forks
+remain checkpoint-only. There is no event-level membership/ownership provenance
+for transient hydraulic members comparable to the annotation `ownerLayerId`.
+Unsupported changes fail before any working-copy cursor or overlay publication;
+they are never silently dropped. Structural/model-integrity constraints are
+unchanged, and neither connectivity nor successful hydraulic simulation is
+required for saving or History navigation.
