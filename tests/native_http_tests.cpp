@@ -2769,6 +2769,73 @@ void exerciseAnnotationDraftHttp() {
           !historyError.isEmpty(),
           "indexed annotation archive exposed an out-of-range action position");
 
+    // B4.3: publish the verified annotation-only archive through the SAME
+    // fenced working-copy History endpoint. Neither the client nor the draft
+    // supplies native record changes. The immutable HEAD never moves.
+    const native::WorkingCopyInfo navigationDraft = service.createWorkingCopy(
+        project.id, "main", secondRevision, session.toStdString());
+    const native::WorkingCopyLease navigationLease = service.acquireWorkingCopyLease(
+        navigationDraft.id, session.toStdString(), 90);
+    const QString navigationPath = QStringLiteral("/dvmdb/v1/working-copies/") +
+        QString::fromStdString(navigationDraft.id);
+    const QString navigationLayerPath = navigationPath + "/annotation-layers/" + layerId;
+    const std::function<QJsonObject(const QString&, const QString&, const QString&)> navigationBody =
+        [&](const QString& operationId, const QString& generation,
+            const QString& position) -> QJsonObject {
+            return QJsonObject{{"operationId", operationId},
+                {"sessionId", session},
+                {"fencingToken", QString::fromStdString(navigationLease.token)},
+                {"expectedGeneration", generation},
+                {"expectedHead", secondCommittedRevision},
+                {"revisionId", secondCommittedRevision},
+                {"actionPosition", position}};
+        };
+    const QString firstNavigationId =
+        QString::fromStdString(native::UuidV7::generate().toString());
+    const QJsonObject zeroNavigation = navigationBody(firstNavigationId, "0", "0");
+    const Response atZero = client.call("POST", navigationPath + "/history/navigate", zeroNavigation);
+    const Response emptyLayer = client.call("GET", navigationLayerPath);
+    check(atZero.status == 200 && atZero.json.value("generation") == "1" &&
+          atZero.json.value("archivedActionPosition") == "0" &&
+          emptyLayer.status == 200 && emptyLayer.json.value("count") == 0 &&
+          service.optionalHead(project.id, "main") == secondRevision,
+          "annotation archived parent could not be selected without changing HEAD");
+    check(client.call("POST", navigationPath + "/history/navigate", zeroNavigation).status == 200 &&
+          service.workingCopy(navigationDraft.id).generation == 1,
+          "annotation archived History retry advanced generation twice");
+    check(client.call("POST", navigationPath + "/history/navigate",
+              navigationBody(firstNavigationId, "0", "1")).status == 409,
+          "annotation archived History accepted a reused operation UUID for another position");
+    check(client.call("POST", navigationPath + "/history/navigate",
+              navigationBody(QString::fromStdString(native::UuidV7::generate().toString()),
+                             "0", "1")).status == 409,
+          "annotation archived History accepted a stale generation");
+    const Response atOne = client.call("POST", navigationPath + "/history/navigate",
+        navigationBody(QString::fromStdString(native::UuidV7::generate().toString()), "1", "1"));
+    const Response firstLayer = client.call("GET", navigationLayerPath);
+    const QJsonArray firstMembers = firstLayer.json.value("annotations").toArray();
+    check(atOne.status == 200 && atOne.json.value("generation") == "2" &&
+          firstLayer.status == 200 && firstMembers.size() == 1 &&
+          QByteArray::fromBase64(firstMembers.first().toObject().value("payloadBase64")
+              .toString().toLatin1()) == initial,
+          "annotation archived intermediate create was not reconstructed");
+    const Response atTwo = client.call("POST", navigationPath + "/history/navigate",
+        navigationBody(QString::fromStdString(native::UuidV7::generate().toString()), "2", "2"));
+    const Response finalLayer = client.call("GET", navigationLayerPath);
+    const QJsonArray finalMembers = finalLayer.json.value("annotations").toArray();
+    check(atTwo.status == 200 && atTwo.json.value("generation") == "3" &&
+          !atTwo.json.value("dirty").toBool() && finalLayer.status == 200 &&
+          finalMembers.size() == 1 &&
+          QByteArray::fromBase64(finalMembers.first().toObject().value("payloadBase64")
+              .toString().toLatin1()) == revised &&
+          service.optionalHead(project.id, "main") == secondRevision,
+          "annotation archived Redo to tip did not recover clean committed HEAD");
+    check(client.call("POST", navigationPath + "/history/navigate",
+              navigationBody(QString::fromStdString(native::UuidV7::generate().toString()),
+                             "3", "3")).status == 409 &&
+          service.workingCopy(navigationDraft.id).generation == 3,
+          "annotation archived History accepted a boundary beyond original Commit");
+
     // A direct native/library Save can bypass the HTTP event validator.
     // A new draft with an orphaned annotation must be refused at HTTP Commit,
     // without changing the immutable branch HEAD or the saved draft.

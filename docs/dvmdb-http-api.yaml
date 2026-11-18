@@ -342,10 +342,11 @@ paths:
         Navigate an explicit MODEL action boundary with complete native overlay
         reconstruction and atomic, durable cursor publication. With revisionId,
         select a boundary (0..actionCount) inside a fully verified, indexed
-        immutable local hydraulic Commit; the draft must be clean, an archived checkpoint, or an active journal
+        immutable local hydraulic or annotation-only Commit; the draft must be clean, an archived checkpoint, or an active journal
         verified at position zero; in the latter case V9 retains Redo frames. Without revisionId, select
         an active draft boundary (0..journalCount) for one EXISTING hydraulic
-        network. Multiple NetworkHydraulicDistribution roots remain supported in storage,
+        network. Mixed hydraulic/annotation Commit archives remain checkpoint-only pending
+        a combined replay verifier. Multiple NetworkHydraulicDistribution roots remain supported in storage,
         but multi-network active draft navigation and unborn base replay are
         deferred. Eligible position-zero active journals can cross into the
         archived HEAD and return without losing Redo. Immutable HEAD never moves.

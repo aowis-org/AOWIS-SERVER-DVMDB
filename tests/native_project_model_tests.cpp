@@ -237,10 +237,73 @@ void testStrictLocalCommitHeadPin() {
 }
 }
 
+void testDirectAnnotationCommitValidation() {
+    Temporary temp;
+    fs::create_directories(temp.path);
+    ProjectService service(temp.path);
+    const ProjectInfo project = service.createProject("Direct annotation guard", commitMetadata());
+    const RevisionId root = service.head(project.id, "main");
+    const Key ordinaryKey = key(21);
+    const Key layerKey = key(22);
+    const RevisionId generic = service.commitModel(project.id, "main",
+        {{ordinaryKey, record(21)}}, commitMetadata(), root);
+    ModelRecord annotation;
+    annotation.kind = 110; // Domain layer record; its payload is validated by the adapter.
+    annotation.payload = {0x11, 0x12};
+    const std::vector<ModelChange> insertion{{layerKey, annotation}};
+    rejects([&] {
+        (void)service.commitModel(project.id, "main", insertion, commitMetadata(), generic);
+    }, ProjectErrorKind::InvalidInput, "direct annotation Commit accepted a missing validator");
+    check(service.head(project.id, "main") == generic,
+          "rejected direct annotation Commit advanced HEAD");
+    const std::function<std::optional<std::string>(const MergeCandidate&)> refuse =
+        [](const MergeCandidate&) -> std::optional<std::string> {
+            return std::string("invalid annotation ownership");
+        };
+    rejects([&] {
+        (void)service.commitModel(project.id, "main", insertion, commitMetadata(), generic, refuse);
+    }, ProjectErrorKind::InvalidInput, "direct annotation Commit ignored its validator");
+    check(service.head(project.id, "main") == generic,
+          "rejected semantic candidate advanced HEAD");
+    std::size_t validationCalls = 0;
+    const std::function<std::optional<std::string>(const MergeCandidate&)> accept =
+        [&](const MergeCandidate& candidate) -> std::optional<std::string> {
+            ++validationCalls;
+            const std::optional<ModelRecord> base = candidate.get(ordinaryKey);
+            const std::optional<ModelRecord> layer = candidate.get(layerKey);
+            std::size_t visited = 0;
+            candidate.forEach([&](const Key&, const ModelRecord&) { ++visited; });
+            if (!base || !layer || layer->kind != 110 || visited != 2)
+                return std::string("candidate was not complete");
+            return std::nullopt;
+        };
+    const RevisionId committed = service.commitModel(project.id, "main",
+        insertion, commitMetadata(), generic, accept);
+    check(validationCalls == 1 && service.head(project.id, "main") == committed,
+          "validated direct annotation Commit did not publish");
+    rejects([&] {
+        (void)service.commitModel(project.id, "main", {{ordinaryKey, record(23)}},
+                                  commitMetadata(), committed);
+    }, ProjectErrorKind::InvalidInput, "existing annotation layer bypassed direct validator");
+    rejects([&] {
+        (void)service.commitModel(project.id, "main", {{ordinaryKey, record(23)}},
+                                  commitMetadata(), generic, accept);
+    }, ProjectErrorKind::Conflict, "stale expected HEAD was overwritten by validation pin");
+    service.configureRepositoryRole(RepositoryRole::Private);
+    rejects([&] {
+        (void)service.commitModelAtExpectedHead(project.id, "main",
+            {{ordinaryKey, record(24)}}, commitMetadata(), committed);
+    }, ProjectErrorKind::InvalidInput,
+       "strict direct annotation Commit accepted a missing validator");
+    check(service.head(project.id, "main") == committed,
+          "strict rejected annotation candidate changed HEAD");
+}
+
 int main() {
     try {
         testModelWorkflow();
         testStrictLocalCommitHeadPin();
+        testDirectAnnotationCommitValidation();
         std::cout << "UUIDv7 project model commit, fork, references and reopen passed\n";
         return 0;
     } catch (const std::exception& error) {

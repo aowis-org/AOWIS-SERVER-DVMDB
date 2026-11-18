@@ -1,4 +1,5 @@
 #include "aowis/dvmdb/map_annotation_persistence.h"
+#include "aowis/dvmdb/map_annotation_snapshot_validation.h"
 #include "aowis/dvmdb/hydraulic_distribution_network_persistence.h"
 #include "aowis/dvmdb/model_record_conversion.h"
 #include "aowis/dvmdb/storage_error.h"
@@ -15,6 +16,7 @@
 #include <map>
 #include <optional>
 #include <stdexcept>
+#include <string_view>
 #include <string>
 #include <utility>
 #include <vector>
@@ -182,6 +184,16 @@ std::filesystem::path tempDirectory() {
     return directory;
 }
 
+// The B1 revision fixtures must use the same fail-closed Commit path as
+// application callers, not skip semantic validation in the shared test store.
+void commitValidated(db::test::ProjectRepository& store,
+                     std::vector<db::ModelChange> changes) {
+    (void)store.native().commitModel(
+        store.project(), "main", std::move(changes),
+        db::test::commitMetadata("validated annotation fixture"),
+        std::nullopt, false, std::nullopt, ann::validateAnnotationSnapshot);
+}
+
 void testNativeRevisionRoundtrip() {
     const std::filesystem::path location = tempDirectory();
     try {
@@ -195,7 +207,7 @@ void testNativeRevisionRoundtrip() {
         changes.insert(changes.begin(),
             aowis::dvmdb::hydraulic::emptyDraftHydraulicDistributionNetworkRoot(
                 uuid(1), QStringLiteral("B1 distribution network")));
-        store.commitModel("main", changes);
+        commitValidated(store, changes);
         const db::RevisionId revision = store.head("main");
         const std::optional<ann::AnnotationLayerSnapshot> loaded =
             ann::loadAnnotationLayerAtRevision(store.native(), store.project(), revision, layer.uuid);
@@ -209,7 +221,7 @@ void testNativeRevisionRoundtrip() {
         // annotation and network reads must remain pinned to their revision.
         MapAnnotation modified = annotation(11);
         modified.text = QStringLiteral("Annotation edited in newer revision");
-        store.commitModel("main", ann::fullDraftAnnotationLayerChanges(
+        commitValidated(store, ann::fullDraftAnnotationLayerChanges(
             layer, {modified, annotation(12)}));
         const db::RevisionId newerRevision = store.head("main");
         require(newerRevision != revision, "annotation edit did not create a new revision");

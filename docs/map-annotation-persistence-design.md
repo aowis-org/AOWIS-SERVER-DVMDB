@@ -459,3 +459,110 @@ prevent publication after a concurrent change between preflight and Commit.
 **Remaining boundary:** direct library callers of `ProjectService::commitWorkingCopy`
 still need a native pre-publication domain validation contract. This HTTP
 preflight is not a substitute for that or for mixed-history replay.
+
+## Native local Commit semantic gate (B4.3 increment)
+
+`ProjectService::commitWorkingCopy()` cannot rely on a prior HTTP Save: native
+callers can place raw `ModelChange` records into the draft. For candidates with
+annotation records (110–112), or a newly saved Distribution root (100), the
+Qt-free service requires a semantic candidate-validation callback. It resolves
+the complete pinned immutable base plus the saved draft overlay under the
+project operation and draft locks, calls the supplied validator, and rejects
+unvalidated or invalid candidates **before** creating a local Commit intent,
+revision index, or advancing HEAD. The callback must be pure; it must not
+call `Repository`/`ProjectService` again or retain candidate readers.
+
+The HTTP Commit route supplies the B2 `validateAnnotationSnapshot()` callback;
+this is not an HTTP-only integrity rule. Ordinary generic record repositories
+still Commit without a domain validator. Rejected new operations leave the
+same operation UUID available for a corrected retry. Already-succeeded and
+pending operations retain the existing durable idempotency semantics.
+
+**Remaining boundary:** direct legacy-style revisions which already contain a
+Distribution root *without any annotation layer*, and which only modify an
+ordinary hydraulic member, are not forced through this callback. That format
+is unsupported for new project initialization, but older native test fixtures
+still exercise it. Full fail-closed treatment of direct `commitModel()` and
+all historic root-only native fixtures remains a separate consolidation step.
+
+## B4.3 direct MODEL Commit preflight (native service)
+
+`ProjectService::commitModel()` and `commitModelAtExpectedHead()` now provide a
+pure `MergeCandidate` semantic-validation hook. The service builds the complete
+candidate from the immutable observed HEAD and submitted changes. If the base
+or changes contain native annotation record kinds 110–112, the hook is mandatory,
+even for edits that only touch unrelated generic records. Both methods reject
+invalid candidates before revision publication and preserve HEAD on rejection.
+The generic HTTP `model-commits` route supplies B2's
+`validateAnnotationSnapshot()`, exactly as the local-Commit route does. When
+validation is needed, even an unpinned direct writer pins the observed HEAD
+for the final native storage CAS, avoiding a stale preflight publication.
+
+This validates native MODEL **structure and ownership**, not hydraulic solver
+readiness. It deliberately does not require a connected or hydraulically
+solvable network. This increment preserves older root-only hydraulic test
+fixtures: direct root-only submissions without any annotation record are not
+yet forced to supply the semantic validator. Similarly, callers using the
+low-level `Repository::commitModel()` directly bypass ProjectService. Both
+remaining boundaries must be closed before claiming universal native
+engineering-publication integrity. The complete-candidate scan is currently
+O(number of records) and should be optimized before large-network benchmarks.
+
+## B4.3 — Low-level Repository Commit preflight
+
+`Repository::commitModel()` is a native API callable without HTTP or
+`ProjectService`. Under the repository's file/operation lock, it now builds
+an immutable MODEL candidate from the committed HEAD and the proposed changes.
+If **any** original or proposed record has annotation kind 110–112, the caller
+must supply a `MergeCandidate` semantic validator. A supplied validator runs
+before reference preparation, object writes, Commit revision creation, or
+branch HEAD update; failure leaves pack and HEAD untouched. The high-level
+Commit entry points forward their existing validator to this boundary.
+
+This native store stays free of MODEL/Qt dependencies: trusted engineering
+adapters must supply the actual B2 validator, not a permissive placeholder.
+Ordinary generic-model repositories still work without such a callback.
+When retrying an already durable pending local Commit after a crash, a missing
+annotation validator returns a caller error **without** permanently rejecting
+the intent; retry with the real domain adapter to complete it.
+
+**Performance and scope:** This correctness-first guard currently scans the
+entire pinned base snapshot for annotation kinds on each native MODEL Commit.
+Large-project benchmarks and an indexed kind-presence optimization remain
+necessary. Root-only legacy hydraulic fixtures (kind 100 without annotation
+records) and direct low-level `writeRevision()` publication still need explicit
+engineering-format policy. Neither network connectivity nor hydraulic solver
+feasibility is a persistence condition.
+
+## B4.3 indexed Commit witness for annotation-only History (read-only)
+
+`verifyIndexedAnnotationActionBoundary()` connects the annotation MODEL replay
+primitive to **actual**, indexed, first-parent local Commits. It requests a
+`RevisionNativeActionWitness` from `ProjectService`, including the verified
+ordered SHA-256 action chain and complete native delta, then loads both full
+MODEL snapshots by pinned immutable revision UUID. A malformed or missing
+archive, initial Commit without a parent, forked archive, mixed MODEL event,
+wrong action coordinate, abandoned Redo suffix, ownership violation or unjournaled native delta
+fails closed. Intermediate action boundaries are returned as native deltas
+relative to the original immutable parent, **not** a draft-relative overlay.
+
+This increment is intentionally **read-only**: it does not change HTTP
+navigation, write any History cursor or claim that mixed hydraulic/annotation
+Undo/Redo works. Next: combine the hydraulic and annotation replay planners
+into one exact, all-domain candidate under the existing fenced/idempotent
+History publication operation; keep per-domain action order and ownership.
+
+### B4.3 — Fenced archived annotation navigation
+
+Annotation-only local Commit archives with an immutable first parent can now
+use the same `/working-copies/{draft}/history/navigate` endpoint and native
+atomic History publisher as hydraulic archives. The server classifies the
+original authenticated MODEL action frames; the client does not select the
+replay engine or provide candidate records. Archive SHA-256 ordering, exact
+revision delta, ownerLayerId and intermediate snapshots are proven before
+computing a complete HEAD-relative replacement overlay. The native publisher
+rechecks the lease, generation, HEAD, revision and Commit identity. Retries
+reuse the same operation UUID and never advance generation twice. Mixed
+hydraulic/annotation actions, forked archives and initial checkpoints are
+still refused for annotation action navigation until joint replay is proven.
+This is structural integrity validation, not a hydraulic simulation gate.

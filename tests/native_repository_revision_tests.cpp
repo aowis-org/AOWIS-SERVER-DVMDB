@@ -230,12 +230,79 @@ void testCommitMetadataIsRecorded() {
     }
 }
 
+
+// The underlying Repository API must not be a way around the high-level
+// annotation candidate gate. Tests use a deliberately generic callback to
+// exercise the callback contract; production callers supply the B2 adapter.
+void testNativeAnnotationCommitRequiresValidation() {
+    Sandbox tmp;
+    Repository repo(tmp.path);
+    const ProjectId project = ProjectId::generate();
+    const RevisionId root = repo.createRootBranch(project, "main", commitMetadata());
+    Key layer{};
+    layer[15] = 77;
+    ModelRecord annotation;
+    annotation.kind = 110;
+    annotation.payload = Bytes{1, 2, 3};
+    const std::uint64_t emptyPack = repo.packSize();
+    expected([&] {
+        (void)repo.commitModel(project, "main", {{layer, annotation}},
+            commitMetadata(), root);
+    }, StorageErrorKind::InvalidInput, "native Repository accepted an annotation without validation");
+    check(repo.head(project, "main") == root && repo.packSize() == emptyPack,
+          "unvalidated Repository Commit changed HEAD or pack");
+
+    std::size_t seen = 0;
+    const std::function<std::optional<std::string>(const MergeCandidate&)> reject =
+        [&seen, &layer](const MergeCandidate& candidate) -> std::optional<std::string> {
+            ++seen;
+            const std::optional<ModelRecord> record = candidate.get(layer);
+            check(record && record->kind == 110, "validator missed annotation in candidate");
+            std::size_t total = 0;
+            candidate.forEach([&total](const Key&, const ModelRecord&) { ++total; });
+            check(total == 1, "validator did not receive complete candidate");
+            return std::string("invalid annotation layer");
+        };
+    expected([&] {
+        (void)repo.commitModel(project, "main", {{layer, annotation}},
+            commitMetadata(), root, false, std::nullopt, reject);
+    }, StorageErrorKind::InvalidInput, "native Repository ignored semantic rejection");
+    check(seen == 1 && repo.head(project, "main") == root &&
+          repo.packSize() == emptyPack,
+          "semantic Repository rejection changed persistent state");
+
+    const std::function<std::optional<std::string>(const MergeCandidate&)> accept =
+        [](const MergeCandidate&) -> std::optional<std::string> { return std::nullopt; };
+    const RevisionId annotated = repo.commitModel(project, "main", {{layer, annotation}},
+        commitMetadata(), root, false, std::nullopt, accept);
+    const std::uint64_t publishedPack = repo.packSize();
+    Key generic{};
+    generic[15] = 78;
+    ModelRecord ordinary;
+    ordinary.kind = 1;
+    ordinary.payload = Bytes{4};
+    // The edit is unrelated, but the candidate still contains the existing
+    // annotation and therefore requires domain validation.
+    expected([&] {
+        (void)repo.commitModel(project, "main", {{generic, ordinary}},
+            commitMetadata(), annotated);
+    }, StorageErrorKind::InvalidInput, "unrelated native edit bypassed persisted annotations");
+    expected([&] {
+        (void)repo.commitModel(project, "main", {{layer, std::nullopt}},
+            commitMetadata(), annotated);
+    }, StorageErrorKind::InvalidInput, "native deletion bypassed annotation validation");
+    check(repo.head(project, "main") == annotated &&
+          repo.packSize() == publishedPack,
+          "rejected native edit after annotations changed HEAD or pack");
+}
+
 } // namespace
 
 int main() {
     try {
         testLivePackStorage();
         testCommitMetadataIsRecorded();
+        testNativeAnnotationCommitRequiresValidation();
         std::cout << "Packed UUIDv7 revision storage and recovery passed\n";
         return 0;
     } catch (const std::exception& error) {

@@ -4171,7 +4171,9 @@ RevisionId Repository::commitModel(const ProjectId& project, std::string_view br
                                       const CommitMetadata& metadata,
                                       std::optional<RevisionId> expectedHead,
                                       bool requireExactHead,
-                                      std::optional<ReservedRevision> reserved) {
+                                      std::optional<ReservedRevision> reserved,
+                                      const std::function<std::optional<std::string>(const MergeCandidate&)>&
+                                          validate) {
     validateCommitMetadata(metadata);
     require(Err::InvalidInput, !reserved || reserved->committedAtMs != 0,
             "a reserved revision needs its commit time");
@@ -4197,6 +4199,62 @@ RevisionId Repository::commitModel(const ProjectId& project, std::string_view br
     }
     require(Err::InvalidInput, !previous || previous->modelIndexed || isZero(previous->root),
             "cannot enable model indexing on a populated raw branch");
+
+    // Repository is also a public, Qt-free native API. Do not assume callers
+    // passed through HTTP or ProjectService: an annotation record can be
+    // inserted, updated, removed, or left untouched by unrelated edits here.
+    // Preflight against this exact locked HEAD, before prepareModelCommitLocked
+    // writes any reference-index or pack objects.
+    std::map<Key, ModelRecord> candidateRecords;
+    bool annotationPresent = false;
+    const std::function<bool(const ModelRecord&)> annotationKind =
+        [](const ModelRecord& record) {
+            return record.kind >= 110 && record.kind <= 112;
+        };
+    if (previous && !isZero(previous->root)) {
+        std::vector<std::pair<Key, Hash>> hashes;
+        listHashes(previous->root, hashes);
+        for (const std::pair<Key, Hash>& entry : hashes) {
+            const Bytes stored = load(entry.second);
+            require(Err::Corruption, !stored.empty() && stored.front() == 'V',
+                    "invalid MODEL object during commit preflight");
+            const ModelRecord record = decodeModelRecord(
+                Bytes(stored.begin() + 1, stored.end()));
+            annotationPresent = annotationPresent || annotationKind(record);
+            candidateRecords.emplace(entry.first, record);
+        }
+    }
+    for (const ModelChange& change : changes) {
+        if (change.record) {
+            ModelRecord record = *change.record;
+            std::sort(record.references.begin(), record.references.end());
+            record.references.erase(std::unique(record.references.begin(),
+                record.references.end()), record.references.end());
+            annotationPresent = annotationPresent || annotationKind(record);
+            candidateRecords[change.key] = std::move(record);
+        } else {
+            candidateRecords.erase(change.key);
+        }
+    }
+    if (annotationPresent && !validate)
+        throw StorageError(Err::InvalidInput,
+                           std::string(missingAnnotationCommitValidator));
+    if (validate) {
+        MergeCandidate candidate;
+        candidate.get = [&candidateRecords](const Key& key) -> std::optional<ModelRecord> {
+            const std::map<Key, ModelRecord>::const_iterator found = candidateRecords.find(key);
+            if (found == candidateRecords.end()) return std::nullopt;
+            return found->second;
+        };
+        candidate.forEach = [&candidateRecords](
+                const std::function<void(const Key&, const ModelRecord&)>& visitor) {
+            for (const std::pair<const Key, ModelRecord>& entry : candidateRecords)
+                visitor(entry.first, entry.second);
+        };
+        if (const std::optional<std::string> error = validate(candidate))
+            throw StorageError(Err::InvalidInput,
+                               "invalid native MODEL Commit candidate: " + *error);
+    }
     const PreparedModelCommit prepared = prepareModelCommitLocked(
         previous ? previous->root : Hash{}, previous ? previous->referencesRoot : Hash{}, std::move(changes));
     const Hash newRoot = applyEncodedChangesLocked(previous ? previous->root : Hash{}, prepared.encoded);

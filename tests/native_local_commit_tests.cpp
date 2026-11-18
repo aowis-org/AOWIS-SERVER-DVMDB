@@ -83,6 +83,91 @@ ModelChange changeWithValue(std::uint8_t value) {
     return ModelChange{key, record};
 }
 
+// B4.3: the native Commit API must not let a direct Save of server-owned
+// annotation records bypass the domain's semantic validator. Rejections must
+// happen before the durable operation index/intent or immutable HEAD exists.
+void testNativeAnnotationCommitSemanticGate() {
+    TempRoot root;
+    ProjectService service(root.path);
+    service.configureRepositoryRole(RepositoryRole::Private);
+    const std::string project = service.createUnbornProject("native annotation gate").id;
+    const std::string session = UuidV7::generate().toString();
+    const std::string draft = service.createWorkingCopy(project, "main", std::nullopt, session).id;
+    const std::string token = service.acquireWorkingCopyLease(draft, session, 120).token;
+    Key annotationId{};
+    annotationId[15] = 62;
+    ModelRecord orphan;
+    orphan.kind = 112;
+    orphan.payload = {1, 2, 3};
+    const WorkingCopyInfo saved = service.saveWorkingCopyChanges(
+        draft, session, token, 0, {ModelChange{annotationId, orphan}});
+    require(saved.generation == 1, "annotation gate fixture was not saved");
+    const std::string operation = UuidV7::generate().toString();
+    bool rejectedMissing = false;
+    try {
+        (void)service.commitWorkingCopy(operation, draft, session, token, 1,
+                                         std::nullopt, commitMetadata());
+    } catch (const ProjectError& error) {
+        rejectedMissing = error.kind() == ProjectErrorKind::InvalidInput;
+    }
+    require(rejectedMissing, "native Commit accepted an annotation without semantic validation");
+    std::size_t checked = 0;
+    bool rejectedInvalid = false;
+    try {
+        (void)service.commitWorkingCopy(operation, draft, session, token, 1,
+            std::nullopt, commitMetadata(),
+            [&checked, &annotationId](const aowis::dvmdb::MergeCandidate& candidate)
+                    -> std::optional<std::string> {
+                ++checked;
+                const std::optional<ModelRecord> found = candidate.get(annotationId);
+                require(found && found->kind == 112,
+                        "semantic validator did not receive the native candidate");
+                std::size_t count = 0;
+                candidate.forEach([&count](const Key&, const ModelRecord&) { ++count; });
+                require(count == 1, "semantic validator did not receive all candidate records");
+                return std::string("orphaned annotation fixture");
+            });
+    } catch (const ProjectError& error) {
+        rejectedInvalid = error.kind() == ProjectErrorKind::InvalidInput;
+    }
+    require(rejectedInvalid && checked == 1,
+            "native Commit ignored the semantic validator's rejection");
+    bool operationAbsent = false;
+    try { (void)service.localCommitStatus(operation); }
+    catch (const ProjectError& error) {
+        operationAbsent = error.kind() == ProjectErrorKind::NotFound;
+    }
+    require(operationAbsent && !service.optionalHead(project, "main") &&
+            service.workingCopy(draft).generation == 1 &&
+            service.workingCopy(draft).dirty,
+            "rejected annotation Commit changed HEAD, draft, or durable Commit ledger");
+
+    // A new Distribution root cannot be published without passing the
+    // combined network/annotation validator either.
+    const std::string secondProject = service.createUnbornProject("native network gate").id;
+    const std::string secondDraft =
+        service.createWorkingCopy(secondProject, "main", std::nullopt, session).id;
+    const std::string secondToken =
+        service.acquireWorkingCopyLease(secondDraft, session, 120).token;
+    Key rootId{};
+    rootId[15] = 63;
+    ModelRecord networkRoot;
+    networkRoot.kind = 100;
+    networkRoot.payload = {4, 5, 6};
+    require(service.saveWorkingCopyChanges(secondDraft, session, secondToken, 0,
+                {ModelChange{rootId, networkRoot}}).generation == 1,
+            "network-root gate fixture was not saved");
+    bool rejectedRoot = false;
+    try {
+        (void)service.commitWorkingCopy(UuidV7::generate().toString(), secondDraft,
+            session, secondToken, 1, std::nullopt, commitMetadata());
+    } catch (const ProjectError& error) {
+        rejectedRoot = error.kind() == ProjectErrorKind::InvalidInput;
+    }
+    require(rejectedRoot && !service.optionalHead(secondProject, "main"),
+            "new Distribution root bypassed the native semantic Commit gate");
+}
+
 // HIST-02: a successful Commit must not erase its underlying MODEL actions,
 // even though the active draft is rebased and its short journal disappears.
 // All frames are part of the durable intent BEFORE publishing a revision.
@@ -2215,6 +2300,7 @@ int main() {
         testCommittedActionHistory();
         testVerifiedRevisionNativeWitness();
         testBranchDraftHistoryPaging();
+        testNativeAnnotationCommitSemanticGate();
         testLocalCommitRecovery();
         testConcurrentFirstCommitIsSerialized();
         testRejectedOperationIsDurable();

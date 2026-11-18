@@ -366,18 +366,31 @@ public:
                                   std::string_view source, const CommitMetadata& metadata,
                                   std::optional<RevisionId> expectedTarget = std::nullopt,
                                   std::optional<RevisionId> expectedSource = std::nullopt);
+    // The optional MODEL-aware validator runs against the complete immutable
+    // base + direct-write candidate before publication. Native callers MUST
+    // provide it when the candidate contains map annotations. Generic MODEL
+    // repositories remain independent of Qt and hydraulic solvers.
     RevisionId commitModel(std::string_view projectId, std::string_view branch,
                              std::vector<ModelChange> changes, const CommitMetadata& metadata,
-                             std::optional<RevisionId> expectedHead = std::nullopt);
+                             std::optional<RevisionId> expectedHead = std::nullopt,
+                             const std::function<std::optional<std::string>(const MergeCandidate&)>&
+                                 validate = {});
     // Strict expected-local-HEAD CAS for VC-05 on a private repository.
     // Unlike commitModel(), nullopt means the branch MUST still be unborn.
     // Does not consume a draft
     // or provide operation-ID replay yet; only use under a commit coordinator.
     RevisionId commitModelAtExpectedHead(std::string_view projectId,
         std::string_view branch, std::vector<ModelChange> changes,
-        const CommitMetadata& metadata, std::optional<RevisionId> expectedLocalHead);
+        const CommitMetadata& metadata, std::optional<RevisionId> expectedLocalHead,
+        const std::function<std::optional<std::string>(const MergeCandidate&)>&
+            validate = {});
     std::optional<ModelRecord> getModelAtRevision(std::string_view projectId,
                                                    const RevisionId& revision, const Key& key);
+    // Complete, revision-pinned MODEL snapshot for authenticated history
+    // verification. This is a bounded native read; callers must not merge
+    // results from a moving branch HEAD into the same candidate.
+    std::vector<std::pair<Key, ModelRecord>> modelRecordsAtRevision(
+        std::string_view projectId, const RevisionId& revision);
     // Persistent identity of this DVMDB catalogue / repository root (UUIDv7).
     // Not a user identity and not an authorization credential.
     std::string repositoryId() const;
@@ -470,12 +483,23 @@ public:
     // Replays of an accepted request return the same immutable revision UUID.
     // `metadata` (author and message) is part of the request; the commit time
     // is reserved with the operation, so a retry writes the same revision.
+    // A domain-aware Commit must be supplied with its complete semantic
+    // candidate validator. The Qt-free native service rejects annotation
+    // records (and newly written Distribution roots) if no validator is
+    // provided; generic model records remain valid without one. The callback
+    // receives a temporary, complete proposed snapshot and must not call back
+    // into ProjectService/Repository or retain its readers. It runs while
+    // holding the project's operation lock and draft lock, BEFORE any durable
+    // Commit intent or revision is published. Existing accepted operation IDs
+    // retain their idempotent retry semantics without revalidating a rebased
+    // draft. An error string rejects the request without mutation.
     LocalCommitInfo commitWorkingCopy(
         std::string_view operationId, std::string_view draftId,
         std::string_view sessionId, std::string_view fencingToken,
         std::uint64_t expectedGeneration,
         std::optional<RevisionId> expectedLocalHead,
-        const CommitMetadata& metadata);
+        const CommitMetadata& metadata,
+        const std::function<std::optional<std::string>(const MergeCandidate&)>& validate = {});
     // Durable status query. A pending record is reconciled against committed
     // ancestry before returning, including after a process restart.
     LocalCommitInfo localCommitStatus(std::string_view operationId);

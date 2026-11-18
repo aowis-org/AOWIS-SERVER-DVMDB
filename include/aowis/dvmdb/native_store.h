@@ -57,6 +57,12 @@ struct ModelChange {
     std::optional<ModelRecord> record;
 };
 
+// Explicit failure reason for a missing domain validator. Pending local Commit
+// recovery must preserve its durable intent instead of permanently rejecting
+// an otherwise valid operation when retrying without this dependency.
+inline constexpr std::string_view missingAnnotationCommitValidator =
+    "native annotation Commit requires a semantic candidate validator";
+
 // Who made a revision and why; every revision records it, together with the
 // time the repository published it. There is no authentication: the author
 // is whoever the caller says it is.
@@ -439,11 +445,18 @@ public:
     // of silently accepting a concurrently published first commit, and a
     // reserved revision UUID and commit time, so a retry writes the
     // identical record.
+    // Low-level MODEL writer. Annotation-bearing candidates require the same
+    // caller-supplied semantic validation as ProjectService. The callback
+    // executes under the repository lock, must not call Repository methods,
+    // and must not retain any candidate views. Generic MODEL records need no
+    // Qt or domain library. A null validator is rejected for annotations.
     RevisionId commitModel(const ProjectId& project, std::string_view branch,
                              std::vector<ModelChange> changes, const CommitMetadata& metadata,
                              std::optional<RevisionId> expectedHead = std::nullopt,
                              bool requireExactHead = false,
-                             std::optional<ReservedRevision> reserved = std::nullopt);
+                             std::optional<ReservedRevision> reserved = std::nullopt,
+                             const std::function<std::optional<std::string>(const MergeCandidate&)>&
+                                 validate = {});
     // Low-level revision publication over already stored trees (tests/tools).
     RevisionId writeRevision(const ProjectId& project, const Hash& root,
                                const Hash& referencesRoot, bool modelIndexed,

@@ -10,7 +10,8 @@
 // surviving members have not silently changed ownership. Transient
 // create-then-delete actions can now be reconstructed safely.
 //
-// This is a proof/preview primitive, NOT a publisher or an HTTP History cursor.
+// The replay primitive is read-only. The separate verified annotation-only
+// navigation adapter uses the existing fenced native History publisher.
 // Mixed hydraulic/annotation events, layer creation/deletion, and archived
 // History forks still require integration in the general revision planner.
 
@@ -22,6 +23,8 @@
 
 #include <cstddef>
 #include <optional>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace aowis::dvmdb::annotations {
@@ -54,5 +57,31 @@ std::optional<VerifiedAnnotationActionBoundary> replayVerifiedAnnotationActionBo
     const Hash& authenticatedActionChain,
     std::size_t actionPosition,
     QString* error = nullptr);
+
+// B4.3 read-only bridge from a REAL indexed local Commit to the annotation
+// replay verifier. The project/branch, immutable first parent, exact native
+// delta, and SHA-256 action order are obtained from ProjectService, not from
+// caller-supplied snapshots or action arrays. Initial, imported, forked, and
+// mixed-domain archives remain checkpoint-only in this adapter.
+struct VerifiedIndexedAnnotationActionBoundary final {
+    std::string revisionId;
+    std::string commitOperationId;
+    VerifiedAnnotationActionBoundary boundary;
+};
+std::optional<VerifiedIndexedAnnotationActionBoundary> verifyIndexedAnnotationActionBoundary(
+    ProjectService& service, std::string_view projectId, std::string_view branch,
+    const RevisionId& revision, std::size_t actionPosition,
+    QString* error = nullptr);
+
+// Publish an annotation-only archived action boundary through the same atomic,
+// lease/generation/HEAD-fenced History writer used by hydraulic navigation.
+// Only the server can construct candidateChanges; callers supply coordinates,
+// never record deltas. Mixed archives and forks remain unsupported.
+std::optional<WorkingCopyInfo> navigateVerifiedAnnotationAction(
+    ProjectService& service, std::string_view operationId,
+    std::string_view draftId, std::string_view sessionId,
+    std::string_view fencingToken, const RevisionId& expectedHead,
+    const RevisionId& revision, std::size_t actionPosition,
+    std::uint64_t expectedGeneration, QString* error = nullptr);
 
 } // namespace aowis::dvmdb::annotations

@@ -1,6 +1,7 @@
 #include "aowis/dvmdb/map_annotation_snapshot_validation.h"
 #include "aowis/dvmdb/map_annotation_persistence.h"
 #include "aowis/dvmdb/model_record_conversion.h"
+#include "aowis/dvmdb/storage_error.h"
 #include "project_repository.h"
 
 #include <QCoreApplication>
@@ -15,6 +16,8 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 #include <unistd.h>
 
@@ -83,6 +86,18 @@ std::vector<db::ModelChange> edit(const MapAnnotation& value) {
     return {{db::record::keyFromUuid(value.uuid), record}};
 }
 
+// These tests use the same B2 full-candidate semantic validator as the
+// production annotation Commit path. An annotation-bearing native Commit
+// without a validator must be rejected, even in test fixtures.
+db::RevisionId commitValidated(db::test::ProjectRepository& store,
+                               std::string_view branch,
+                               std::vector<db::ModelChange> changes) {
+    return store.native().commitModel(
+        store.project(), branch, std::move(changes),
+        db::test::commitMetadata("validated annotation fixture"),
+        std::nullopt, false, std::nullopt, ann::validateAnnotationSnapshot);
+}
+
 db::MergeResult merge(db::test::ProjectRepository& store,
                       const db::RevisionId& mainHead, const db::RevisionId& featureHead,
                       const std::vector<hydraulic::HydraulicObjectChoice>& objects = {}) {
@@ -136,14 +151,14 @@ void testConcurrentInsertAndCanonicalChunkSplit() {
         const std::vector<db::ModelChange> records =
             ann::fullDraftAnnotationLayerChanges(layer(), original);
         first.insert(first.end(), records.begin(), records.end());
-        const db::RevisionId base = store.commitModel("main", first);
+        const db::RevisionId base = commitValidated(store, "main", first);
         store.createBranch("feature", "main");
         QList<MapAnnotation> left = original;
         left.append(additionalNote(900));
         QList<MapAnnotation> right = original;
         right.append(additionalNote(901));
-        const db::RevisionId target = store.commitModel("main", annotationDelta(original, left));
-        const db::RevisionId source = store.commitModel("feature", annotationDelta(original, right));
+        const db::RevisionId target = commitValidated(store, "main", annotationDelta(original, left));
+        const db::RevisionId source = commitValidated(store, "feature", annotationDelta(original, right));
         const db::MergeResult result = merge(store, target, source);
         require(result.status == db::MergeStatus::Merged,
                 "concurrent appends across a full chunk boundary must merge");
@@ -177,11 +192,11 @@ void testConcurrentFirstChunkCreation() {
         const std::vector<db::ModelChange> records =
             ann::fullDraftAnnotationLayerChanges(layer(), {});
         first.insert(first.end(), records.begin(), records.end());
-        (void)store.commitModel("main", first);
+        (void)commitValidated(store, "main", first);
         store.createBranch("feature", "main");
-        const db::RevisionId target = store.commitModel("main",
+        const db::RevisionId target = commitValidated(store, "main",
             annotationDelta({}, {additionalNote(1000)}));
-        const db::RevisionId source = store.commitModel("feature",
+        const db::RevisionId source = commitValidated(store, "feature",
             annotationDelta({}, {additionalNote(1001)}));
         const db::MergeResult result = merge(store, target, source);
         require(result.status == db::MergeStatus::Merged,
@@ -205,13 +220,13 @@ void testDeleteVersusModifyRequiresObjectChoice() {
     try {
         db::test::ProjectRepository store(root);
         store.createBranch("main");
-        (void)store.commitModel("main", initial());
+        (void)commitValidated(store, "main", initial());
         store.createBranch("feature", "main");
-        const db::RevisionId target = store.commitModel("main",
+        const db::RevisionId target = commitValidated(store, "main",
             annotationDelta({note()}, {}));
         MapAnnotation revised = note();
         revised.text = QStringLiteral("Modified after fork");
-        const db::RevisionId source = store.commitModel("feature", edit(revised));
+        const db::RevisionId source = commitValidated(store, "feature", edit(revised));
         const db::MergeResult refused = merge(store, target, source);
         require(refused.status == db::MergeStatus::Conflicts &&
                 store.head("main") == target,
@@ -239,11 +254,11 @@ void testIndependentDeletionAndAddition() {
     try {
         db::test::ProjectRepository store(root);
         store.createBranch("main");
-        (void)store.commitModel("main", initial());
+        (void)commitValidated(store, "main", initial());
         store.createBranch("feature", "main");
-        const db::RevisionId target = store.commitModel("main",
+        const db::RevisionId target = commitValidated(store, "main",
             annotationDelta({note()}, {}));
-        const db::RevisionId source = store.commitModel("feature",
+        const db::RevisionId source = commitValidated(store, "feature",
             annotationDelta({note()}, {note(), additionalNote(2200)}));
         const db::MergeResult outcome = merge(store, target, source);
         require(outcome.status == db::MergeStatus::Merged,
@@ -273,11 +288,11 @@ void testConcurrentReorderIsRejected() {
         const std::vector<db::ModelChange> records =
             ann::fullDraftAnnotationLayerChanges(layer(), original);
         first.insert(first.end(), records.begin(), records.end());
-        (void)store.commitModel("main", first);
+        (void)commitValidated(store, "main", first);
         store.createBranch("feature", "main");
-        const db::RevisionId target = store.commitModel("main",
+        const db::RevisionId target = commitValidated(store, "main",
             annotationDelta(original, {additionalNote(2000), note()}));
-        const db::RevisionId source = store.commitModel("feature",
+        const db::RevisionId source = commitValidated(store, "feature",
             annotationDelta(original, {note(), additionalNote(2000), additionalNote(2001)}));
         const db::MergeResult result = merge(store, target, source);
         require(result.status == db::MergeStatus::Conflicts &&
@@ -295,14 +310,14 @@ void testIndependentFieldsAndHistoricalRevision() {
     try {
         db::test::ProjectRepository store(root);
         store.createBranch("main");
-        const db::RevisionId first = store.commitModel("main", initial());
+        const db::RevisionId first = commitValidated(store, "main", initial());
         store.createBranch("feature", "main");
         MapAnnotation left = note();
         left.text = QStringLiteral("Updated text");
-        const db::RevisionId mainHead = store.commitModel("main", edit(left));
+        const db::RevisionId mainHead = commitValidated(store, "main", edit(left));
         MapAnnotation right = note();
         right.style.visible = false;
-        const db::RevisionId featureHead = store.commitModel("feature", edit(right));
+        const db::RevisionId featureHead = commitValidated(store, "feature", edit(right));
         const db::MergeResult outcome = merge(store, mainHead, featureHead);
         require(outcome.status == db::MergeStatus::Merged,
                 "independent annotation fields should merge");
@@ -331,14 +346,14 @@ void testSameFieldConflict() {
     try {
         db::test::ProjectRepository store(root);
         store.createBranch("main");
-        (void)store.commitModel("main", initial());
+        (void)commitValidated(store, "main", initial());
         store.createBranch("feature", "main");
         MapAnnotation left = note();
         left.text = QStringLiteral("A");
-        const db::RevisionId mainHead = store.commitModel("main", edit(left));
+        const db::RevisionId mainHead = commitValidated(store, "main", edit(left));
         MapAnnotation right = note();
         right.text = QStringLiteral("B");
-        const db::RevisionId featureHead = store.commitModel("feature", edit(right));
+        const db::RevisionId featureHead = commitValidated(store, "feature", edit(right));
         const db::MergeResult outcome = merge(store, mainHead, featureHead);
         require(outcome.status == db::MergeStatus::Conflicts &&
                 store.head("main") == mainHead,
@@ -355,18 +370,35 @@ void testInvalidFastForward() {
     try {
         db::test::ProjectRepository store(root);
         store.createBranch("main");
-        const db::RevisionId base = store.commitModel("main", initial());
+        const db::RevisionId base = commitValidated(store, "main", initial());
         store.createBranch("feature", "main");
         const std::vector<db::ModelChange> existing =
             ann::fullDraftAnnotationLayerChanges(layer(), {note()});
         std::vector<db::ModelChange> removals;
         for (const db::ModelChange& change : existing)
             removals.push_back(db::ModelChange{change.key, std::nullopt});
-        const db::RevisionId invalidHead = store.commitModel("feature", removals);
-        const db::MergeResult outcome = merge(store, base, invalidHead);
-        require(outcome.status == db::MergeStatus::Conflicts &&
-                store.head("main") == base,
-                "fast-forward must reject missing Distribution annotation layer");
+        // A malformed source revision cannot be manufactured through the
+        // production writer anymore: it must fail before any HEAD/pack write.
+        // The merge validator remains a separate gate for imported history.
+        const std::uint64_t beforeObjects = store.objectCount();
+        bool rejected = false;
+        try {
+            (void)commitValidated(store, "feature", removals);
+        } catch (const db::StorageError& error) {
+            rejected = error.kind() == db::StorageErrorKind::InvalidInput;
+        }
+        require(rejected && store.head("feature") == base &&
+                store.head("main") == base && store.objectCount() == beforeObjects,
+                "native Commit must reject a missing Distribution layer atomically");
+
+        // The valid fast-forward path must still advance directly to the
+        // validated source revision without producing a duplicate revision.
+        const db::RevisionId validHead = commitValidated(store, "feature",
+            annotationDelta({note()}, {note(), additionalNote(1900)}));
+        const db::MergeResult outcome = merge(store, base, validHead);
+        require(outcome.status == db::MergeStatus::FastForward &&
+                store.head("main") == validHead,
+                "valid annotation fast-forward must preserve the source revision");
     } catch (...) {
         std::filesystem::remove_all(root);
         throw;

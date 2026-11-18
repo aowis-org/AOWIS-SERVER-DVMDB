@@ -6,6 +6,7 @@
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
 #include "aowis/dvmdb/hydraulic_distribution_network_persistence.h"
 #include "aowis/dvmdb/map_annotation_persistence.h"
+#include "aowis/dvmdb/map_annotation_action_replay.h"
 #include "aowis/dvmdb/map_annotation_snapshot_validation.h"
 #include "aowis/dvmdb/model_record_conversion.h"
 #include <QByteArray>
@@ -2218,12 +2219,48 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                     before = historyNetworkAtDraft(service, source, *networkId);
                 }
             }
+            // Classify from the authenticated immutable MODEL frames, never
+            // from an untrusted client-supplied annotationLayerId. Mixed
+            // archives remain unsupported until combined hydraulic/annotation
+            // replay proves their complete native delta.
+            bool annotationArchive = false;
+            if (archived) {
+                const WorkingCopyInfo pinned = service.workingCopy(draftId, false);
+                if (pinned.lastHistoryNavigationOperationId != operationId) {
+                    const std::optional<RevisionGraphHead> selectedBranch =
+                        service.branchById(pinned.projectId, pinned.branchId);
+                    if (!selectedBranch)
+                        throw ProjectError(ProjectErrorKind::Conflict,
+                                           "History branch is no longer available");
+                    const RevisionNativeActionWitness witness =
+                        service.verifiedRevisionNativeActionWitness(
+                            pinned.projectId, selectedBranch->name, *revision);
+                    annotationArchive = !witness.actions.empty();
+                    for (const WorkingCopyEvent& frame : witness.actions) {
+                        QString decodedError;
+                        const std::optional<aowis::model::ModelEditTransaction> transaction =
+                            aowis::model::ModelEditTransactionCodec::decode(
+                                record::qByteArrayFromBytes(frame.encoded), &decodedError);
+                        if (!transaction || transaction->edits.empty()) {
+                            annotationArchive = false;
+                            break;
+                        }
+                        for (const aowis::model::ModelEntityEdit& edit : transaction->edits)
+                            if (edit.entityType != QStringLiteral("map.annotation"))
+                                annotationArchive = false;
+                    }
+                }
+            }
             QString reason;
-            const std::optional<WorkingCopyInfo> result = archived
-                ? hydraulic::navigateVerifiedHydraulicAction(service, operationId,
+            const std::optional<WorkingCopyInfo> result = archived && annotationArchive
+                ? annotations::navigateVerifiedAnnotationAction(service, operationId,
                       draftId, sessionId, fencingToken, *expectedHead, *revision,
                       static_cast<std::size_t>(position), generation, &reason)
-                : hydraulic::navigateVerifiedHydraulicDraftAction(service, operationId,
+                : archived
+                  ? hydraulic::navigateVerifiedHydraulicAction(service, operationId,
+                      draftId, sessionId, fencingToken, *expectedHead, *revision,
+                      static_cast<std::size_t>(position), generation, &reason)
+                  : hydraulic::navigateVerifiedHydraulicDraftAction(service, operationId,
                       draftId, sessionId, fencingToken, expectedHead,
                       static_cast<std::size_t>(position), generation, &reason);
             if (!result)

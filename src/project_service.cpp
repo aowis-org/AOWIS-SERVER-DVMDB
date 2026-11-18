@@ -2827,7 +2827,8 @@ LocalCommitInfo ProjectService::commitWorkingCopy(
         std::string_view sessionId, std::string_view fencingToken,
         std::uint64_t expectedGeneration,
         std::optional<RevisionId> expectedLocalHead,
-        const CommitMetadata& metadata) {
+        const CommitMetadata& metadata,
+        const std::function<std::optional<std::string>(const MergeCandidate&)>& validate) {
     translated<int>([&]() { validateCommitMetadata(metadata); return 0; });
     if (!UuidV7::parse(operationId).has_value() ||
         !UuidV7::parse(draftId).has_value() ||
@@ -2895,6 +2896,62 @@ LocalCommitInfo ProjectService::commitWorkingCopy(
             if (!project || !branch)
                 throw ProjectError(ProjectErrorKind::InvalidInput,
                                    "local Commit requires UUIDv7 project and branch");
+            // Do not trust HTTP Save alone: native callers can Save arbitrary
+            // model changes and call this method directly. Validate the full
+            // model candidate while both the project and draft are pinned,
+            // before publishing even the first immutable operation record.
+            // Generic models remain Qt-free and do not require a validator.
+            // New Distribution root writes and all annotation-bearing snapshots
+            // must be validated by their domain adapter (B2).
+            std::map<Key, ModelRecord> candidate;
+            bool needsDomainValidation = false;
+            const std::function<bool(std::uint16_t)> isAnnotationKind =
+                [](std::uint16_t kind) {
+                    return kind >= 110 && kind <= 112;
+                };
+            if (draft.baseRevision) {
+                for (const std::pair<Key, Bytes>& entry :
+                     repository.scanAtRevision(*project, *draft.baseRevision)) {
+                    const ModelRecord record = decodeModelRecord(entry.second);
+                    needsDomainValidation = needsDomainValidation ||
+                        isAnnotationKind(record.kind);
+                    candidate.emplace(entry.first, record);
+                }
+            }
+            for (const ModelChange& change : draft.candidateChanges) {
+                const std::map<Key, ModelRecord>::iterator existing = candidate.find(change.key);
+                if (existing != candidate.end())
+                    needsDomainValidation = needsDomainValidation ||
+                        isAnnotationKind(existing->second.kind);
+                if (change.record) {
+                    needsDomainValidation = needsDomainValidation ||
+                        isAnnotationKind(change.record->kind) ||
+                        (change.record->kind == 100 && existing == candidate.end());
+                    candidate[change.key] = *change.record;
+                } else {
+                    candidate.erase(change.key);
+                }
+            }
+            if (needsDomainValidation) {
+                if (!validate)
+                    throw ProjectError(ProjectErrorKind::InvalidInput,
+                        "engineering Commit requires annotation semantic candidate validation");
+                MergeCandidate proposed;
+                proposed.get = [&candidate](const Key& key) -> std::optional<ModelRecord> {
+                    const std::map<Key, ModelRecord>::const_iterator found = candidate.find(key);
+                    if (found == candidate.end()) return std::nullopt;
+                    return found->second;
+                };
+                proposed.forEach = [&candidate](
+                    const std::function<void(const Key&, const ModelRecord&)>& visit) {
+                    for (const std::pair<const Key, ModelRecord>& item : candidate)
+                        visit(item.first, item.second);
+                };
+                const std::optional<std::string> error = validate(proposed);
+                if (error)
+                    throw ProjectError(ProjectErrorKind::InvalidInput,
+                        "invalid engineering Commit candidate: " + *error);
+            }
             // HEAD is checked below, after durable intent creation, so even a
             // stale valid request gets a permanent rejected outcome.
             operation.info.id = std::string(operationId);
@@ -2944,9 +3001,17 @@ LocalCommitInfo ProjectService::commitWorkingCopy(
         try {
             (void)repository.commitModel(*project, current->name, operation.changes,
                                            operation.metadata, operation.info.expectedHead, true,
-                                           ReservedRevision{*reserved, operation.committedAtMs});
+                                           ReservedRevision{*reserved, operation.committedAtMs},
+                                           validate);
             operation.info.state = LocalCommitState::Succeeded;
         } catch (const StorageError& error) {
+            // The durable intent may have been validated before a crash.
+            // A retry without the domain validator is not evidence that its
+            // candidate is invalid: keep it Pending until a proper caller
+            // supplies that validator (or HEAD moves and resolves the CAS).
+            if (!validate && error.kind() == StorageErrorKind::InvalidInput &&
+                std::string_view(error.what()) == missingAnnotationCommitValidator)
+                throw ProjectError(ProjectErrorKind::InvalidInput, error.what());
             if (error.kind() == StorageErrorKind::Conflict ||
                 error.kind() == StorageErrorKind::InvalidInput ||
                 error.kind() == StorageErrorKind::NotFound) {
@@ -4098,18 +4163,25 @@ RevisionGraphPage ProjectService::revisionGraph(
 }
 
 RevisionId ProjectService::commitModel(std::string_view projectId,
-                          std::string_view branch, std::vector<ModelChange> changes,
-                          const CommitMetadata& metadata,
-                          std::optional<RevisionId> expectedHead) {
+        std::string_view branch, std::vector<ModelChange> changes,
+        const CommitMetadata& metadata, std::optional<RevisionId> expectedHead,
+        const std::function<std::optional<std::string>(const MergeCandidate&)>& validate) {
     if (!validBranchName(branch))
         throw ProjectError(ProjectErrorKind::InvalidInput, "invalid branch name");
     const std::optional<ProjectId> project = ProjectId::parse(projectId);
     if (!project) throw ProjectError(ProjectErrorKind::InvalidInput, "UUIDv7 project required");
     RevisionId committed = RevisionId::generate();
     withRepository(projectId, [&](Repository& repository) {
+        const std::optional<RevisionId> observed = repository.optionalHead(*project, branch);
+        if (expectedHead && observed != expectedHead)
+            throw ProjectError(ProjectErrorKind::Conflict,
+                               "direct MODEL Commit expected HEAD changed");
+        // All candidate validation is performed once under Repository's lock,
+        // against this exact HEAD. The native writer is also callable without
+        // ProjectService; no optimistic preflight can substitute for its gate.
         committed = translated<RevisionId>([&]() {
-            return repository.commitModel(*project, branch, std::move(changes), metadata,
-                                            expectedHead);
+            return repository.commitModel(*project, branch, std::move(changes),
+                metadata, observed, true, std::nullopt, validate);
         });
     });
     return committed;
@@ -4118,7 +4190,8 @@ RevisionId ProjectService::commitModel(std::string_view projectId,
 RevisionId ProjectService::commitModelAtExpectedHead(
         std::string_view projectId, std::string_view branch,
         std::vector<ModelChange> changes, const CommitMetadata& metadata,
-        std::optional<RevisionId> expectedLocalHead) {
+        std::optional<RevisionId> expectedLocalHead,
+        const std::function<std::optional<std::string>(const MergeCandidate&)>& validate) {
     requirePrivateRepository("local commit requires a private repository");
     if (!validBranchName(branch))
         throw ProjectError(ProjectErrorKind::InvalidInput, "invalid branch name");
@@ -4126,12 +4199,45 @@ RevisionId ProjectService::commitModelAtExpectedHead(
     if (!project) throw ProjectError(ProjectErrorKind::InvalidInput, "UUIDv7 project required");
     RevisionId committed = RevisionId::generate();
     withRepository(projectId, [&](Repository& repository) {
+        const std::optional<RevisionId> observed = repository.optionalHead(*project, branch);
+        if (observed != expectedLocalHead)
+            throw ProjectError(ProjectErrorKind::Conflict,
+                               "local direct Commit branch HEAD changed");
         committed = translated<RevisionId>([&]() {
-            return repository.commitModel(*project, branch, std::move(changes), metadata,
-                                            expectedLocalHead, true);
+            return repository.commitModel(*project, branch, std::move(changes),
+                metadata, expectedLocalHead, true, std::nullopt, validate);
         });
     });
     return committed;
+}
+
+std::vector<std::pair<Key, ModelRecord>> ProjectService::modelRecordsAtRevision(
+        std::string_view projectId, const RevisionId& revision) {
+    const std::optional<ProjectId> project = ProjectId::parse(projectId);
+    if (!project)
+        throw ProjectError(ProjectErrorKind::InvalidInput, "UUIDv7 project required");
+    std::vector<std::pair<Key, ModelRecord>> result;
+    withRepository(projectId, [&](Repository& repository) {
+        result = translated<std::vector<std::pair<Key, ModelRecord>>>([&]() {
+            const std::vector<std::pair<Key, Bytes>> packed =
+                repository.scanAtRevision(*project, revision);
+            constexpr std::size_t recordLimit = 200000;
+            constexpr std::size_t byteLimit = 256U * 1024U * 1024U;
+            check(packed.size() <= recordLimit,
+                  "history MODEL snapshot exceeds record limit", StorageErrorKind::InvalidInput);
+            std::size_t total = 0;
+            std::vector<std::pair<Key, ModelRecord>> decoded;
+            decoded.reserve(packed.size());
+            for (const std::pair<Key, Bytes>& entry : packed) {
+                check(entry.second.size() <= byteLimit - total,
+                      "history MODEL snapshot exceeds byte limit", StorageErrorKind::InvalidInput);
+                total += entry.second.size();
+                decoded.emplace_back(entry.first, decodeModelRecord(entry.second));
+            }
+            return decoded;
+        });
+    });
+    return result;
 }
 
 std::optional<ModelRecord> ProjectService::getModelAtRevision(
