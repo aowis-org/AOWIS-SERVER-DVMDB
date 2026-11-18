@@ -2352,10 +2352,31 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             const CommitMetadata metadata = parseCommitMetadata(body);
             requireInput(metadata.message.find_first_not_of(" \t\n\r") != std::string::npos,
                          "commit message cannot be whitespace only");
+            const std::string operationId = requiredString(body, "operationId");
+            const std::string draftId = requiredString(body, "draftId");
+            const std::uint64_t generation = strictUint64(body, "expectedGeneration");
+#ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
+            // A raw native-service caller can create a draft without passing
+            // through the MODEL-aware HTTP Save route. The HTTP Commit boundary
+            // must therefore independently validate the COMPLETE candidate,
+            // not assume a previous Save was semantically checked.
+            //
+            // Do not reject an idempotent Commit retry by examining the NEW
+            // rebased draft after the original Commit succeeded. In that case
+            // ProjectService reconciles the original operation UUID itself.
+            // A concurrent Save/HEAD move after this preflight is fenced by
+            // commitWorkingCopy's generation/base/lease checks.
+            const WorkingCopyInfo candidate = service.workingCopy(draftId, false);
+            if (candidate.generation == generation &&
+                candidate.baseRevision == expected) {
+                validateDraftAnnotationCandidate(
+                    completeDraftCandidate(service, candidate, {}));
+            }
+#endif
             const LocalCommitInfo result = service.commitWorkingCopy(
-                requiredString(body, "operationId"), requiredString(body, "draftId"),
+                operationId, draftId,
                 requiredString(body, "sessionId"), requiredString(body, "fencingToken"),
-                strictUint64(body, "expectedGeneration"), expected, metadata);
+                generation, expected, metadata);
             const QString state = result.state == LocalCommitState::Succeeded
                 ? QStringLiteral("succeeded") : result.state == LocalCommitState::Pending
                     ? QStringLiteral("pending") : QStringLiteral("rejected");
@@ -2591,7 +2612,9 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             for (const aowis::model::ModelEditTransaction& transaction : transactions) {
                 for (const aowis::model::ModelEntityEdit& edit : transaction.edits) {
                     if (edit.entityType == QStringLiteral("map.annotation")) {
-                        requireInput(hasAnnotationLayer, "annotation edits require annotationLayerId");
+                        requireInput(hasAnnotationLayer && edit.ownerLayerId &&
+                                     *edit.ownerLayerId == *annotationLayerId,
+                                     "annotation event ownerLayerId must match the requested layer");
                         annotationEdits.push_back(edit);
                     }
                 }

@@ -425,3 +425,37 @@ action-navigable histories. Generalizing candidate-wide B2 semantic validation
 to untrusted bundle pre-publication (including every imported revision) and
 to generic direct native commits remains an explicit B4.3 follow-up. Do not
 claim this read-only helper enforces those ingestion boundaries.
+
+
+## B4.3 — durable MODEL action owner provenance
+
+The canonical `ModelEntityEdit` for `map.annotation` now includes a required
+`ownerLayerId`, authenticated by the transaction frame (version 2) and the
+immutable ordered SHA-256 Commit action chain. Ordinary hydraulic edits have
+no owner field and no extra encoded bytes. The HTTP `annotationLayerId` request
+parameter must match every included annotation edit's authenticated owner; it
+is not authoritative archival provenance. The native annotation materializer
+verifies the same owner before making any changes.
+
+The archive replay verifier uses `ownerLayerId` to attribute every action, even
+when an annotation is created and deleted between immutable endpoints. It also
+checks the parent/child membership owners for consistency and rejects any
+owner switch of the same annotation UUID during one archive. This change does
+not yet connect mixed hydraulic/annotation History navigation or generic
+direct Commit validation; those are separate B4.3 requirements. Old MODEL
+transaction frames without ownership are intentionally rejected.
+
+### HTTP local Commit candidate preflight (B4.3 incremental)
+
+The HTTP `POST /dvmdb/v1/local-commits` handler independently checks the
+complete saved candidate against `validateAnnotationSnapshot` immediately
+before invoking the existing fenced `ProjectService::commitWorkingCopy`. This
+closes the HTTP pathway where a library-side Save could have supplied native
+records without the HTTP `save-events` validator. Replayed Commit operation
+UUIDs are reconciled by ProjectService rather than validated against a
+newly rebased draft. Generation, base revision, lease and fencing checks
+prevent publication after a concurrent change between preflight and Commit.
+
+**Remaining boundary:** direct library callers of `ProjectService::commitWorkingCopy`
+still need a native pre-publication domain validation contract. This HTTP
+preflight is not a substitute for that or for mixed-history replay.

@@ -5,6 +5,7 @@
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
 #include "aowis/dvmdb/hydraulic_distribution_network_persistence.h"
 #include "aowis/dvmdb/map_annotation_persistence.h"
+#include "aowis/dvmdb/model_record_conversion.h"
 #include <aowis/model/edit/model_edit_transaction.h>
 #include <aowis/model/edit/hydraulic_distribution_root_edit.h>
 #endif
@@ -2592,14 +2593,14 @@ void exerciseAnnotationDraftHttp() {
     check(!initial.isEmpty(), "MODEL rejected valid annotation");
     const QString annotationId = annotation.uuid.toString(QUuid::WithoutBraces);
     const std::function<QByteArray(const MapAnnotation&, const std::optional<QByteArray>&,
-                                   const std::optional<QByteArray>&)> frame = [](const MapAnnotation& item, const std::optional<QByteArray>& before,
+                                   const std::optional<QByteArray>&)> frame = [&layerId](const MapAnnotation& item, const std::optional<QByteArray>& before,
                           const std::optional<QByteArray>& after) -> QByteArray {
         aowis::model::ModelEditTransaction transaction;
         transaction.transactionId = QUuid(QString::fromStdString(
             aowis::dvmdb::UuidV7::generate().toString()));
         transaction.operation = QStringLiteral("map.annotation.edit");
         transaction.edits.append(aowis::model::ModelEntityEdit{
-            item.uuid, QStringLiteral("map.annotation"), before, after});
+            item.uuid, QStringLiteral("map.annotation"), before, after, QUuid(layerId)});
         return aowis::model::ModelEditTransactionCodec::encode(transaction);
     };
     const std::function<QJsonObject(const QString&, const QByteArray&)> request = [&session, &token, &layerId](
@@ -2666,6 +2667,54 @@ void exerciseAnnotationDraftHttp() {
     check(client.call("POST", draftPath + "/save", forge).status == 400 &&
           client.call("GET", draftPath).json.value("generation") == "4",
           "generic Save accepted a forged annotation record");
+
+    // A valid annotation history may Commit through HTTP and the SAME
+    // operationId must remain idempotent after the draft was rebased.
+    const QString operation = QString::fromStdString(native::UuidV7::generate().toString());
+    const QString commitPath = QStringLiteral("/dvmdb/v1/local-commits");
+    const QJsonObject normalCommit{{"operationId", operation},
+        {"draftId", created.json.value("id")},
+        {"sessionId", session}, {"fencingToken", token},
+        {"expectedGeneration", "4"},
+        {"expectedHead", QJsonValue(QJsonValue::Null)},
+        {"author", Client::testAuthor()}, {"message", "Annotation history"}};
+    const Response committed = client.call("POST", commitPath, normalCommit);
+    const QString committedRevision = committed.json.value("revision").toString();
+    check(committed.status == 200 && !committedRevision.isEmpty() &&
+          client.call("POST", commitPath, normalCommit).json.value("revision") == committedRevision,
+          "valid annotation Commit or idempotent replay was rejected");
+
+    // A direct native/library Save can bypass the HTTP event validator.
+    // A new draft with an orphaned annotation must be refused at HTTP Commit,
+    // without changing the immutable branch HEAD or the saved draft.
+    native::ModelRecord orphan;
+    orphan.kind = native::annotations::annotationMemberKind;
+    orphan.payload = native::record::bytesFromQByteArray(initial);
+    const std::optional<native::RevisionId> base =
+        native::RevisionId::parse(committedRevision.toStdString());
+    check(base.has_value(), "committed annotation revision is invalid");
+    const native::WorkingCopyInfo unsafe = service.createWorkingCopy(
+        project.id, "main", base, session.toStdString());
+    const native::WorkingCopyLease unsafeLease = service.acquireWorkingCopyLease(
+        unsafe.id, session.toStdString(), 90);
+    const native::WorkingCopyInfo injected = service.saveWorkingCopyChanges(
+        unsafe.id, session.toStdString(), unsafeLease.token, 0,
+        {native::ModelChange{native::record::keyFromUuid(annotation.uuid), orphan}});
+    check(injected.generation == 1,
+          "could not set up direct native annotation corruption fixture");
+    const Response blockedCommit = client.call("POST", commitPath,
+        QJsonObject{{"operationId", QString::fromStdString(native::UuidV7::generate().toString())},
+                    {"draftId", QString::fromStdString(unsafe.id)},
+                    {"sessionId", session},
+                    {"fencingToken", QString::fromStdString(unsafeLease.token)},
+                    {"expectedGeneration", "1"},
+                    {"expectedHead", committedRevision},
+                    {"author", Client::testAuthor()},
+                    {"message", "Must not publish unowned annotation"}});
+    check(blockedCommit.status == 400 &&
+          service.workingCopy(unsafe.id).generation == 1 &&
+          service.optionalHead(project.id, "main") == base,
+          "HTTP local Commit published an invalid direct-native annotation candidate");
     server.stop();
 }
 
