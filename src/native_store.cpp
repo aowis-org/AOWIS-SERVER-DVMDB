@@ -3202,6 +3202,23 @@ MergeResult Repository::mergeBranches(const ProjectId& project,
                     continue;
                 }
             }
+            if (options.resolveStructural && targetHead.modelIndexed) {
+                const std::function<std::optional<ModelRecord>(const std::optional<Hash>&)>
+                    decodeAt = [this](const std::optional<Hash>& hash)
+                        -> std::optional<ModelRecord> {
+                    if (!hash) return std::nullopt;
+                    const Bytes envelope = load(*hash);
+                    require(Err::Corruption, !envelope.empty() && envelope.front() == 'V',
+                            "invalid model envelope in structural merge");
+                    return decodeModelRecord(Bytes(envelope.begin() + 1, envelope.end()));
+                };
+                MergeResolution resolution = options.resolveStructural(item.first,
+                    decodeAt(values.base), decodeAt(values.target), decodeAt(values.source));
+                if (resolution.record && resolution.conflictingFields.empty()) {
+                    resolved.emplace(item.first, std::move(*resolution.record));
+                    continue;
+                }
+            }
             if (options.resolve && targetHead.modelIndexed && base.modelIndexed &&
                 values.base && values.target && values.source) {
                 const auto decodeAt = [this](const Hash& hash) {
@@ -3288,7 +3305,7 @@ MergeResult Repository::mergeBranches(const ProjectId& project,
     }
     for (std::pair<const Key, ModelRecord>& item : resolved)
         selectedRecords.emplace(item.first, std::move(item.second));
-    if (targetHead.modelIndexed && options.reconcile) {
+    if (targetHead.modelIndexed && (options.reconcile || options.reconcileWithBase)) {
         // Readers inspect authenticated, immutable branch tips; candidate
         // modifications remain memory-only until ALL preflights complete.
         const auto readSnapshot = [this](const Hash& root, const Key& key)
@@ -3344,12 +3361,27 @@ MergeResult Repository::mergeBranches(const ProjectId& project,
             [&selectedRecords](const Key& key, std::optional<ModelRecord> record) {
                 selectedRecords.insert_or_assign(key, std::move(record));
             };
-        if (const std::optional<std::string> error =
-            options.reconcile(candidate, set, readTarget, readSource)) {
-            result.conflicts.push_back(MergeConflict{Key{}, std::nullopt,
-                std::nullopt, std::nullopt, *error});
-            result.status = MergeStatus::Conflicts;
-            return result;
+        if (options.reconcile) {
+            if (const std::optional<std::string> error =
+                options.reconcile(candidate, set, readTarget, readSource)) {
+                result.conflicts.push_back(MergeConflict{Key{}, std::nullopt,
+                    std::nullopt, std::nullopt, *error});
+                result.status = MergeStatus::Conflicts;
+                return result;
+            }
+        }
+        if (options.reconcileWithBase) {
+            const std::function<std::optional<ModelRecord>(const Key&)> readBase =
+                [&readSnapshot, &base](const Key& key) {
+                    return readSnapshot(base.root, key);
+                };
+            if (const std::optional<std::string> error =
+                options.reconcileWithBase(candidate, set, readBase, readTarget, readSource)) {
+                result.conflicts.push_back(MergeConflict{Key{}, std::nullopt,
+                    std::nullopt, std::nullopt, *error});
+                result.status = MergeStatus::Conflicts;
+                return result;
+            }
         }
     }
     if (targetHead.modelIndexed) {

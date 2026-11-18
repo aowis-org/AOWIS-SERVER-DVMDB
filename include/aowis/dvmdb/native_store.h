@@ -126,6 +126,14 @@ struct MergeOptions {
     // Callers must verify they represent the same logical internal object.
     std::function<MergeResolution(const Key&, const ModelRecord&,
                                   const ModelRecord&)> resolveConcurrentAddition;
+    // Optional model-specific handling for a concurrent structural record
+    // difference, including edit-versus-delete. Returning a record means the
+    // merge candidate will be reconciled and validated before publication;
+    // returning nullopt delegates to normal conflict handling. Never use
+    // this for user-owned entities whose delete/modify conflict needs a choice.
+    std::function<MergeResolution(const Key&, const std::optional<ModelRecord>&,
+                                  const std::optional<ModelRecord>&,
+                                  const std::optional<ModelRecord>&)> resolveStructural;
     // Verify that every user-supplied choice was actually consumed by this
     // merge. Called before any pack writes, including fast-forward publication.
     // Must be pure with respect to the Repository; cannot call its methods.
@@ -139,6 +147,16 @@ struct MergeOptions {
         const std::function<void(const Key&, std::optional<ModelRecord>)>& set,
         const std::function<std::optional<ModelRecord>(const Key&)>& target,
         const std::function<std::optional<ModelRecord>(const Key&)>& source)> reconcile;
+    // Like reconcile, but with an immutable common-ancestor reader. Used by
+    // ordered, bounded membership formats that must rebuild record/chunk
+    // boundaries from the actual three-way logical sequence. Runs after
+    // reconcile, before reference preflight and semantic validation.
+    std::function<std::optional<std::string>(
+        const MergeCandidate&,
+        const std::function<void(const Key&, std::optional<ModelRecord>)>& set,
+        const std::function<std::optional<ModelRecord>(const Key&)>& base,
+        const std::function<std::optional<ModelRecord>(const Key&)>& target,
+        const std::function<std::optional<ModelRecord>(const Key&)>& source)> reconcileWithBase;
     // Return a nonempty diagnostic on semantic failure. Invoked on divergent
     // candidate merges AND fast-forwards (against the immutable source tip)
     // before any object bytes or branch refs are written. Up-to-date merges

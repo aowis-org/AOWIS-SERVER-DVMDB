@@ -260,3 +260,68 @@ for the durable journal and for replay. Also ensure network bootstrap/import
 create their required empty annotation layer atomically, because B2 requires
 exactly one Distribution layer per network. Until then, B3.1 is not exposed
 as an HTTP write API and does not claim complete atomic publication.
+
+## B4.1 — annotation-aware revision merge preflight
+
+The domain merge route now uses `annotations::mergeDistributionAnnotationBranches`,
+which retains the existing hydraulic object-choice and membership resolver,
+but adds field-aware MODEL merging of **existing annotation members** with
+unchanged anchor references. It verifies the **entire** combined hydraulic and
+annotation snapshot through B2 before any diverged merge or fast-forward
+publication. The generic HTTP merge route detects hydraulic roots and native
+annotation layer roots in the pinned input revisions, forwarding those merges
+to the domain validator; raw/unrelated generic merges keep their previous path.
+
+Concurrent modifications to annotation membership chunks or layer roots are
+**not automatically reconciled in B4.1**: they result in a merge conflict,
+including independent additions that modify the same membership chunk.
+Explicit annotation field choices are not yet supported by the domain wrapper;
+unused selections are rejected. The planned B4.2 work adds coordinated
+membership reconciliation, and B4.3 covers archived action replay and imported
+revision candidates. A native caller that directly invokes unvalidated generic
+`Repository::mergeBranches` is not automatically domain-validated: callers must
+use the domain adapter or supply equivalent `MergeOptions` before publication.
+
+The merge regression test exercises nonconflicting member-field reconciliation,
+same-field conflict (HEAD unchanged), source fast-forward with an invalid
+missing layer (rejected), and revision immutability after merging.
+
+## B4.2 — ordered three-way annotation membership merging
+
+The annotation-aware merge reconstructs every affected layer against the
+actual common-ancestor, target and source revision snapshots, *before* the
+native store writes any pack objects or publishes HEAD. The native merge
+provides a read-only ancestor reader to a second reconciliation callback; the
+existing hydraulic reconciliation still executes first. This extension is
+optional and has no effect on other repository merge clients.
+
+Native annotation-layer roots and membership chunks (kinds 110/111) may
+temporarily resolve to one branch's structural record, but that record is
+**never published as-is**. The three-way reconciler reconstructs canonical
+chunk boundaries and root references from the merged ordered annotation
+sequence. This is essential for two branches independently allocating the
+same deterministic chunk UUID, especially at the 256-member limit.
+
+- Unchanged baseline members retain baseline order; one-sided deletions are
+  retained as deletions unless the user explicitly selects a surviving
+  delete-vs-modify object. Both branches' additions are appended in target
+  order first, then source order, deduplicated by UUID.
+- A one-sided reorder is preserved when the other branch's membership is
+  unchanged. Concurrent ordering changes are **not** silently linearized;
+  those require an explicit resolution workflow not yet exposed through HTTP.
+- Native whole-object choices for genuine annotation member conflicts
+  (including delete-versus-modify) are honored, with historical membership
+  restored when the chosen object survives. Explicit per-field annotation
+  conflict choices remain a separate follow-up.
+- Absent/different network ownership and concurrent changes to layer
+  metadata with no unambiguous three-way answer are conflicts. Unknown
+  record kinds, missing anchors, orphaned members and invalid references
+  still fail B2 candidate verification.
+- Every superseded native chunk or member record is tombstoned in the
+  ephemeral candidate, and the complete candidate passes normal reference
+  preflight and B2 validation before publication. Old revisions are untouched.
+
+Covered by the expanded `aowis-dvmdb-annotation-merge-tests` target: parallel
+first-chunk additions, 255-to-257 boundary splitting, exact membership order,
+object-level delete/modify choices, concurrent reorder conflicts and immutable
+historical snapshots. Imported history/action replay is still **B4.3**.
