@@ -240,3 +240,23 @@ validating one layer alone does not establish project-wide consistency.
 The B2 tests construct full in-memory candidates including real canonical
 hydraulic roots and typed entities; they include adversarial duplicate layers,
 missing owners, orphans, wrong kinds, cross-network anchors and mixed scopes.
+
+## B3.1: server-owned draft edit materialization
+
+`materializeDraftAnnotationEdits` is a **pure planner**, not a writer. It
+accepts canonical `map.annotation` MODEL entity edits in original action order
+against one pinned draft view, verifies every before-image, and derives only
+the changed native annotation member/chunk/layer records (including tombstones).
+It supports sequential edits to the same annotation and preserves membership
+ordering. It refuses missing layers, foreign MODEL entity types, malformed
+payloads and foreign UUID collisions. It uses only the existing MODEL codec.
+
+This planner must not be called with unrelated/native member kinds, nor may its
+result be saved with `saveWorkingCopyChanges` independently of the originating
+MODEL events. **B3.2 still must** route it through the fenced,
+generation-checked `saveWorkingCopyTransactions`, validate the complete
+candidate against B2 *before* publication, and use the identical action bytes
+for the durable journal and for replay. Also ensure network bootstrap/import
+create their required empty annotation layer atomically, because B2 requires
+exactly one Distribution layer per network. Until then, B3.1 is not exposed
+as an HTTP write API and does not claim complete atomic publication.

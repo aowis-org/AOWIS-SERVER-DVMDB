@@ -10,6 +10,8 @@
 #include <QIODevice>
 
 #include <algorithm>
+#include <list>
+#include <map>
 #include <set>
 #include <utility>
 
@@ -253,6 +255,134 @@ std::vector<ModelChange> fullDraftAnnotationLayerChanges(
     flush();
     changes.push_back(ModelChange{key(layer.uuid), encodeRoot(layer, chunkIds)});
     return changes;
+}
+
+std::vector<ModelChange> materializeDraftAnnotationEdits(
+    const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
+    const QUuid& layerId,
+    const std::vector<aowis::model::ModelEntityEdit>& edits) {
+    if (layerId.isNull() || edits.empty())
+        throw StorageError(StorageErrorKind::InvalidInput,
+                           "annotation edits require a layer UUID and nonempty batch");
+    const std::optional<AnnotationLayerSnapshot> snapshot = loadAnnotationLayer(readCurrent, layerId);
+    if (!snapshot)
+        throw StorageError(StorageErrorKind::NotFound, "annotation layer not found in draft");
+
+    if (edits.size() > 4096)
+        throw StorageError(StorageErrorKind::LimitExceeded,
+                           "too many annotation edits in a draft batch");
+    // Stable iterators keep membership order while making a large batch
+    // O(N + edits*log(N)), rather than scanning a million-member layer for
+    // every user edit. Re-adding a removed member appends it at the end.
+    std::list<MapAnnotation> ordered(snapshot->annotations.cbegin(),
+                                     snapshot->annotations.cend());
+    std::map<Key, std::list<MapAnnotation>::iterator> positions;
+    for (std::list<MapAnnotation>::iterator item = ordered.begin();
+         item != ordered.end(); ++item)
+        positions.emplace(key(item->uuid), item);
+    bool membershipChanged = false;
+    std::map<Key, std::optional<MapAnnotation>> originalTouched;
+    for (const aowis::model::ModelEntityEdit& edit : edits) {
+        if (edit.entityType != QStringLiteral("map.annotation") || edit.entityId.isNull() ||
+            (!edit.before && !edit.after))
+            throw StorageError(StorageErrorKind::InvalidInput,
+                               "invalid annotation MODEL entity edit");
+        const Key identity = key(edit.entityId);
+        const std::map<Key, std::list<MapAnnotation>::iterator>::iterator found =
+            positions.find(identity);
+        const bool exists = found != positions.end();
+        if (!originalTouched.contains(identity))
+            originalTouched.emplace(identity, exists ? std::optional<MapAnnotation>(*found->second)
+                                                      : std::nullopt);
+        if (exists != edit.before.has_value())
+            throw StorageError(StorageErrorKind::Conflict,
+                               "annotation edit before-image presence is stale");
+        if (exists && ModelCodec<MapAnnotation>::encode(*found->second) != *edit.before)
+            throw StorageError(StorageErrorKind::Conflict,
+                               "annotation edit before-image does not match draft");
+
+        if (edit.after) {
+            QString error;
+            const std::optional<MapAnnotation> decoded =
+                ModelCodec<MapAnnotation>::decode(*edit.after, &error);
+            if (!decoded || decoded->uuid != edit.entityId ||
+                ModelCodec<MapAnnotation>::encode(*decoded) != *edit.after)
+                throw StorageError(StorageErrorKind::InvalidInput,
+                                   "annotation after-image is invalid or noncanonical");
+            const aowis::model::ModelValidationReport report =
+                aowis::model::validateMapAnnotation(*decoded);
+            if (!report.valid())
+                throw StorageError(StorageErrorKind::InvalidInput,
+                                   report.summary().toStdString());
+            if (exists) *found->second = *decoded;
+            else {
+                membershipChanged = true;
+                ordered.push_back(*decoded);
+                std::list<MapAnnotation>::iterator last = ordered.end();
+                --last;
+                positions.emplace(identity, last);
+            }
+        } else {
+            membershipChanged = true;
+            ordered.erase(found->second);
+            positions.erase(found);
+        }
+    }
+    // Common case: text/position/style/anchor edits do not change membership.
+    // Emit only touched member records; no chunk/root reconstruction or write.
+    if (!membershipChanged) {
+        std::vector<ModelChange> delta;
+        for (const std::pair<const Key, std::optional<MapAnnotation>>& entry : originalTouched) {
+            const std::map<Key, std::list<MapAnnotation>::iterator>::const_iterator found =
+                positions.find(entry.first);
+            if (found == positions.end() || !entry.second)
+                throw StorageError(StorageErrorKind::Internal,
+                                   "annotation update unexpectedly changed membership");
+            const ModelRecord updated = encodeMember(*found->second);
+            const ModelRecord current = encodeMember(*entry.second);
+            if (updated.kind != current.kind || updated.references != current.references ||
+                updated.payload != current.payload)
+                delta.push_back(ModelChange{entry.first, updated});
+        }
+        return delta;
+    }
+    QList<MapAnnotation> revised;
+    revised.reserve(static_cast<qsizetype>(ordered.size()));
+    for (const MapAnnotation& annotation : ordered)
+        revised.append(annotation);
+
+    const std::vector<ModelChange> oldFull =
+        fullDraftAnnotationLayerChanges(snapshot->layer, snapshot->annotations);
+    const std::vector<ModelChange> newFull =
+        fullDraftAnnotationLayerChanges(snapshot->layer, revised);
+    std::map<Key, ModelRecord> oldRecords;
+    std::map<Key, ModelRecord> newRecords;
+    for (const ModelChange& change : oldFull)
+        oldRecords.emplace(change.key, *change.record);
+    for (const ModelChange& change : newFull)
+        newRecords.emplace(change.key, *change.record);
+
+    // The layer loader verified the input closure. Detect collisions with
+    // unrelated records before emitting any newly allocated record UUID.
+    for (const std::pair<const Key, ModelRecord>& entry : newRecords) {
+        if (!oldRecords.contains(entry.first) && readCurrent(entry.first))
+            throw StorageError(StorageErrorKind::Conflict,
+                               "annotation edit collides with a foreign model record UUID");
+    }
+    std::vector<ModelChange> delta;
+    for (const std::pair<const Key, ModelRecord>& entry : newRecords) {
+        const std::map<Key, ModelRecord>::const_iterator previous = oldRecords.find(entry.first);
+        if (previous == oldRecords.end() ||
+            previous->second.kind != entry.second.kind ||
+            previous->second.references != entry.second.references ||
+            previous->second.payload != entry.second.payload)
+            delta.push_back(ModelChange{entry.first, entry.second});
+    }
+    for (const std::pair<const Key, ModelRecord>& entry : oldRecords) {
+        if (!newRecords.contains(entry.first))
+            delta.push_back(ModelChange{entry.first, std::nullopt});
+    }
+    return delta;
 }
 
 std::optional<AnnotationLayerSnapshot> loadAnnotationLayer(

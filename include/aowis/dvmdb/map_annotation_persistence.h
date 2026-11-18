@@ -2,11 +2,12 @@
 
 // Native, revision-scoped map annotation record format. MODEL owns the typed
 // values; DVMDB owns record kinds, exact references and membership chunks.
-// No GUI or renderer dependency. Draft publication is deliberately not exposed
-// here: B3 will publish these changes under the existing fenced writer.
+// No GUI or renderer dependency. B3.1 exposes draft planning only; only the
+// fenced ProjectService may publish records and corresponding MODEL events.
 #include "aowis/dvmdb/native_store.h"
 
 #include <aowis/model/map/map_annotation.h>
+#include <aowis/model/edit/model_edit_transaction.h>
 #include <QList>
 #include <QUuid>
 
@@ -34,6 +35,24 @@ struct AnnotationLayerSnapshot final {
 // checks, not satisfied by calling this builder alone.
 std::vector<ModelChange> fullDraftAnnotationLayerChanges(
     const MapAnnotationLayer& layer, const QList<MapAnnotation>& annotations);
+
+// B3.1: plan a reversible annotation-edit batch against ONE pinned draft view.
+// Every edit must have entityType "map.annotation", matching UUID, canonical
+// MODEL before/after images, and an existing owner layer. Insertions append to
+// the layer; deletions retain the order of survivors. Multiple consecutive edits
+// to the same annotation are permitted and checked against their intermediate
+// before-images. The server derives ALL native membership/root/chunk changes;
+// callers must never send those kinds directly.
+//
+// The return value is a minimal native delta (including deleted-chunk/member
+// tombstones), not a complete replacement snapshot. This function performs no
+// I/O or publication. B3.2 must atomically persist these changes together
+// with the ORIGINAL canonical transactions using ProjectService's fenced
+// saveWorkingCopyTransactions, after final candidate-wide B2 validation.
+std::vector<ModelChange> materializeDraftAnnotationEdits(
+    const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
+    const QUuid& layerId,
+    const std::vector<aowis::model::ModelEntityEdit>& edits);
 
 // Decode and check a complete layer through one pinned snapshot or draft view.
 // Invalid records throw StorageError(Corruption); absent layer returns nullopt.

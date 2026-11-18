@@ -588,6 +588,17 @@ if(AOWIS_DVMDB_WITH_MODEL_CODEC)
             add_dependencies(aowis-dvmdb-tests aowis-dvmdb-annotation-integrity-tests)
         endif()
         if(BUILD_TESTING)
+            add_executable(aowis-dvmdb-annotation-draft-edit-tests
+                tests/map_annotation_draft_edit_tests.cpp)
+            target_link_libraries(aowis-dvmdb-annotation-draft-edit-tests PRIVATE
+                aowis-dvmdb-annotations)
+            add_test(NAME aowis-dvmdb-annotation-draft-edit-tests
+                COMMAND aowis-dvmdb-annotation-draft-edit-tests)
+            set_tests_properties(aowis-dvmdb-annotation-draft-edit-tests PROPERTIES
+                LABELS "aowis;annotations;working-copy")
+            add_dependencies(aowis-dvmdb-tests aowis-dvmdb-annotation-draft-edit-tests)
+        endif()
+        if(BUILD_TESTING)
             add_executable(aowis-dvmdb-annotation-record-tests
                 tests/map_annotation_persistence_tests.cpp)
             target_link_libraries(aowis-dvmdb-annotation-record-tests PRIVATE
