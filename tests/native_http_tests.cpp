@@ -5,6 +5,8 @@
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
 #include "aowis/dvmdb/hydraulic_distribution_network_persistence.h"
 #include "aowis/dvmdb/map_annotation_persistence.h"
+#include "aowis/dvmdb/map_annotation_action_replay.h"
+#include "aowis/dvmdb/map_annotation_snapshot_validation.h"
 #include "aowis/dvmdb/model_record_conversion.h"
 #include <aowis/model/edit/model_edit_transaction.h>
 #include <aowis/model/edit/hydraulic_distribution_root_edit.h>
@@ -1788,6 +1790,18 @@ void exerciseUuidv7HistoryHttp() {
             QJsonObject{{"uuid", keyA}, {"kind", 31}, {"references", QJsonArray{}},
                         {"payloadBase64", "invalid***"}}}}}).status == 400,
         "REST accepted invalid model base64");
+    // The generic MODEL endpoint must preserve opaque record commits, while
+    // still rejecting a native annotation record with no owning layer. The
+    // failed engineering candidate must leave HEAD untouched.
+    const Response orphanAnnotation = client.call("POST", mainCommitPath,
+        QJsonObject{{"expectedHead", modelRoot}, {"changes", QJsonArray{
+            QJsonObject{{"uuid", "00000000-0000-0000-0000-000000000009"},
+                        {"kind", 112}, {"references", QJsonArray{}},
+                        {"payloadBase64", "Cw=="}}}}});
+    check(orphanAnnotation.status == 400 &&
+          client.call("GET", modelPath + "/branches/main/head")
+              .json.value("id").toString() == modelRoot,
+          "REST generic MODEL Commit bypassed orphan annotation validation");
     const Response modelFirst = client.call("POST", mainCommitPath, firstCommit);
     const QString modelFirstId = modelFirst.json.value("id").toString();
     check(modelFirst.status == 201 && native::RevisionId::parse(modelFirstId.toStdString()),
@@ -2684,14 +2698,87 @@ void exerciseAnnotationDraftHttp() {
           client.call("POST", commitPath, normalCommit).json.value("revision") == committedRevision,
           "valid annotation Commit or idempotent replay was rejected");
 
+    // The first Commit is a checkpoint: it has no immutable parent to replay.
+    // A subsequent real local Commit with two annotation actions must provide
+    // an authenticated revision witness, including order, native membership
+    // records, parent/child snapshot closure, and both intermediate boundaries.
+    const std::optional<native::RevisionId> initialRevision =
+        native::RevisionId::parse(committedRevision.toStdString());
+    check(initialRevision.has_value(), "first annotation Commit has invalid revision identity");
+    QString historyError;
+    check(!native::annotations::verifyIndexedAnnotationActionBoundary(
+              service, project.id, "main", *initialRevision, 0, &historyError) &&
+          !historyError.isEmpty(),
+          "first Commit without immutable parent was exposed as annotation actions");
+    const native::WorkingCopyInfo archivedDraft = service.createWorkingCopy(
+        project.id, "main", initialRevision, session.toStdString());
+    const native::WorkingCopyLease archivedLease = service.acquireWorkingCopyLease(
+        archivedDraft.id, session.toStdString(), 90);
+    const QString archivedPath = QStringLiteral("/dvmdb/v1/working-copies/") +
+        QString::fromStdString(archivedDraft.id);
+    const std::function<QJsonObject(const QString&, const QByteArray&)> archivedRequest =
+        [&session, &archivedLease, &layerId](const QString& generation,
+                                            const QByteArray& eventBytes) -> QJsonObject {
+            return QJsonObject{{"sessionId", session},
+                {"fencingToken", QString::fromStdString(archivedLease.token)},
+                {"expectedGeneration", generation}, {"annotationLayerId", layerId},
+                {"changes", QJsonArray{}},
+                {"events", QJsonArray{QString::fromLatin1(eventBytes.toBase64())}}};
+        };
+    check(client.call("POST", archivedPath + "/save-events",
+              archivedRequest("0", frame(annotation, std::nullopt, initial))).status == 200 &&
+          client.call("POST", archivedPath + "/save-events",
+              archivedRequest("1", frame(annotation, initial, revised))).status == 200,
+          "could not persist two actions for indexed annotation archive replay");
+    const QString secondOperation =
+        QString::fromStdString(native::UuidV7::generate().toString());
+    const Response secondCommitted = client.call("POST", commitPath,
+        QJsonObject{{"operationId", secondOperation},
+            {"draftId", QString::fromStdString(archivedDraft.id)},
+            {"sessionId", session},
+            {"fencingToken", QString::fromStdString(archivedLease.token)},
+            {"expectedGeneration", "2"}, {"expectedHead", committedRevision},
+            {"author", Client::testAuthor()}, {"message", "Indexed annotation history"}});
+    const QString secondCommittedRevision = secondCommitted.json.value("revision").toString();
+    const std::optional<native::RevisionId> secondRevision =
+        native::RevisionId::parse(secondCommittedRevision.toStdString());
+    check(secondCommitted.status == 200 && secondRevision.has_value(),
+          "second annotation Commit did not publish a revision");
+    const std::optional<native::annotations::VerifiedIndexedAnnotationActionBoundary> zero =
+        native::annotations::verifyIndexedAnnotationActionBoundary(
+            service, project.id, "main", *secondRevision, 0, &historyError);
+    check(zero && zero->boundary.changesFromParent.empty() &&
+          zero->commitOperationId == secondOperation.toStdString() &&
+          zero->boundary.actionCount == 2,
+          "indexed annotation archive did not reproduce its immutable parent");
+    const std::optional<native::annotations::VerifiedIndexedAnnotationActionBoundary> middle =
+        native::annotations::verifyIndexedAnnotationActionBoundary(
+            service, project.id, "main", *secondRevision, 1, &historyError);
+    check(middle && !middle->boundary.changesFromParent.empty() &&
+          middle->boundary.changedLayerIds.size() == 1 &&
+          middle->boundary.changedLayerIds.front() == layerUuid,
+          "indexed annotation archive lost its first intermediate action");
+    const std::optional<native::annotations::VerifiedIndexedAnnotationActionBoundary> last =
+        native::annotations::verifyIndexedAnnotationActionBoundary(
+            service, project.id, "main", *secondRevision, 2, &historyError);
+    check(last && !last->boundary.changesFromParent.empty() &&
+          last->revisionId == secondCommittedRevision.toStdString(),
+          "indexed annotation archive did not reconstruct the committed candidate");
+    check(!native::annotations::verifyIndexedAnnotationActionBoundary(
+              service, project.id, "main", *secondRevision, 3, &historyError) &&
+          !historyError.isEmpty(),
+          "indexed annotation archive exposed an out-of-range action position");
+
     // A direct native/library Save can bypass the HTTP event validator.
     // A new draft with an orphaned annotation must be refused at HTTP Commit,
     // without changing the immutable branch HEAD or the saved draft.
+    MapAnnotation unowned = annotation;
+    unowned.uuid = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
     native::ModelRecord orphan;
     orphan.kind = native::annotations::annotationMemberKind;
-    orphan.payload = native::record::bytesFromQByteArray(initial);
-    const std::optional<native::RevisionId> base =
-        native::RevisionId::parse(committedRevision.toStdString());
+    orphan.payload = native::record::bytesFromQByteArray(
+        native::ModelCodec<MapAnnotation>::encode(unowned));
+    const std::optional<native::RevisionId> base = secondRevision;
     check(base.has_value(), "committed annotation revision is invalid");
     const native::WorkingCopyInfo unsafe = service.createWorkingCopy(
         project.id, "main", base, session.toStdString());
@@ -2699,7 +2786,7 @@ void exerciseAnnotationDraftHttp() {
         unsafe.id, session.toStdString(), 90);
     const native::WorkingCopyInfo injected = service.saveWorkingCopyChanges(
         unsafe.id, session.toStdString(), unsafeLease.token, 0,
-        {native::ModelChange{native::record::keyFromUuid(annotation.uuid), orphan}});
+        {native::ModelChange{native::record::keyFromUuid(unowned.uuid), orphan}});
     check(injected.generation == 1,
           "could not set up direct native annotation corruption fixture");
     const Response blockedCommit = client.call("POST", commitPath,
@@ -2708,7 +2795,7 @@ void exerciseAnnotationDraftHttp() {
                     {"sessionId", session},
                     {"fencingToken", QString::fromStdString(unsafeLease.token)},
                     {"expectedGeneration", "1"},
-                    {"expectedHead", committedRevision},
+                    {"expectedHead", secondCommittedRevision},
                     {"author", Client::testAuthor()},
                     {"message", "Must not publish unowned annotation"}});
     check(blockedCommit.status == 400 &&
@@ -2849,7 +2936,8 @@ void exerciseHydraulicDraftMembershipHttp() {
         layer.owner_network_uuid = networkUuid;
         base = repository.commitModel(projectUuid, "main",
             native::annotations::fullDraftAnnotationLayerChanges(layer, {}),
-            commitMetadata(), base, true);
+            commitMetadata(), base, true, std::nullopt,
+            native::annotations::validateAnnotationSnapshot);
     });
     service.configureRepositoryRole(native::RepositoryRole::Private);
     TestServer server(service, native::BundleLimits{4ULL * 1024ULL * 1024ULL,
@@ -3246,7 +3334,10 @@ void exerciseHydraulicDraftMembershipHttp() {
         service.acquireWorkingCopyLease(draftId, sessionId, 120);
     const native::LocalCommitInfo committed = service.commitWorkingCopy(
         native::UuidV7::generate().toString(), draftId, sessionId, renewed.token,
-        8, base, commitMetadata());
+        8, base, commitMetadata(),
+        [](const native::MergeCandidate& candidate) {
+            return native::annotations::validateAnnotationSnapshot(candidate);
+        });
     const std::optional<native::RevisionId> archivedHead =
         native::RevisionId::parse(committed.reservedRevisionId);
     const native::WorkingCopyInfo rebased = service.workingCopy(draftId);
@@ -3383,7 +3474,10 @@ void exerciseHydraulicDraftMembershipHttp() {
           "HDB-03f cannot establish second journalled Commit fixture");
     const native::LocalCommitInfo secondCommit = service.commitWorkingCopy(
         native::UuidV7::generate().toString(), draftId, sessionId, renewed.token,
-        13, archivedHead, commitMetadata());
+        13, archivedHead, commitMetadata(),
+        [](const native::MergeCandidate& candidate) {
+            return native::annotations::validateAnnotationSnapshot(candidate);
+        });
     const QString secondRevision = QString::fromStdString(secondCommit.reservedRevisionId);
     check(secondCommit.state == native::LocalCommitState::Succeeded &&
           service.workingCopy(draftId).generation == 14,
@@ -3661,7 +3755,10 @@ void exerciseHydraulicDraftMembershipHttp() {
           "HDB-03h Undo/Redo of forked MODEL action lost its archived parent");
     const native::LocalCommitInfo forkCommit = service.commitWorkingCopy(
         native::UuidV7::generate().toString(), draftId, sessionId, renewed.token,
-        28, native::RevisionId::parse(secondCommit.reservedRevisionId), commitMetadata());
+        28, native::RevisionId::parse(secondCommit.reservedRevisionId), commitMetadata(),
+        [](const native::MergeCandidate& candidate) {
+            return native::annotations::validateAnnotationSnapshot(candidate);
+        });
     const std::optional<native::RevisionId> forkRevision =
         native::RevisionId::parse(forkCommit.reservedRevisionId);
     const Response committedForkTimeline = archiveClient.call("GET", timelinePath);

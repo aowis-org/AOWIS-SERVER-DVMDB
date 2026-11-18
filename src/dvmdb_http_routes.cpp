@@ -1010,6 +1010,22 @@ bool isAnnotationNativeKind(std::uint16_t kind) {
            kind == annotations::annotationMemberKind;
 }
 
+// The generic MODEL APIs accept opaque, non-engineering records. Apply the
+// strict B2 graph/annotation validator only when the COMPLETE candidate is an
+// engineering model. Once a Distribution root or annotation record is present,
+// unknown/unowned members still fail closed inside validateAnnotationSnapshot.
+std::optional<std::string> validateEngineeringCandidateIfNeeded(
+        const MergeCandidate& candidate) {
+    bool engineering = false;
+    candidate.forEach([&engineering](const Key&, const ModelRecord& record) {
+        if (record.kind == hydraulic::hydraulicDistributionNetworkKind ||
+            isAnnotationNativeKind(record.kind))
+            engineering = true;
+    });
+    if (!engineering) return std::nullopt;
+    return annotations::validateAnnotationSnapshot(candidate);
+}
+
 // Builds one complete pinned native-model candidate for semantic validation.
 // The immutable base is scanned outside the draft writer lock. The writer's
 // generation CAS ensures the candidate cannot change between this preflight
@@ -1042,18 +1058,8 @@ CandidateRecords completeDraftCandidate(
 }
 
 void validateDraftAnnotationCandidate(const CandidateRecords& records) {
-    // A raw, legacy test model may contain standalone member records. The
-    // annotation-aware graph contract applies once there is a network or any
-    // annotation record; all such candidates must have complete ownership.
-    bool usesLayers = false;
-    for (const std::pair<const Key, ModelRecord>& item : records) {
-        if (item.second.kind == hydraulic::hydraulicDistributionNetworkKind ||
-            isAnnotationNativeKind(item.second.kind)) {
-            usesLayers = true;
-            break;
-        }
-    }
-    if (!usesLayers) return;
+    // The B2 graph contract applies only to engineering candidates. This
+    // shares the same predicate as direct MODEL and local Commit publication.
     MergeCandidate candidate;
     candidate.get = [&records](const Key& id) -> std::optional<ModelRecord> {
         const CandidateRecords::const_iterator item = records.find(id);
@@ -1064,7 +1070,7 @@ void validateDraftAnnotationCandidate(const CandidateRecords& records) {
         for (const std::pair<const Key, ModelRecord>& item : records)
             visit(item.first, item.second);
     };
-    const std::optional<std::string> error = annotations::validateAnnotationSnapshot(candidate);
+    const std::optional<std::string> error = validateEngineeringCandidateIfNeeded(candidate);
     requireInput(!error.has_value(), "invalid model candidate annotation ownership or references");
 }
 
@@ -2376,7 +2382,13 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             const LocalCommitInfo result = service.commitWorkingCopy(
                 operationId, draftId,
                 requiredString(body, "sessionId"), requiredString(body, "fencingToken"),
-                generation, expected, metadata);
+                generation, expected, metadata
+#ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
+                , [](const MergeCandidate& candidate) {
+                    return validateEngineeringCandidateIfNeeded(candidate);
+                }
+#endif
+            );
             const QString state = result.state == LocalCommitState::Succeeded
                 ? QStringLiteral("succeeded") : result.state == LocalCommitState::Pending
                     ? QStringLiteral("pending") : QStringLiteral("rejected");
@@ -3389,7 +3401,13 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             std::vector<ModelChange> changes = parseModelChanges(object, true);
             const RevisionId saved = service.commitModel(pathParam(request, "id"),
                                            pathParam(request, "branch"), std::move(changes),
-                                           metadata, expected);
+                                           metadata, expected
+#ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
+                                           , [](const MergeCandidate& candidate) {
+                                               return validateEngineeringCandidateIfNeeded(candidate);
+                                           }
+#endif
+                                           );
             return Reply{201, QJsonObject{{"id", revisionIdString(saved)}}};
         });
     });

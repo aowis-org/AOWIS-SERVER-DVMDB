@@ -30,6 +30,14 @@ def main() -> None:
         "saveWorkingCopyTransactions",
     ):
         require(routes, re.escape(symbol), f"annotation edit integration missing: {symbol}")
+    require(routes, r"std::optional<std::string>\s+validateEngineeringCandidateIfNeeded\("
+            r".*?hydraulic::hydraulicDistributionNetworkKind"
+            r".*?isAnnotationNativeKind\(record\.kind\)"
+            r".*?annotations::validateAnnotationSnapshot\(candidate\)",
+            "conditional engineering candidate validation was lost")
+    require(routes, r"server\.Post\(routeModelCommits.*?service\.commitModel\(.*?"
+            r"validateEngineeringCandidateIfNeeded\(candidate\)",
+            "direct MODEL HTTP Commit lost semantic candidate validation")
     require(tests, r"void\s+exerciseAnnotationDraftHttp\s*\(",
             "missing annotation HTTP integration test definition")
     require(tests, r"(?<!void\s)exerciseAnnotationDraftHttp\s*\(\s*\)\s*;",
