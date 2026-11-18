@@ -546,8 +546,11 @@ Bytes unhexBytes(std::string_view encoded) {
     return result;
 }
 
-// Basic transport/integrity verification for MODEL's AO WE frame. The full
-// entity schema belongs to MODEL; the HTTP endpoint additionally decodes it
+// Basic transport/integrity verification for MODEL's AO WE format-2 frame.
+// Reject format 1 explicitly: this pre-release breaking change carries
+// authenticated annotation layer ownership in canonical MODEL transactions.
+// The full entity schema belongs to MODEL; the HTTP endpoint additionally
+// decodes it
 // with ModelEditTransactionCodec. This Qt-free service verifies framing,
 // length, SHA-256, and the event's intrinsic UUIDv7 before persisting it.
 WorkingCopyEvent verifiedEditEvent(const Bytes& encoded) {
@@ -555,7 +558,7 @@ WorkingCopyEvent verifiedEditEvent(const Bytes& encoded) {
     constexpr std::size_t digest = 32;
     if (encoded.size() < header + 16 + digest || encoded.size() > 8 * 1024 * 1024 + header + digest ||
         encoded[0] != 'A' || encoded[1] != 'O' || encoded[2] != 'W' ||
-        encoded[3] != 'E' || encoded[4] != 1)
+        encoded[3] != 'E' || encoded[4] != 2)
         throw ProjectError(ProjectErrorKind::InvalidInput, "invalid edit event frame");
     const std::uint32_t size = (static_cast<std::uint32_t>(encoded[5]) << 24) |
         (static_cast<std::uint32_t>(encoded[6]) << 16) |

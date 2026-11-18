@@ -313,6 +313,14 @@ void testAtomicJournalAndIdempotentReplay() {
         corrupt.back() ^= 0x80;
         expectError([&]() { (void)service.saveWorkingCopyTransactions(
             draftId, session, token, 1, changes, {corrupt}); }, ProjectErrorKind::InvalidInput);
+        // Format-1 frames remain parseable at the transport byte level, but
+        // must not be accepted following MODEL's format-2 owner provenance
+        // change. The payload digest is unchanged when only byte 4 changes.
+        aowis::dvmdb::Bytes obsolete =
+            aowis::dvmdb::test::editEvent(UuidV7::generate(), entityId);
+        obsolete.at(4) = 1;
+        expectError([&]() { (void)service.saveWorkingCopyTransactions(
+            draftId, session, token, 1, changes, {obsolete}); }, ProjectErrorKind::InvalidInput);
         require(service.workingCopy(draftId).generation == 1,
                 "rejected journal save mutated generation");
     }

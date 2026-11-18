@@ -103,9 +103,9 @@ void requireSameChanges(const std::vector<ModelChange>& expected,
     }
 }
 
-// This is an attribution proof, not a heuristic. Members which exist at
-// neither endpoint have no durable layer provenance in the current MODEL
-// history envelope and must fail, even if only one layer is present.
+// Immutable endpoints constrain ownership of surviving/previous members.
+// The canonical edit frame itself now authenticates ownerLayerId, so a member
+// absent at both endpoints can still be replayed without guessing.
 std::map<Key, Key> knownOwners(const Records& parent, const Records& committed) {
     std::map<Key, Key> owners;
     const std::function<void(const Records&)> collect = [&owners](const Records& records) {
@@ -182,7 +182,7 @@ std::optional<VerifiedAnnotationActionBoundary> replayVerifiedAnnotationActionBo
         const Records after = copyRecords(committed);
         validate(before);
         validate(after);
-        const std::map<Key, Key> owners = knownOwners(before, after);
+        std::map<Key, Key> owners = knownOwners(before, after);
         const std::vector<ModelChange> nativeDelta = changesBetween(before, after);
         requireSameChanges(nativeDelta, actualNativeChanges);
 
@@ -215,10 +215,14 @@ std::optional<VerifiedAnnotationActionBoundary> replayVerifiedAnnotationActionBo
                 const Key entityId = record::keyFromUuid(edit.entityId);
                 require(!edit.entityId.isNull() && actionEntities.insert(entityId).second,
                         "repeated or null annotation UUID within archived transaction");
+                require(edit.ownerLayerId && !edit.ownerLayerId->isNull(),
+                        "archived annotation edit lacks authenticated layer provenance");
+                const Key claimedLayer = record::keyFromUuid(*edit.ownerLayerId);
                 const std::map<Key, Key>::const_iterator owner = owners.find(entityId);
-                require(owner != owners.end(),
-                        "annotation history lacks durable layer ownership provenance");
-                byLayer[owner->second].push_back(edit);
+                require(owner == owners.end() || owner->second == claimedLayer,
+                        "annotation ownership changed within archived history");
+                owners.emplace(entityId, claimedLayer);
+                byLayer[claimedLayer].push_back(edit);
             }
             // All layer-specific native deltas are materialized against the
             // same semantic event. Each layer retains its own membership order.

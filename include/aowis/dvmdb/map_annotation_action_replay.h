@@ -4,10 +4,11 @@
 //
 // This deliberately accepts COMPLETE immutable parent/child model candidates
 // plus the exact native delta proved by ProjectService's local Commit witness.
-// Neither user-selected layer IDs nor native manifest edits are trusted. The
-// annotation's layer is established from membership in the two snapshots.
-// An event with no provable layer (e.g. create-then-delete within the archive)
-// fails closed until the MODEL history envelope carries explicit ownership.
+// Neither user-selected layer IDs nor native manifest edits are trusted.
+// Each annotation edit includes a canonical ownerLayerId authenticated by the
+// immutable Commit action chain. Endpoint membership additionally proves that
+// surviving members have not silently changed ownership. Transient
+// create-then-delete actions can now be reconstructed safely.
 //
 // This is a proof/preview primitive, NOT a publisher or an HTTP History cursor.
 // Mixed hydraulic/annotation events, layer creation/deletion, and archived

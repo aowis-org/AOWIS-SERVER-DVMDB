@@ -81,6 +81,7 @@ model::ModelEntityEdit create(const MapAnnotation& value) {
     model::ModelEntityEdit edit;
     edit.entityId = value.uuid;
     edit.entityType = QStringLiteral("map.annotation");
+    edit.ownerLayerId = makeLayer().uuid;
     edit.after = db::ModelCodec<MapAnnotation>::encode(value);
     return edit;
 }
@@ -192,6 +193,16 @@ void testBadEdits() {
     mustReject([&]() { ann::materializeDraftAnnotationEdits(read(records), makeLayer().uuid,
                                                              {create(second), update(first, second)}); },
                "partially valid batch with stale second edit was accepted");
+    model::ModelEntityEdit missingOwner = create(second);
+    missingOwner.ownerLayerId.reset();
+    mustReject([&]() { ann::materializeDraftAnnotationEdits(read(records), makeLayer().uuid,
+                                                             {missingOwner}); },
+               "annotation without durable layer provenance was accepted");
+    model::ModelEntityEdit wrongOwner = create(second);
+    wrongOwner.ownerLayerId = uuid(99999);
+    mustReject([&]() { ann::materializeDraftAnnotationEdits(read(records), makeLayer().uuid,
+                                                             {wrongOwner}); },
+               "annotation claiming a foreign layer was accepted");
     model::ModelEntityEdit badType = remove(first);
     badType.entityType = QStringLiteral("HydraulicNodeJunction");
     mustReject([&]() { ann::materializeDraftAnnotationEdits(read(records), makeLayer().uuid,

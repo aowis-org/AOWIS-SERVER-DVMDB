@@ -295,6 +295,7 @@ std::vector<ModelChange> materializeDraftAnnotationEdits(
     std::map<Key, std::optional<MapAnnotation>> originalTouched;
     for (const aowis::model::ModelEntityEdit& edit : edits) {
         if (edit.entityType != QStringLiteral("map.annotation") || edit.entityId.isNull() ||
+            !edit.ownerLayerId || *edit.ownerLayerId != layerId ||
             (!edit.before && !edit.after))
             throw StorageError(StorageErrorKind::InvalidInput,
                                "invalid annotation MODEL entity edit");

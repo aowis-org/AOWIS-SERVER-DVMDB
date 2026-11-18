@@ -106,6 +106,7 @@ Records makeParent(bool withMember = true) {
 model::ModelEntityEdit create(const MapAnnotation& value) {
     model::ModelEntityEdit edit;
     edit.entityType = QStringLiteral("map.annotation");
+    edit.ownerLayerId = layer().uuid;
     edit.entityId = value.uuid;
     edit.after = db::ModelCodec<MapAnnotation>::encode(value);
     return edit;
@@ -261,12 +262,27 @@ void testDeleteAndReinsert() {
 void testFailClosedProvenance() {
     const Records parent = makeParent(false);
     Records child = parent;
-    // An intermediate-only annotation cannot be attributed to a specific
-    // layer from immutable endpoints. Do not guess, even for one network.
+    // Authenticated per-edit ownership makes transient create+delete history
+    // reconstructible even though neither endpoint contains the annotation.
     const std::vector<db::WorkingCopyEvent> transient = {
         event(5, {create(annotation(3))}), event(6, {remove(annotation(3))})};
-    mustReject(parent, child, transient,
-               "created-then-deleted annotation without owner provenance was accepted");
+    const std::optional<ann::VerifiedAnnotationActionBoundary> middle =
+        replay(parent, child, transient, 1);
+    ensure(middle && !middle->changesFromParent.empty(),
+           "transient annotation create could not be reconstructed");
+    const std::optional<ann::VerifiedAnnotationActionBoundary> final =
+        replay(parent, child, transient, 2);
+    ensure(final && final->changesFromParent.empty(),
+           "transient annotation deletion failed to restore original snapshot");
+
+    model::ModelEntityEdit wrongLayer = create(annotation(3));
+    wrongLayer.ownerLayerId = uuid(9999);
+    mustReject(parent, child, {event(30, {wrongLayer})},
+               "unowned or forged annotation layer was accepted");
+    model::ModelEntityEdit movedOwner = remove(annotation(3));
+    movedOwner.ownerLayerId = uuid(9999);
+    mustReject(parent, child, {event(31, {create(annotation(3))}), event(32, {movedOwner})},
+               "cross-layer ownership change in transient history was accepted");
 
     const std::vector<db::WorkingCopyEvent> stale = {
         event(7, {update(annotation(1), annotation(2))})};
@@ -285,6 +301,7 @@ void testFailClosedProvenance() {
 
     model::ModelEntityEdit foreign = create(annotation(4));
     foreign.entityType = QStringLiteral("HydraulicNodeJunction");
+    foreign.ownerLayerId.reset();
     mustReject(parent, child, {event(9, {foreign})},
                "mixed or foreign entity type was silently skipped");
 }
@@ -320,9 +337,11 @@ void testMultipleLayers() {
     MapAnnotation secondChanged = second;
     secondChanged.text = QStringLiteral("Second network changed");
     applyEvent(child, layer().uuid, {update(annotation(1), firstChanged)});
-    applyEvent(child, layer(20, 10).uuid, {update(second, secondChanged)});
+    model::ModelEntityEdit secondEdit = update(second, secondChanged);
+    secondEdit.ownerLayerId = layer(20, 10).uuid;
+    applyEvent(child, layer(20, 10).uuid, {secondEdit});
     const std::vector<db::WorkingCopyEvent> actions = {
-        event(11, {update(annotation(1), firstChanged), update(second, secondChanged)})};
+        event(11, {update(annotation(1), firstChanged), secondEdit})};
     const std::optional<ann::VerifiedAnnotationActionBoundary> verified =
         replay(parent, child, actions, 1);
     ensure(verified && verified->changedLayerIds.size() == 2 &&

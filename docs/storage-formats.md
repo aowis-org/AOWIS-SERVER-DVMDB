@@ -333,9 +333,13 @@ renames to `.deleting-<uuidv7>` before deleting. Behaviour:
 ### MODEL edit frame (`AOWE`)
 
 Owned by AOWIS-SERVER-MODEL (`model_edit_transaction.cpp`); DVMDB checks the
-framing: `AOWE` `0x01` (5), payload length (u32), payload, SHA-256 of the
+framing: `AOWE` `0x02` (5), payload length (u32), payload, SHA-256 of the
 payload (32). The payload starts with the transaction UUIDv7, which is the
-event's identity.
+event's identity. MODEL format 2 additionally encodes a mandatory owning-layer
+UUID for `map.annotation` entity edits. Other entity edits have no such field.
+The native ProjectService checks the frame version and transport integrity;
+MODEL decodes and validates the typed contents at the HTTP/engineering boundary.
+Pre-release format-1 frames are rejected; there is no compatibility migration.
 
 ## Local Commit ledger (`AOWIS-LOCAL-COMMIT-3`)
 

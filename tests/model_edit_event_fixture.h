@@ -5,7 +5,7 @@
 #include <functional>
 #include <string_view>
 
-// A MODEL-compatible binary edit frame used by native-only storage tests;
+// A MODEL format-2 compatible hydraulic edit frame used by native-only storage tests;
 // production encoding/decoding remains exclusively in AOWIS-SERVER-MODEL.
 namespace aowis::dvmdb::test {
 // One entity edit with explicit before/after images (both present: an
@@ -35,7 +35,7 @@ inline Bytes editEvent(const UuidV7& id, const Key& entity,
     payload.insert(payload.end(), before.begin(), before.end());
     put32(static_cast<std::uint32_t>(after.size()));
     payload.insert(payload.end(), after.begin(), after.end());
-    Bytes result{'A', 'O', 'W', 'E', 1};
+    Bytes result{'A', 'O', 'W', 'E', 2};
     const std::uint32_t size = static_cast<std::uint32_t>(payload.size());
     for (unsigned step = 0; step < 4; ++step)
         result.push_back(static_cast<std::uint8_t>(size >> (24 - step * 8)));
