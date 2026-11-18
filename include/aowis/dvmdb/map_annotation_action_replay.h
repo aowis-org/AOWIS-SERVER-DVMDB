@@ -118,8 +118,8 @@ std::optional<WorkingCopyInfo> navigateVerifiedCombinedAction(
 // Live, already-saved MODEL journal navigation. Annotations (and mixed
 // hydraulic/annotation actions) replay against their complete persisted
 // cursor, then publish through the existing fenced draft History writer.
-// Hydraulic-only journals retain their established navigator. Archived forks
-// and unborn annotation drafts remain explicit non-navigable boundaries.
+// Hydraulic-only journals retain their established navigator. Archived forks from authenticated annotation-only or combined
+// local Commits are supported; unborn annotation drafts remain non-navigable.
 std::optional<WorkingCopyInfo> navigateVerifiedActiveDraftAction(
     ProjectService& service, std::string_view operationId,
     std::string_view draftId, std::string_view sessionId,

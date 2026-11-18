@@ -53,6 +53,10 @@ def main() -> None:
             "active combined Undo/Redo and branching regression was removed")
     require(tests, r"active annotation-only Undo or idempotent retry failed",
             "active annotation-only Undo/Redo regression was removed")
+    require(tests, r"active fork Undo did not restore the verified archive boundary",
+            "archived-fork active annotation Undo regression was removed")
+    require(tests, r"active fork Redo resurrected abandoned archived history",
+            "archived-fork active annotation Redo regression was removed")
     require(tests, r"combined action boundary 1 failed to restore committed hydraulic and annotation values",
             "mixed HTTP History publication regression was removed")
     require(tests, r"annotation archived Redo to tip did not recover clean committed HEAD",

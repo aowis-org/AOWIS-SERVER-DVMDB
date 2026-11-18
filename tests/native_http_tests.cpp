@@ -2836,6 +2836,70 @@ void exerciseAnnotationDraftHttp() {
           service.workingCopy(navigationDraft.id).generation == 3,
           "annotation archived History accepted a boundary beyond original Commit");
 
+    // Archived Undo followed by a NEW annotation edit creates an active
+    // journal whose logical parent is the verified archive boundary, not
+    // the current immutable HEAD. Undo/Redo must preserve that provenance
+    // and never resurrect the abandoned archived Redo action.
+    const native::WorkingCopyInfo forkDraft = service.createWorkingCopy(
+        project.id, "main", secondRevision, session.toStdString());
+    const native::WorkingCopyLease forkLease = service.acquireWorkingCopyLease(
+        forkDraft.id, session.toStdString(), 90);
+    const QString forkPath = QStringLiteral("/dvmdb/v1/working-copies/") +
+        QString::fromStdString(forkDraft.id);
+    const QString forkToken = QString::fromStdString(forkLease.token);
+    const std::function<QJsonObject(const QString&, const QString&, const QString&, bool)> forkNavigate =
+        [&session, &forkToken, &secondCommittedRevision](
+                const QString& navigationId, const QString& generation,
+                const QString& position, bool archivedSource) -> QJsonObject {
+            QJsonObject body{{"operationId", navigationId}, {"sessionId", session},
+                {"fencingToken", forkToken}, {"expectedGeneration", generation},
+                {"expectedHead", secondCommittedRevision}, {"actionPosition", position}};
+            if (archivedSource) body.insert(QStringLiteral("revisionId"), secondCommittedRevision);
+            return body;
+        };
+    const Response forkSelected = client.call("POST", forkPath + "/history/navigate",
+        forkNavigate(QString::fromStdString(native::UuidV7::generate().toString()), "0", "1", true));
+    MapAnnotation forkValue = annotation;
+    forkValue.text = QStringLiteral("Forked annotation action");
+    const QByteArray forkImage = native::ModelCodec<MapAnnotation>::encode(forkValue);
+    const Response forkSaved = client.call("POST", forkPath + "/save-events",
+        QJsonObject{{"sessionId", session}, {"fencingToken", forkToken},
+            {"expectedGeneration", "1"}, {"annotationLayerId", layerId},
+            {"changes", QJsonArray{}},
+            {"events", QJsonArray{QString::fromLatin1(
+                frame(annotation, initial, forkImage).toBase64())}}});
+    const native::WorkingCopyInfo forkInfo = service.workingCopy(forkDraft.id);
+    check(forkSelected.status == 200 && forkSaved.status == 200 &&
+          forkSaved.json.value("generation") == "2" &&
+          forkInfo.historyForkRevisionId == secondCommittedRevision.toStdString() &&
+          forkInfo.historyForkActionPosition == 1 &&
+          forkInfo.historyForkArchiveCommitOperationId == secondOperation.toStdString() &&
+          service.optionalHead(project.id, "main") == secondRevision,
+          "new annotation edit did not record authenticated archived-fork provenance");
+    const QString forkUndoId = QString::fromStdString(native::UuidV7::generate().toString());
+    const QJsonObject forkUndoRequest = forkNavigate(forkUndoId, "2", "0", false);
+    const Response forkUndone = client.call("POST", forkPath + "/history/navigate", forkUndoRequest);
+    const Response forkUndoLayer = client.call("GET", forkPath + "/annotation-layers/" + layerId);
+    check(forkUndone.status == 200 && forkUndone.json.value("generation") == "3" &&
+          forkUndone.json.value("draftActionPosition") == "0" &&
+          forkUndoLayer.json.value("annotations").toArray().first().toObject()
+              .value("payloadBase64").toString().toLatin1() == initial.toBase64() &&
+          client.call("POST", forkPath + "/history/navigate", forkUndoRequest).status == 200 &&
+          service.workingCopy(forkDraft.id).generation == 3 &&
+          service.optionalHead(project.id, "main") == secondRevision,
+          "active fork Undo did not restore the verified archive boundary");
+    const Response forkRedone = client.call("POST", forkPath + "/history/navigate",
+        forkNavigate(QString::fromStdString(native::UuidV7::generate().toString()), "3", "1", false));
+    const Response forkRedoLayer = client.call("GET", forkPath + "/annotation-layers/" + layerId);
+    check(forkRedone.status == 200 && forkRedone.json.value("generation") == "4" &&
+          forkRedoLayer.json.value("annotations").toArray().first().toObject()
+              .value("payloadBase64").toString().toLatin1() == forkImage.toBase64() &&
+          client.call("POST", forkPath + "/history/navigate",
+              forkNavigate(QString::fromStdString(native::UuidV7::generate().toString()),
+                           "4", "2", false)).status == 409 &&
+          service.optionalHead(project.id, "main") == secondRevision,
+          "active fork Redo resurrected abandoned archived history");
+
     // B4.3 combined History: one immutable action changes both the
     // Distribution root's metadata and an annotation. The authoritative
     // MODEL archive (not a client-supplied classification) selects the mixed

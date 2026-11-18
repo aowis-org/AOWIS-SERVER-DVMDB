@@ -744,19 +744,66 @@ std::optional<WorkingCopyInfo> navigateVerifiedActiveDraftAction(
         require(draft.generation == expectedGeneration &&
                 draft.baseRevision == expectedHead && draft.baseRevision.has_value(),
                 "active annotation journal generation or committed base changed");
-        require(!draft.historyCheckpointRevisionId && !draft.historyForkRevisionId &&
-                !draft.historyActionPosition && !draft.historyArchiveCommitOperationId,
-                "active annotation journal cannot replay an archived fork or checkpoint");
+        require(!draft.historyCheckpointRevisionId && !draft.historyActionPosition &&
+                !draft.historyArchiveCommitOperationId,
+                "active annotation journal is still at an archived checkpoint");
         const std::optional<RevisionGraphHead> branch =
             service.branchById(draft.projectId, draft.branchId);
         require(branch && branch->revision == draft.baseRevision,
                 "active annotation journal does not follow its branch HEAD");
-        Records parent;
+        // Native overlays are always relative to physical HEAD. The logical
+        // journal origin can instead be a VERIFIED archived action boundary
+        // when the first new edit abandoned the old immutable Redo suffix.
+        Records head;
         for (const std::pair<Key, ModelRecord>& entry :
              service.modelRecordsAtRevision(draft.projectId, *draft.baseRevision))
-            require(parent.emplace(entry.first, entry.second).second,
-                    "duplicate record in active History base");
-        Records saved = parent;
+            require(head.emplace(entry.first, entry.second).second,
+                    "duplicate record in active History HEAD");
+        Records parent = head;
+        const bool forked = draft.historyForkRevisionId.has_value() ||
+            draft.historyForkActionPosition.has_value() ||
+            draft.historyForkArchiveCommitOperationId.has_value();
+        if (forked) {
+            require(draft.historyForkRevisionId && draft.historyForkActionPosition &&
+                    draft.historyForkArchiveCommitOperationId,
+                    "active annotation History fork provenance is incomplete");
+            const std::optional<RevisionId> sourceRevision =
+                RevisionId::parse(*draft.historyForkRevisionId);
+            require(sourceRevision.has_value(),
+                    "active annotation History fork revision is invalid");
+            QString sourceError;
+            // The indexed verifier checks the authenticated action chain,
+            // exact native delta, ancestry visibility and the entire source
+            // revision. The combined form is needed when an archived source
+            // action also changed hydraulic membership or root metadata.
+            std::optional<VerifiedIndexedAnnotationActionBoundary> source =
+                verifyIndexedAnnotationActionBoundary(service, draft.projectId,
+                    branch->name, *sourceRevision,
+                    static_cast<std::size_t>(*draft.historyForkActionPosition), &sourceError);
+            if (!source) {
+                source = verifyIndexedCombinedActionBoundary(service, draft.projectId,
+                    branch->name, *sourceRevision,
+                    static_cast<std::size_t>(*draft.historyForkActionPosition), &sourceError);
+            }
+            require(source && source->commitOperationId ==
+                    *draft.historyForkArchiveCommitOperationId,
+                    "active annotation History fork source is not an authenticated action boundary");
+            const RevisionNativeActionWitness witness =
+                service.verifiedRevisionNativeActionWitness(
+                    draft.projectId, branch->name, *sourceRevision);
+            require(witness.parentRevision.has_value() &&
+                    witness.commitOperationId == source->commitOperationId &&
+                    source->boundary.actionCount == witness.actions.size(),
+                    "active annotation History fork source witness changed");
+            parent.clear();
+            for (const std::pair<Key, ModelRecord>& entry :
+                 service.modelRecordsAtRevision(draft.projectId, *witness.parentRevision))
+                require(parent.emplace(entry.first, entry.second).second,
+                        "duplicate record in active History fork parent");
+            applyChanges(parent, source->boundary.changesFromParent);
+            validate(parent);
+        }
+        Records saved = head;
         std::set<Key> changedKeys;
         for (const ModelChange& change : draft.candidateChanges) {
             require(changedKeys.insert(change.key).second,
@@ -779,9 +826,10 @@ std::optional<WorkingCopyInfo> navigateVerifiedActiveDraftAction(
         Records desired = parent;
         applyChanges(desired, selected->changesFromParent);
         validate(desired);
-        // Publish an overlay relative to HEAD, never relative to the currently
-        // selected Undo boundary; otherwise Redo would resurrect stale keys.
-        const std::vector<ModelChange> changes = changesBetween(parent, desired);
+        // Publish an overlay relative to physical HEAD, not the logical
+        // archived fork parent or the current Undo boundary. Otherwise
+        // undoing the first fork action would resurrect abandoned Redo.
+        const std::vector<ModelChange> changes = changesBetween(head, desired);
         require(changes.size() <= 20000,
                 "active annotation History candidate exceeds draft change limit");
         const WorkingCopyInfo fresh = service.workingCopy(draftId, false);
@@ -791,6 +839,9 @@ std::optional<WorkingCopyInfo> navigateVerifiedActiveDraftAction(
                 fresh.baseRevision == draft.baseRevision &&
                 fresh.draftActionPosition == draft.draftActionPosition &&
                 fresh.journalCount == draft.journalCount &&
+                fresh.historyForkRevisionId == draft.historyForkRevisionId &&
+                fresh.historyForkActionPosition == draft.historyForkActionPosition &&
+                fresh.historyForkArchiveCommitOperationId == draft.historyForkArchiveCommitOperationId &&
                 currentBranch && currentBranch->revision == draft.baseRevision,
                 "active annotation draft changed during History verification");
         return service.publishVerifiedDraftActionNavigation(

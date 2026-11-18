@@ -623,11 +623,18 @@ idempotent operation identity. Creating a new edit after Undo discards the Redo
 suffix through the unchanged atomic Save path. Hydraulic-only journals continue
 using their original single-network History planner.
 
-This increment is limited to drafts with an immutable base and no archived
-History fork/checkpoint. Annotation editing on an unborn draft can still be
-saved; its action navigation remains non-navigable until the initial seed can
-be reconstructed without inventing provenance. Archived fork resumes retain
-their existing restrictions. Hydraulic member transient ownership in
+An active journal can also originate from a verified annotation-only or
+combined immutable Commit boundary. Its archived source revision, action
+position, and operation ID are verified independently before reconstructing
+its logical starting model. New journal actions replay from that archived
+boundary, but the replacement overlay is calculated relative to physical
+HEAD, never relative to the archived fork state. This prevents abandoned
+archived Redo actions from reappearing. An incomplete, nonlocal, or unsupported
+fork witness fails closed; the existing immutable archive is never rewritten.
+
+Annotation editing on an unborn draft can still be saved; its action
+navigation remains non-navigable until the initial seed can be reconstructed
+without inventing provenance. Hydraulic member transient ownership in
 multi-network History remains fail-closed where immutable endpoints cannot
 prove the owning network. The live journal is fsync-pinned, not an immutable
 Commit witness: its digest must never be described as authenticated by a
