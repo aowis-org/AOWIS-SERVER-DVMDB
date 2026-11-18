@@ -148,6 +148,21 @@ def tracking_metadata(root):
     return payload
 
 
+def valid_model_edit_frame(frame, event_id):
+    """Check the current canonical MODEL envelope without decoding entity data.
+
+    Keep this in sync with ProjectService::verifiedEditEvent and MODEL's
+    ModelEditTransactionCodec. Pre-release AOWE version 1 is intentionally
+    unsupported: annotation owners are authenticated in version 2.
+    """
+    if len(frame) < 9 + 16 + 32 or frame[:5] != b"AOWE\x02":
+        return False
+    payload_size = int.from_bytes(frame[5:9], "big")
+    return (payload_size == len(frame) - 9 - 32 and
+            hashlib.sha256(frame[9:-32]).digest() == frame[-32:] and
+            frame[9:25] == event_id)
+
+
 def working_copy_records(root):
     """Verify every published private draft (AOWIS-WORKING-COPY-10).
 
@@ -315,10 +330,8 @@ def working_copy_records(root):
                 event_id = journal_bytes[offset:offset + 16]
                 size = int.from_bytes(journal_bytes[offset + 16:offset + 20], "big")
                 frame = journal_bytes[offset + 20:offset + 20 + size]
-                require(len(frame) == size and len(frame) >= 9 + 16 + 32 and frame[:5] == b"AOWE\x01" and
-                        int.from_bytes(frame[5:9], "big") == len(frame) - 9 - 32 and
-                        hashlib.sha256(frame[9:-32]).digest() == frame[-32:] and
-                        frame[9:25] == event_id and event_id not in seen,
+                require(len(frame) == size and valid_model_edit_frame(frame, event_id) and
+                        event_id not in seen,
                         f"invalid journal frame/digest/id: {entry / journal}")
                 seen.add(event_id)
                 chain = hashlib.sha256(chain + frame).digest()

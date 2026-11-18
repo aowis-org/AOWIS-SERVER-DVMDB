@@ -372,6 +372,13 @@ if(BUILD_TESTING)
             "${CMAKE_CURRENT_SOURCE_DIR}/tools/offline_backup.py"
             "$<TARGET_FILE:aowis-dvmdb-verify>")
     set_tests_properties(aowis-dvmdb-offline-backup-tests PROPERTIES LABELS "aowis")
+    # Fast format-2 journal-envelope contract test; the full offline backup
+    # drill above additionally verifies real published working copies.
+    add_test(NAME aowis-dvmdb-offline-backup-frame-tests
+        COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/offline_backup_frame_tests.py")
+    set_tests_properties(aowis-dvmdb-offline-backup-frame-tests PROPERTIES
+        LABELS "aowis;working-copy;durability")
     # UUIDv7-only offline server-root move/restart: divergent project histories,
     # large current-format model data, a commit after restore and second backup.
     add_executable(aowis-dvmdb-upgrade-restore-tests
@@ -543,6 +550,18 @@ if(AOWIS_DVMDB_WITH_MODEL_CODEC)
             message(FATAL_ERROR
                 "DVMDB B1 requires MODEL A3 (17 hydraulic collections, format 2). "
                 "The checked-out MODEL still has legacy map labels; update the submodule.")
+        endif()
+        # B4.3 requires an authenticated ownerLayerId in each annotation
+        # MODEL action. A stale submodule can otherwise compile some native
+        # targets while silently failing annotation archive replay.
+        file(STRINGS
+            "${AOWIS_DVMDB_MODEL_SOURCE_DIR}/include/aowis/model/edit/model_edit_transaction.h"
+            AOWIS_DVMDB_ANNOTATION_OWNER_PROVENANCE
+            REGEX "ownerLayerId")
+        if(NOT AOWIS_DVMDB_ANNOTATION_OWNER_PROVENANCE)
+            message(FATAL_ERROR
+                "DVMDB annotation History requires MODEL transaction format 2 "
+                "with ownerLayerId. Commit/pin the updated MODEL submodule first.")
         endif()
         if(NOT TARGET AOWIS::Model)
             add_subdirectory("${AOWIS_DVMDB_MODEL_SOURCE_DIR}"
