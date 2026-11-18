@@ -43,6 +43,15 @@ def main() -> None:
             r".*?isAnnotationNativeKind\(record\.kind\)"
             r".*?annotations::validateAnnotationSnapshot\(candidate\)",
             "conditional engineering candidate validation was lost")
+    require(routes, r"repository\.importRevisionBundle\(\*project, spool\.fd\(\), branch, limits,"
+            r".*?validateEngineeringCandidateIfNeeded\(candidate\)",
+            "HTTP replication import lost pre-publication annotation validation")
+    native_store = (Path(__file__).resolve().parents[1] / "src/native_store.cpp").read_text(encoding="utf-8")
+    require(native_store, r"invalid imported engineering revision",
+            "low-level revision import lost semantic history preflight")
+    require(cmake, r"target_link_libraries\(aowis-dvmdb-sync PRIVATE "
+            r"aowis-dvmdb-annotation-integrity\)",
+            "Qt-backed sync CLI lost its annotation validator")
     require(routes, r"annotations::navigateVerifiedAnnotationAction\(service, operationId",
             "annotation archived History lost its fenced HTTP publication adapter")
     require(routes, r"annotations::navigateVerifiedCombinedAction\(service, operationId",
@@ -53,6 +62,12 @@ def main() -> None:
             "active combined Undo/Redo and branching regression was removed")
     require(tests, r"active annotation-only Undo or idempotent retry failed",
             "active annotation-only Undo/Redo regression was removed")
+    require(tests, r"unborn annotation new edit did not abandon the Redo suffix",
+            "unborn annotation redo invalidation regression was removed")
+    require(tests, r"unborn annotation boundary zero did not preserve initialization seed",
+            "unborn annotation active History regression was removed")
+    require(routes, r"canNavigateVerifiedActiveAnnotationDraftAction\(",
+            "unborn History cursor must check annotation replay eligibility")
     require(tests, r"active fork Undo did not restore the verified archive boundary",
             "archived-fork active annotation Undo regression was removed")
     require(tests, r"active fork Redo resurrected abandoned archived history",

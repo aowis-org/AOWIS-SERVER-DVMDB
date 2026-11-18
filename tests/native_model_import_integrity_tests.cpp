@@ -18,6 +18,7 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+#include <fcntl.h>
 #include <unistd.h>
 
 namespace {
@@ -87,6 +88,14 @@ struct BundleBuilder : aowis::dvmdb::test::RevisionBundleBuilder {
         Bytes bytes{'V'};
         bytes.insert(bytes.end(), envelope.begin(), envelope.end());
         return add(bytes);
+    }
+
+    Hash modelValueWithKind(std::uint16_t kind) {
+        const Bytes record = aowis::dvmdb::encodeModelRecord(
+            ModelRecord{kind, {}, Bytes{'m', 'o', 'd', 'e', 'l'}});
+        Bytes encoded{'V'};
+        encoded.insert(encoded.end(), record.begin(), record.end());
+        return add(encoded);
     }
 
     Hash duplicateReferenceValue(const Key& reference) {
@@ -601,6 +610,63 @@ void testHistoricalReferenceDeltas() {
     }
 }
 
+// A clean tip must not launder an invalid engineering snapshot in its
+// immutable ancestry. The Qt-free fixture proves that the low-level importer
+// invokes a required semantic hook for EVERY supplied revision and rejects
+// without writing even a single pack object or publishing a branch.
+void testHistoricalEngineeringSemanticGate() {
+    TemporaryDirectory temporary("engineering-semantic");
+    BundleBuilder builder;
+    const BuiltRevision invalid = builder.revision(
+        builder.tree({{key(1), builder.modelValueWithKind(110)}}), Hash{});
+    const BuiltRevision cleanTip = builder.revision(
+        builder.tree({{key(2), builder.modelValueWithKind(1)}}), Hash{}, invalid);
+    const std::filesystem::path bundle = temporary.path / "historical-engineering.bundle";
+    builder.write(bundle, cleanTip);
+
+    ProjectRepository receiver(temporary.path / "target", builder.project());
+    const std::uint64_t beforeObjects = receiver.objectCount();
+    const std::uint64_t beforePack = receiver.packSize();
+    const std::function<void(const std::function<std::optional<std::string>(
+        const aowis::dvmdb::MergeCandidate&)>&)> rejectImport =
+        [&](const std::function<std::optional<std::string>(
+                const aowis::dvmdb::MergeCandidate&)>& validator) {
+            const int fd = ::open(bundle.c_str(), O_RDONLY | O_CLOEXEC);
+            expect(fd >= 0, "could not open semantic import fixture");
+            bool rejected = false;
+            try {
+                (void)receiver.native().importRevisionBundle(builder.project(), fd,
+                    "incoming", {}, nullptr, validator);
+            } catch (const aowis::dvmdb::StorageError& error) {
+                rejected = error.kind() == aowis::dvmdb::StorageErrorKind::InvalidInput;
+            } catch (...) {
+                (void)::close(fd);
+                throw;
+            }
+            (void)::close(fd);
+            expect(rejected, "historical engineering snapshot was not rejected");
+            expect(receiver.objectCount() == beforeObjects &&
+                   receiver.packSize() == beforePack &&
+                   receiver.listBranches().empty(),
+                   "rejected engineering import mutated pack or branches");
+        };
+
+    rejectImport({}); // Fail closed when native caller omits the domain validator.
+    std::size_t validationCalls = 0;
+    rejectImport([&validationCalls](const aowis::dvmdb::MergeCandidate& candidate)
+            -> std::optional<std::string> {
+        ++validationCalls;
+        bool sawInvalidLayer = false;
+        candidate.forEach([&sawInvalidLayer](const Key&, const ModelRecord& record) {
+            if (record.kind == 110) sawInvalidLayer = true;
+        });
+        return sawInvalidLayer ? std::optional<std::string>("invalid layer in ancestor") :
+            std::nullopt;
+    });
+    expect(validationCalls == 1,
+           "import did not semantically validate the historical engineering revision");
+}
+
 void testMalformedIncremental() {
     TemporaryDirectory temporary("incremental");
     ProjectRepository source(temporary.path / "source");
@@ -651,6 +717,7 @@ int main() {
             testHistoricalReferenceDeltas();
             testDeepSharedModelHistory();
         }
+        testHistoricalEngineeringSemanticGate();
         testMalformedIncremental();
         std::cout << "Native model import integrity tests passed\n";
         return 0;

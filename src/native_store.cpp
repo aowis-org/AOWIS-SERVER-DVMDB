@@ -5058,7 +5058,8 @@ void Repository::exportRevisionBundleLocked(const ProjectId& project,
 }
 
 RevisionBundleImport Repository::importRevisionBundle(const ProjectId& expectedProject,
-        int fd, std::string_view localBranch, BundleLimits limits, BundleImportProfile* profile) {
+        int fd, std::string_view localBranch, BundleLimits limits, BundleImportProfile* profile,
+        const std::function<std::optional<std::string>(const MergeCandidate&)>& validate) {
     std::lock_guard<std::mutex> guarded(this->mutex_);
     ScopedFileLock locked(this->lockFd_);
     refreshIndex();
@@ -5453,6 +5454,156 @@ RevisionBundleImport Repository::importRevisionBundle(const ProjectId& expectedP
             return RevisionBundleImport{BundleImportStatus::UpToDate,
                                            *existing->revision, 0};
         }
+    }
+    // The logical/Merkle verifier above proves tree shape and reverse-reference
+    // consistency, but not project-specific annotation ownership. Check every
+    // newly carried MODEL revision, not just the incoming tip: an invalid
+    // historical snapshot must not be laundered by a later clean revision.
+    // Shared immutable MODEL roots are checked only once per import.
+    // A FULL bundle is self-contained: all MODEL leaf values of every
+    // historical revision are carried in its authenticated object set. Scan
+    // their fixed native envelopes once to identify the common generic-only
+    // case without enumerating every historical 2,000-record snapshot. The
+    // preceding logical verifier has already authenticated their structure.
+    // Never use this shortcut for incremental bundles: old local objects may
+    // contain engineering types that are not repeated in the delta.
+    bool selfContainedGeneric = !incremental;
+    if (selfContainedGeneric) {
+        std::array<std::uint8_t, 8> prefix{};
+        for (std::size_t index = 0; index < entries.size(); ++index) {
+            const std::pair<Hash, BundleLocation> entry = entries.at(index);
+            if (entry.second.size < prefix.size()) continue;
+            readExact(fd, prefix.data(), prefix.size(), entry.second.offset);
+            if (prefix[0] != 'V' || prefix[1] != 'A' || prefix[2] != 'O' ||
+                prefix[3] != 'M' || prefix[4] != 'D' || prefix[5] != 1)
+                continue;
+            const std::uint16_t kind = static_cast<std::uint16_t>(
+                (static_cast<unsigned>(prefix[6]) << 8U) | prefix[7]);
+            if (kind == 100 || kind == 101 || (kind >= 110 && kind <= 112)) {
+                selfContainedGeneric = false;
+                break;
+            }
+        }
+        if (selfContainedGeneric) {
+            // No MODEL value in the complete source bundle is engineering.
+            // Every tree subtree is therefore known generic; caching its
+            // content hash makes a later incremental graft check O(delta).
+            std::array<std::uint8_t, 1> tag{};
+            for (std::size_t index = 0; index < entries.size(); ++index) {
+                const std::pair<Hash, BundleLocation> entry = entries.at(index);
+                if (entry.second.size == 0) continue;
+                readExact(fd, tag.data(), tag.size(), entry.second.offset);
+                if (tag[0] != 'B' && tag[0] != 'L') continue;
+                if (this->engineeringTrieCache_.size() >= 262144U)
+                    this->engineeringTrieCache_.clear();
+                this->engineeringTrieCache_.emplace(entry.first, false);
+            }
+        }
+    }
+    // Immutable subtree hashes permit safe caching of a conservative
+    // engineering-presence bit. Recursing through *new* paths only allows
+    // incremental imports to reuse the already classified base: no full local
+    // snapshot scan for each one-record delta. The cache is advisory and is
+    // discarded with this Repository handle; SHA-256-verified objects remain
+    // the authority. A false bit is computed only after inspecting every leaf.
+    const std::function<bool(const Hash&)> containsEngineering =
+        [&](const Hash& nodeHash) -> bool {
+        const std::map<Hash, bool>::const_iterator cached =
+            this->engineeringTrieCache_.find(nodeHash);
+        if (cached != this->engineeringTrieCache_.end()) return cached->second;
+        const Bytes node = bundled(nodeHash);
+        require(Err::InvalidInput, !node.empty(), "empty imported MODEL trie node");
+        bool engineering = false;
+        if (node.front() == 'B') {
+            require(Err::InvalidInput, node.size() == 2U + 16U + 16U * 32U,
+                    "invalid imported MODEL branch node");
+            for (std::size_t child = 0; child < 16U; ++child) {
+                const Hash childHash = readHash(node, 18U + child * 32U);
+                if (!isZero(childHash)) {
+                    const bool childEngineering = containsEngineering(childHash);
+                    engineering = engineering || childEngineering;
+                }
+            }
+        } else if (node.front() == 'L') {
+            require(Err::InvalidInput, node.size() == 1U + 16U + 32U,
+                    "invalid imported MODEL leaf node");
+            const Bytes value = bundled(readHash(node, 17));
+            require(Err::InvalidInput, !value.empty() && value.front() == 'V',
+                    "invalid imported MODEL value");
+            const ModelRecord record = decodeModelRecord(
+                Bytes(value.begin() + 1, value.end()));
+            engineering = record.kind == 100 || record.kind == 101 ||
+                (record.kind >= 110 && record.kind <= 112);
+        } else {
+            throw StorageError(Err::InvalidInput, "invalid imported MODEL trie tag");
+        }
+        if (this->engineeringTrieCache_.size() >= 262144U)
+            this->engineeringTrieCache_.clear();
+        this->engineeringTrieCache_.emplace(nodeHash, engineering);
+        return engineering;
+    };
+    std::set<Hash> validatedModelRoots;
+    try {
+        for (const std::pair<const RevisionId, std::pair<Hash, BundleLocation>>& entry : revisions) {
+            const RevisionRecord revision = decodeRevisionRecord(readBundle(entry.second.first));
+            if (!revision.modelIndexed || isZero(revision.root) ||
+                !validatedModelRoots.insert(revision.root).second)
+                continue;
+            if (selfContainedGeneric) {
+                this->engineeringTrieCache_[revision.root] = false;
+                continue;
+            }
+            if (!containsEngineering(revision.root)) continue;
+            require(Err::InvalidInput, static_cast<bool>(validate),
+                    "imported engineering revisions require a semantic candidate validator");
+            std::map<Key, ModelRecord> records;
+            std::vector<Hash> pendingNodes{revision.root};
+            while (!pendingNodes.empty()) {
+                const Hash nodeHash = pendingNodes.back();
+                pendingNodes.pop_back();
+                const Bytes node = bundled(nodeHash);
+                require(Err::InvalidInput, !node.empty(), "empty imported MODEL trie node");
+                if (node.front() == 'B') {
+                    require(Err::InvalidInput, node.size() == 2U + 16U + 16U * 32U,
+                            "invalid imported MODEL branch node");
+                    for (std::size_t child = 0; child < 16U; ++child) {
+                        const Hash childHash = readHash(node, 18U + child * 32U);
+                        if (!isZero(childHash)) pendingNodes.push_back(childHash);
+                    }
+                } else if (node.front() == 'L') {
+                    require(Err::InvalidInput, node.size() == 1U + 16U + 32U,
+                            "invalid imported MODEL leaf node");
+                    Key key{};
+                    std::copy_n(node.begin() + 1, 16, key.begin());
+                    const Bytes value = bundled(readHash(node, 17));
+                    require(Err::InvalidInput, !value.empty() && value.front() == 'V',
+                            "invalid imported MODEL value");
+                    const ModelRecord record = decodeModelRecord(
+                        Bytes(value.begin() + 1, value.end()));
+                    require(Err::InvalidInput, records.emplace(key, record).second,
+                            "duplicate imported MODEL record UUID");
+                } else {
+                    throw StorageError(Err::InvalidInput, "invalid imported MODEL trie tag");
+                }
+            }
+            MergeCandidate candidate;
+            candidate.get = [&records](const Key& key) -> std::optional<ModelRecord> {
+                const std::map<Key, ModelRecord>::const_iterator found = records.find(key);
+                return found == records.end() ? std::nullopt :
+                    std::optional<ModelRecord>(found->second);
+            };
+            candidate.forEach = [&records](
+                    const std::function<void(const Key&, const ModelRecord&)>& visitor) {
+                for (const std::pair<const Key, ModelRecord>& record : records)
+                    visitor(record.first, record.second);
+            };
+            if (const std::optional<std::string> invalid = validate(candidate))
+                throw StorageError(Err::InvalidInput,
+                                   "invalid imported engineering revision " +
+                                   revision.id.toString() + ": " + *invalid);
+        }
+    } catch (...) {
+        rethrowBundleFailure();
     }
     // Only after all external data, ancestry and object semantics validate:
     // append immutable objects; fsync; publish UUID mappings parent-first;

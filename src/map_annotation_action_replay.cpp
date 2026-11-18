@@ -11,6 +11,7 @@
 #include <QByteArray>
 #include <QSet>
 
+#include <algorithm>
 #include <functional>
 #include <map>
 #include <set>
@@ -312,6 +313,115 @@ void applyChanges(Records& records, const std::vector<ModelChange>& changes) {
 
 } // namespace
 
+// Shared canonical single-action materializer, used both for forward replay
+// and for reversing an unborn journal back to its unjournaled initialization
+// seed. The snapshot validator runs after each complete atomic action.
+static void applyVerifiedActionEdits(Records& current,
+        const QVector<aowis::model::ModelEntityEdit>& edits, bool combined,
+        std::map<Key, Key>& owners, HydraulicOwnership& hydraulicOwners,
+        std::set<Key>& changedLayers, bool& annotationSeen, bool& hydraulicSeen,
+        bool reversing = false) {
+    std::set<Key> actionEntities;
+    std::map<Key, std::vector<aowis::model::ModelEntityEdit>> byLayer;
+    std::vector<aowis::model::ModelEntityEdit> hydraulicEdits;
+    for (const aowis::model::ModelEntityEdit& edit : edits) {
+        const Key entityId = record::keyFromUuid(edit.entityId);
+        require(!edit.entityId.isNull() && actionEntities.insert(entityId).second,
+                "repeated or null UUID within archived transaction");
+        if (edit.entityType != QStringLiteral("map.annotation")) {
+            require(combined, "mixed/non-annotation archive needs multi-domain replay");
+            hydraulicSeen = true;
+            hydraulicEdits.push_back(edit);
+            continue;
+        }
+        annotationSeen = true;
+        require(edit.ownerLayerId && !edit.ownerLayerId->isNull(),
+                "archived annotation edit lacks authenticated layer provenance");
+        const Key claimedLayer = record::keyFromUuid(*edit.ownerLayerId);
+        const std::map<Key, Key>::const_iterator owner = owners.find(entityId);
+        require(owner == owners.end() || owner->second == claimedLayer,
+                "annotation ownership changed within archived history");
+        owners.emplace(entityId, claimedLayer);
+        byLayer[claimedLayer].push_back(edit);
+    }
+    // When reversing an action, remove/update annotations BEFORE removing
+    // their hydraulic anchors. The forward direction creates anchors first.
+    const std::function<void()> materializeAnnotations = [&]() {
+        for (const std::pair<const Key, std::vector<aowis::model::ModelEntityEdit>>& part : byLayer) {
+            const QUuid layerId = record::uuidFromKey(part.first);
+            const MergeCandidate pinned = view(current);
+            const std::vector<ModelChange> delta =
+                materializeDraftAnnotationEdits(pinned.get, layerId, part.second);
+            applyChanges(current, delta);
+            changedLayers.insert(part.first);
+        }
+    };
+    if (reversing) materializeAnnotations();
+    // Apply member updates, then native-owned membership changes,
+    // then root metadata. Validate the complete atomic action only
+    // after all domain edits are materialized.
+    std::vector<aowis::model::ModelEntityEdit> membershipEdits;
+    for (const aowis::model::ModelEntityEdit& edit : hydraulicEdits) {
+        if (edit.entityType == QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType))
+            continue;
+        require(!edit.entityId.isNull() && !edit.ownerLayerId,
+                "invalid hydraulic archive identity or annotation owner");
+        if (edit.before && edit.after) applyHydraulicScalar(current, edit);
+        else membershipEdits.push_back(edit);
+    }
+    applyHydraulicMembership(current, membershipEdits, hydraulicOwners);
+    for (const aowis::model::ModelEntityEdit& edit : hydraulicEdits)
+        if (edit.entityType == QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType))
+            applyHydraulicRoot(current, edit);
+    if (!reversing) materializeAnnotations();
+    validate(current);
+}
+
+// An unborn draft has no immutable parent. Reverse ONLY the actions that led
+// to its saved cursor, retaining its unjournaled network/layer initialization.
+// Deletions cannot be inverted without the original membership insertion
+// index, so they fail closed rather than manufacturing a different seed.
+static Records reconstructUnbornJournalSeed(const Records& saved,
+        const std::vector<WorkingCopyEvent>& journal,
+        std::size_t currentPosition, bool combined) {
+    Records seed = saved;
+    std::map<Key, Key> owners = knownOwners(seed, seed);
+    HydraulicOwnership hydraulicOwners;
+    if (combined) hydraulicOwners = knownHydraulicOwners(seed, seed);
+    QSet<QUuid> transactionIds;
+    for (const WorkingCopyEvent& frame : journal) {
+        QString error;
+        const std::optional<aowis::model::ModelEditTransaction> transaction =
+            aowis::model::ModelEditTransactionCodec::decode(
+                record::qByteArrayFromBytes(frame.encoded), &error);
+        require(transaction && !transaction->edits.empty() &&
+                transaction->transactionId.toString(QUuid::WithoutBraces).toStdString() == frame.id &&
+                !transactionIds.contains(transaction->transactionId),
+                "unborn annotation journal has an invalid or duplicate transaction");
+        transactionIds.insert(transaction->transactionId);
+    }
+    for (std::size_t index = currentPosition; index > 0; --index) {
+        QString error;
+        std::optional<aowis::model::ModelEditTransaction> inverse =
+            aowis::model::ModelEditTransactionCodec::decode(
+                record::qByteArrayFromBytes(journal[index - 1].encoded), &error);
+        require(inverse.has_value(), "cannot decode unborn annotation journal action");
+        for (aowis::model::ModelEntityEdit& edit : inverse->edits) {
+            require(!edit.before || edit.after,
+                    "unborn annotation deletion needs the original membership order");
+            std::swap(edit.before, edit.after);
+        }
+        std::reverse(inverse->edits.begin(), inverse->edits.end());
+        bool seenAnnotations = false;
+        bool seenHydraulics = false;
+        std::set<Key> changedLayers;
+        applyVerifiedActionEdits(seed, inverse->edits, combined, owners,
+                                 hydraulicOwners, changedLayers,
+                                 seenAnnotations, seenHydraulics, true);
+    }
+    return seed;
+}
+
 static std::optional<VerifiedAnnotationActionBoundary> replayActionBoundary(
         const MergeCandidate& parent, const MergeCandidate& committed,
         const std::vector<WorkingCopyEvent>& actions,
@@ -374,56 +484,9 @@ static std::optional<VerifiedAnnotationActionBoundary> replayActionBoundary(
                     "invalid or duplicate archived annotation transaction identity");
             transactionsSeen.insert(transaction->transactionId);
             require(!transaction->edits.empty(), "empty archived annotation transaction");
-            std::set<Key> actionEntities;
-            std::map<Key, std::vector<aowis::model::ModelEntityEdit>> byLayer;
-            std::vector<aowis::model::ModelEntityEdit> hydraulicEdits;
-            for (const aowis::model::ModelEntityEdit& edit : transaction->edits) {
-                const Key entityId = record::keyFromUuid(edit.entityId);
-                require(!edit.entityId.isNull() && actionEntities.insert(entityId).second,
-                        "repeated or null UUID within archived transaction");
-                if (edit.entityType != QStringLiteral("map.annotation")) {
-                    require(combined, "mixed/non-annotation archive needs multi-domain replay");
-                    hydraulicSeen = true;
-                    hydraulicEdits.push_back(edit);
-                    continue;
-                }
-                annotationSeen = true;
-                require(edit.ownerLayerId && !edit.ownerLayerId->isNull(),
-                        "archived annotation edit lacks authenticated layer provenance");
-                const Key claimedLayer = record::keyFromUuid(*edit.ownerLayerId);
-                const std::map<Key, Key>::const_iterator owner = owners.find(entityId);
-                require(owner == owners.end() || owner->second == claimedLayer,
-                        "annotation ownership changed within archived history");
-                owners.emplace(entityId, claimedLayer);
-                byLayer[claimedLayer].push_back(edit);
-            }
-            // Apply member updates, then native-owned membership changes,
-            // then root metadata. Validate the complete atomic action only
-            // after all domain edits are materialized.
-            std::vector<aowis::model::ModelEntityEdit> membershipEdits;
-            for (const aowis::model::ModelEntityEdit& edit : hydraulicEdits) {
-                if (edit.entityType == QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType))
-                    continue;
-                require(!edit.entityId.isNull() && !edit.ownerLayerId,
-                        "invalid hydraulic archive identity or annotation owner");
-                if (edit.before && edit.after) applyHydraulicScalar(current, edit);
-                else membershipEdits.push_back(edit);
-            }
-            applyHydraulicMembership(current, membershipEdits, hydraulicOwners);
-            for (const aowis::model::ModelEntityEdit& edit : hydraulicEdits)
-                if (edit.entityType == QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType))
-                    applyHydraulicRoot(current, edit);
-            // All layer-specific native deltas are materialized against the
-            // same semantic event. Each layer retains its own membership order.
-            for (const std::pair<const Key, std::vector<aowis::model::ModelEntityEdit>>& part : byLayer) {
-                const QUuid layerId = record::uuidFromKey(part.first);
-                const MergeCandidate pinned = view(current);
-                const std::vector<ModelChange> delta =
-                    materializeDraftAnnotationEdits(pinned.get, layerId, part.second);
-                applyChanges(current, delta);
-                changedLayers.insert(part.first);
-            }
-            validate(current);
+            applyVerifiedActionEdits(current, transaction->edits, combined, owners,
+                                     hydraulicOwners, changedLayers, annotationSeen,
+                                     hydraulicSeen);
             if (index + 1 == actionPosition) selected = current;
             if (persistedBoundary && index + 1 == *persistedBoundary) persisted = current;
         }
@@ -696,26 +759,13 @@ std::optional<WorkingCopyInfo> navigateVerifiedCombinedAction(
 // journal tip after Undo. Check that cursor before offering another boundary.
 // The native publisher supplies the actual lease, HEAD, generation and
 // operation-ID fences; no native deltas are accepted from HTTP clients.
-std::optional<WorkingCopyInfo> navigateVerifiedActiveDraftAction(
-        ProjectService& service, std::string_view operationId,
-        std::string_view draftId, std::string_view sessionId,
-        std::string_view fencingToken, std::optional<RevisionId> expectedHead,
-        std::size_t actionPosition, std::uint64_t expectedGeneration,
-        QString* error) {
+static std::optional<std::vector<ModelChange>> planVerifiedActiveAnnotationDraftAction(
+        ProjectService& service, std::string_view draftId,
+        std::optional<RevisionId> expectedHead, std::size_t actionPosition,
+        std::uint64_t expectedGeneration, QString* error) {
     if (error) error->clear();
-    const std::function<std::optional<WorkingCopyInfo>(const QString&)> fail =
-        [error](const QString& reason) -> std::optional<WorkingCopyInfo> {
-            if (error) *error = reason;
-            return std::nullopt;
-        };
     try {
         const WorkingCopyInfo draft = service.workingCopy(draftId, true);
-        // Retry the exact native operation before planning against the new
-        // generation. The publisher itself checks argument identity.
-        if (draft.lastHistoryNavigationOperationId == operationId)
-            return service.publishVerifiedDraftActionNavigation(
-                operationId, draftId, sessionId, fencingToken,
-                expectedGeneration, expectedHead, actionPosition, {});
         require(draft.journal.size() == draft.journalCount &&
                 draft.journalCount <= maximumArchiveActions &&
                 actionPosition <= draft.journalCount,
@@ -735,14 +785,9 @@ std::optional<WorkingCopyInfo> navigateVerifiedActiveDraftAction(
                 else hasHydraulic = true;
             }
         }
-        // Preserve the existing single-network hydraulic (including unborn
-        // network) navigator without routing its frames through annotations.
-        if (!hasAnnotation)
-            return hydraulic::navigateVerifiedHydraulicDraftAction(
-                service, operationId, draftId, sessionId, fencingToken,
-                expectedHead, actionPosition, expectedGeneration, error);
+        require(hasAnnotation, "active journal has no annotation edits");
         require(draft.generation == expectedGeneration &&
-                draft.baseRevision == expectedHead && draft.baseRevision.has_value(),
+                draft.baseRevision == expectedHead,
                 "active annotation journal generation or committed base changed");
         require(!draft.historyCheckpointRevisionId && !draft.historyActionPosition &&
                 !draft.historyArchiveCommitOperationId,
@@ -755,15 +800,19 @@ std::optional<WorkingCopyInfo> navigateVerifiedActiveDraftAction(
         // journal origin can instead be a VERIFIED archived action boundary
         // when the first new edit abandoned the old immutable Redo suffix.
         Records head;
-        for (const std::pair<Key, ModelRecord>& entry :
-             service.modelRecordsAtRevision(draft.projectId, *draft.baseRevision))
-            require(head.emplace(entry.first, entry.second).second,
-                    "duplicate record in active History HEAD");
+        if (draft.baseRevision) {
+            for (const std::pair<Key, ModelRecord>& entry :
+                 service.modelRecordsAtRevision(draft.projectId, *draft.baseRevision))
+                require(head.emplace(entry.first, entry.second).second,
+                        "duplicate record in active History HEAD");
+        }
         Records parent = head;
         const bool forked = draft.historyForkRevisionId.has_value() ||
             draft.historyForkActionPosition.has_value() ||
             draft.historyForkArchiveCommitOperationId.has_value();
         if (forked) {
+            require(draft.baseRevision.has_value(),
+                    "unborn annotation journal cannot fork immutable History");
             require(draft.historyForkRevisionId && draft.historyForkActionPosition &&
                     draft.historyForkArchiveCommitOperationId,
                     "active annotation History fork provenance is incomplete");
@@ -815,6 +864,13 @@ std::optional<WorkingCopyInfo> navigateVerifiedActiveDraftAction(
             draft.draftActionPosition.value_or(draft.journalCount));
         require(currentPosition <= draft.journalCount,
                 "invalid retained active annotation History position");
+        if (!draft.baseRevision) {
+            require(!draft.historyForkRevisionId && !draft.historyForkActionPosition &&
+                    !draft.historyForkArchiveCommitOperationId,
+                    "unborn annotation journal cannot have an archived fork");
+            parent = reconstructUnbornJournalSeed(saved, draft.journal,
+                                                   currentPosition, hasHydraulic);
+        }
         const std::vector<ModelChange> persistedDelta = changesBetween(parent, saved);
         QString replayError;
         const std::optional<VerifiedAnnotationActionBoundary> selected =
@@ -822,7 +878,9 @@ std::optional<WorkingCopyInfo> navigateVerifiedActiveDraftAction(
                 persistedDelta, archiveActionChain(draft.journal),
                 actionPosition, hasHydraulic, &replayError, currentPosition);
         if (!selected)
-            return fail(QStringLiteral("Active annotation History failed MODEL verification: ") + replayError);
+            throw std::runtime_error(
+                (QStringLiteral("Active annotation History failed MODEL verification: ") +
+                 replayError).toStdString());
         Records desired = parent;
         applyChanges(desired, selected->changesFromParent);
         validate(desired);
@@ -844,9 +902,64 @@ std::optional<WorkingCopyInfo> navigateVerifiedActiveDraftAction(
                 fresh.historyForkArchiveCommitOperationId == draft.historyForkArchiveCommitOperationId &&
                 currentBranch && currentBranch->revision == draft.baseRevision,
                 "active annotation draft changed during History verification");
+        return changes;
+    } catch (const std::exception& exception) {
+        if (error) *error = QString::fromUtf8(exception.what());
+        return std::nullopt;
+    }
+}
+
+bool canNavigateVerifiedActiveAnnotationDraftAction(
+        ProjectService& service, std::string_view draftId,
+        std::optional<RevisionId> expectedHead, std::size_t actionPosition,
+        std::uint64_t expectedGeneration, QString* error) {
+    return planVerifiedActiveAnnotationDraftAction(service, draftId, expectedHead,
+               actionPosition, expectedGeneration, error).has_value();
+}
+
+std::optional<WorkingCopyInfo> navigateVerifiedActiveDraftAction(
+        ProjectService& service, std::string_view operationId,
+        std::string_view draftId, std::string_view sessionId,
+        std::string_view fencingToken, std::optional<RevisionId> expectedHead,
+        std::size_t actionPosition, std::uint64_t expectedGeneration,
+        QString* error) {
+    if (error) error->clear();
+    const std::function<std::optional<WorkingCopyInfo>(const QString&)> fail =
+        [error](const QString& reason) -> std::optional<WorkingCopyInfo> {
+            if (error) *error = reason;
+            return std::nullopt;
+        };
+    try {
+        const WorkingCopyInfo draft = service.workingCopy(draftId, true);
+        // Retry the exact native operation before planning against the new
+        // generation. The publisher itself checks argument identity.
+        if (draft.lastHistoryNavigationOperationId == operationId)
+            return service.publishVerifiedDraftActionNavigation(
+                operationId, draftId, sessionId, fencingToken,
+                expectedGeneration, expectedHead, actionPosition, {});
+        bool containsAnnotation = false;
+        for (const WorkingCopyEvent& frame : draft.journal) {
+            QString decodeError;
+            const std::optional<aowis::model::ModelEditTransaction> transaction =
+                aowis::model::ModelEditTransactionCodec::decode(
+                    record::qByteArrayFromBytes(frame.encoded), &decodeError);
+            require(transaction && !transaction->edits.empty(),
+                    "invalid active MODEL History transaction");
+            for (const aowis::model::ModelEntityEdit& edit : transaction->edits)
+                if (edit.entityType == QStringLiteral("map.annotation"))
+                    containsAnnotation = true;
+        }
+        if (!containsAnnotation)
+            return hydraulic::navigateVerifiedHydraulicDraftAction(
+                service, operationId, draftId, sessionId, fencingToken,
+                expectedHead, actionPosition, expectedGeneration, error);
+        const std::optional<std::vector<ModelChange>> changes =
+            planVerifiedActiveAnnotationDraftAction(service, draftId, expectedHead,
+                actionPosition, expectedGeneration, error);
+        if (!changes) return std::nullopt;
         return service.publishVerifiedDraftActionNavigation(
             operationId, draftId, sessionId, fencingToken, expectedGeneration,
-            expectedHead, actionPosition, changes);
+            expectedHead, actionPosition, *changes);
     } catch (const std::exception& exception) {
         return fail(QString::fromUtf8(exception.what()));
     }

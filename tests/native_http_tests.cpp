@@ -3225,6 +3225,150 @@ void exerciseAnnotationDraftHttp() {
     server.stop();
 }
 
+// An unborn draft has an unjournaled network+annotation-layer seed. History
+// must preserve that seed at action zero instead of treating it as an edit.
+void exerciseUnbornAnnotationHistoryHttp() {
+    namespace native = aowis::dvmdb;
+    TemporaryRoot root;
+    native::ProjectService service(root.root());
+    const native::ProjectInfo project = service.createUnbornProject("unborn annotation history");
+    service.configureRepositoryRole(native::RepositoryRole::Private);
+    TestServer server(service, native::BundleLimits{4ULL * 1024ULL * 1024ULL,
+                                                    10000ULL, 1024ULL * 1024ULL});
+    Client client(server.port());
+    const QString session = QString::fromStdString(native::UuidV7::generate().toString());
+    const QString branchId = QString::fromStdString(service.branchId(project.id, "main")->toString());
+    const QString networkId = QString::fromStdString(native::UuidV7::generate().toString());
+    const QString layerId = native::annotations::distributionLayerUuid(QUuid(networkId))
+        .toString(QUuid::WithoutBraces);
+    const Response created = client.call("POST", "/dvmdb/v1/working-copies",
+        QJsonObject{{"projectId", QString::fromStdString(project.id)},
+                    {"branchId", branchId}, {"baseRevision", QJsonValue::Null},
+                    {"sessionId", session}});
+    check(created.status == 201, "unborn annotation History draft creation failed");
+    const QString draftPath = QStringLiteral("/dvmdb/v1/working-copies/") +
+        created.json.value("id").toString();
+    const QString layerPath = draftPath + QStringLiteral("/annotation-layers/") + layerId;
+    const Response lease = client.call("POST", draftPath + "/lease",
+        QJsonObject{{"sessionId", session}, {"seconds", 90}});
+    check(lease.status == 200, "unborn annotation History lease failed");
+    const QString token = lease.json.value("token").toString();
+    const Response seed = client.call("POST", draftPath + "/initialize-network",
+        QJsonObject{{"sessionId", session}, {"fencingToken", token},
+                    {"expectedGeneration", "0"}, {"networkId", networkId},
+                    {"name", "Unborn annotation seed"}});
+    check(seed.status == 200 && seed.json.value("generation") == "1" &&
+          seed.json.value("events").toArray().isEmpty() &&
+          client.call("GET", layerPath).json.value("count") == 0,
+          "unborn annotation History seed was not unjournaled");
+    MapAnnotation annotation;
+    annotation.uuid = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+    annotation.text = QStringLiteral("Unborn create");
+    annotation.position_wgs84.longitude_deg = 14.1;
+    annotation.position_wgs84.latitude_deg = 11.2;
+    const QByteArray createdImage = native::ModelCodec<MapAnnotation>::encode(annotation);
+    MapAnnotation revised = annotation;
+    revised.text = QStringLiteral("Unborn updated");
+    const QByteArray revisedImage = native::ModelCodec<MapAnnotation>::encode(revised);
+    check(!createdImage.isEmpty() && !revisedImage.isEmpty(),
+          "unborn annotation History MODEL images invalid");
+    const std::function<QJsonObject(const QString&, const std::optional<QByteArray>&,
+                                   const std::optional<QByteArray>&)> save =
+        [&session, &token, &layerId, &annotation](
+            const QString& generation, const std::optional<QByteArray>& before,
+            const std::optional<QByteArray>& after) -> QJsonObject {
+            aowis::model::ModelEditTransaction transaction;
+            transaction.transactionId = QUuid(QString::fromStdString(
+                aowis::dvmdb::UuidV7::generate().toString()));
+            transaction.operation = QStringLiteral("map.annotation.edit");
+            transaction.edits.append(aowis::model::ModelEntityEdit{
+                annotation.uuid, QStringLiteral("map.annotation"), before, after, QUuid(layerId)});
+            const QByteArray frame = aowis::model::ModelEditTransactionCodec::encode(transaction);
+            check(!frame.isEmpty(), "unborn annotation History event encoding failed");
+            return QJsonObject{{"sessionId", session}, {"fencingToken", token},
+                {"expectedGeneration", generation}, {"annotationLayerId", layerId},
+                {"changes", QJsonArray{}},
+                {"events", QJsonArray{QString::fromLatin1(frame.toBase64())}}};
+        };
+    const Response createdAction = client.call("POST", draftPath + "/save-events",
+        save("1", std::nullopt, createdImage));
+    const Response updatedAction = client.call("POST", draftPath + "/save-events",
+        save("2", createdImage, revisedImage));
+    check(createdAction.status == 200 && updatedAction.status == 200 &&
+          updatedAction.json.value("generation") == "3" &&
+          !service.optionalHead(project.id, "main"),
+          "unborn annotation History events were not saved against null HEAD");
+    const std::function<QJsonObject(const QString&, const QString&, const QString&)> navigate =
+        [&session, &token](const QString& operation, const QString& generation,
+                           const QString& position) -> QJsonObject {
+            return QJsonObject{{"operationId", operation}, {"sessionId", session},
+                {"fencingToken", token}, {"expectedGeneration", generation},
+                {"expectedHead", QJsonValue::Null}, {"actionPosition", position}};
+        };
+    const Response cursor = client.call("GET", draftPath + "/history/cursor");
+    check(cursor.status == 200 && cursor.json.value("actionPosition") == "2" &&
+          cursor.json.value("previousAction").toObject().value("actionPosition") == "1",
+          "unborn annotation History cursor did not offer provable Undo");
+    const QString firstOperation = QString::fromStdString(native::UuidV7::generate().toString());
+    const QJsonObject firstUndo = navigate(firstOperation, "3", "1");
+    const Response undone = client.call("POST", draftPath + "/history/navigate", firstUndo);
+    check(undone.status == 200 && undone.json.value("generation") == "4" &&
+          undone.json.value("draftActionPosition") == "1" &&
+          client.call("POST", draftPath + "/history/navigate", firstUndo).json.value("generation") == "4" &&
+          client.call("GET", layerPath).json.value("annotations").toArray().first()
+              .toObject().value("payloadBase64").toString().toLatin1() == createdImage.toBase64(),
+          "unborn annotation Undo or lost-response retry failed");
+    check(client.call("POST", draftPath + "/history/navigate",
+          navigate(QString::fromStdString(native::UuidV7::generate().toString()), "3", "0")).status == 409,
+          "unborn annotation History accepted stale generation");
+    const Response zero = client.call("POST", draftPath + "/history/navigate",
+        navigate(QString::fromStdString(native::UuidV7::generate().toString()), "4", "0"));
+    const Response emptyLayer = client.call("GET", layerPath);
+    const Response zeroCursor = client.call("GET", draftPath + "/history/cursor");
+    check(zero.status == 200 && zero.json.value("generation") == "5" &&
+          emptyLayer.status == 200 && emptyLayer.json.value("count") == 0 &&
+          zeroCursor.status == 200 && zeroCursor.json.value("previousAction").isNull() &&
+          zeroCursor.json.value("nextAction").toObject().value("actionPosition") == "1" &&
+          !service.optionalHead(project.id, "main"),
+          "unborn annotation boundary zero did not preserve initialization seed");
+    const Response redo = client.call("POST", draftPath + "/history/navigate",
+        navigate(QString::fromStdString(native::UuidV7::generate().toString()), "5", "2"));
+    check(redo.status == 200 && redo.json.value("generation") == "6" &&
+          client.call("GET", layerPath).json.value("annotations").toArray().first()
+              .toObject().value("payloadBase64").toString().toLatin1() == revisedImage.toBase64() &&
+          !service.optionalHead(project.id, "main"),
+          "unborn annotation Redo failed to reproduce native snapshot");
+    const Response backToFirst = client.call("POST", draftPath + "/history/navigate",
+        navigate(QString::fromStdString(native::UuidV7::generate().toString()), "6", "1"));
+    MapAnnotation alternative = annotation;
+    alternative.text = QStringLiteral("Unborn new edit abandons Redo");
+    const QByteArray alternativeImage = native::ModelCodec<MapAnnotation>::encode(alternative);
+    const Response replaceRedo = client.call("POST", draftPath + "/save-events",
+        save("7", createdImage, alternativeImage));
+    const Response forkedCursor = client.call("GET", draftPath + "/history/cursor");
+    check(backToFirst.status == 200 && backToFirst.json.value("generation") == "7" &&
+          replaceRedo.status == 200 && replaceRedo.json.value("generation") == "8" &&
+          forkedCursor.json.value("journalCount") == "2" &&
+          client.call("POST", draftPath + "/history/navigate",
+              navigate(QString::fromStdString(native::UuidV7::generate().toString()),
+                       "8", "3")).status == 409 &&
+          !service.optionalHead(project.id, "main"),
+          "unborn annotation new edit did not abandon the Redo suffix");
+    const Response deleted = client.call("POST", draftPath + "/save-events",
+        save("8", alternativeImage, std::nullopt));
+    check(deleted.status == 200 && deleted.json.value("generation") == "9" &&
+          client.call("GET", draftPath + "/history/cursor").json
+              .value("previousAction").isNull() &&
+          !client.call("GET", draftPath + "/history/cursor").json
+              .value("hasPreviousDraftAction").toBool() &&
+          client.call("POST", draftPath + "/history/navigate",
+              navigate(QString::fromStdString(native::UuidV7::generate().toString()),
+                       "9", "2")).status == 409 &&
+          client.call("GET", layerPath).json.value("count") == 0 &&
+          !service.optionalHead(project.id, "main"),
+          "unborn deleted-member History fabricated missing membership provenance");
+}
+
 void exerciseCompleteNetworkDraftImportHttp() {
     namespace native = aowis::dvmdb;
     TemporaryRoot root;
@@ -4564,6 +4708,7 @@ int main(int argc, char** argv) {
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
         exerciseUnbornNetworkInitializationHttp();
         exerciseAnnotationDraftHttp();
+        exerciseUnbornAnnotationHistoryHttp();
         exerciseCompleteNetworkDraftImportHttp();
         exerciseHydraulicDraftMembershipHttp();
 #endif

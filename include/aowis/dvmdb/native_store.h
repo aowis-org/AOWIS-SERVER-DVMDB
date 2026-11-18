@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <functional>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <memory>
 #include <optional>
@@ -518,10 +519,16 @@ public:
     // verified before any object is written or a ref is published. Objects
     // an incremental bundle references but does not carry must exist
     // locally; they are checked only where they attach to bundled objects.
+    // For model revisions containing Distribution roots or annotation records,
+    // the caller must provide the same pure candidate validator used for local
+    // Commit. Every supplied historical snapshot is checked before any pack
+    // write or branch publication; generic model bundles remain supported.
     RevisionBundleImport importRevisionBundle(const ProjectId& expectedProject, int fd,
                                                   std::string_view localBranch,
                                                   BundleLimits limits = {},
-                                                  BundleImportProfile* profile = nullptr);
+                                                  BundleImportProfile* profile = nullptr,
+                                                  const std::function<std::optional<std::string>(const MergeCandidate&)>&
+                                                      validate = {});
 
     // Scratch space on the repository's filesystem (see ScratchFile).
     ScratchFile createScratchFile();
@@ -585,6 +592,11 @@ private:
     };
     // Bounded direct-mapped hot-object cache; lookups remain correct without it.
     mutable std::vector<CachedIndexEntry> indexCache_;
+    // Volatile, bounded classification of SHA-256-identified MODEL trie nodes.
+    // Required to make incremental import semantic preflight proportional to
+    // changed subtrees instead of scanning unchanged local model records.
+    // Cached booleans never replace the source objects or semantic validator.
+    std::map<Hash, bool> engineeringTrieCache_;
     std::uint32_t indexFingerprint(const Hash& hash) const noexcept;
     void reserveIndexEntries(std::uint64_t entries);
     void indexEntry(const Hash& hash, std::uint64_t position);

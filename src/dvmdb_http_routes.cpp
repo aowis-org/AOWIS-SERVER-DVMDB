@@ -1298,7 +1298,16 @@ void registerBundleRoutes(httplib::Server& server, ProjectService& service, Bund
             requireInput(received != 0, "empty revision bundle");
             std::optional<RevisionBundleImport> imported;
             service.withRepository(operation, [&](Repository& repository) {
-                imported = repository.importRevisionBundle(*project, spool.fd(), branch, limits);
+                imported = repository.importRevisionBundle(*project, spool.fd(), branch, limits,
+                    nullptr,
+#ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
+                    [](const MergeCandidate& candidate) {
+                        return validateEngineeringCandidateIfNeeded(candidate);
+                    }
+#else
+                    {}
+#endif
+                );
             });
             const QString status = imported->status == BundleImportStatus::Created ?
                 QStringLiteral("created") : imported->status == BundleImportStatus::FastForward ?
@@ -2109,7 +2118,10 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                         if (!valid) return false;
                         QString reason;
                         return hydraulic::planVerifiedHydraulicDraftActionNavigation(
-                            service, draft.id, wanted, draft.generation, &reason).has_value();
+                            service, draft.id, wanted, draft.generation, &reason).has_value() ||
+                            annotations::canNavigateVerifiedActiveAnnotationDraftAction(
+                                service, draft.id, draft.baseRevision, wanted,
+                                draft.generation, &reason);
                     };
                 if (!previous.isNull() && !eligible(previous))
                     previous = QJsonValue(QJsonValue::Null);
@@ -2136,8 +2148,10 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 {"baseRevision", optionalRevisionJson(draft.baseRevision)},
                 {"journalCount", QString::number(static_cast<qulonglong>(draft.journalCount))},
                 {"actionPosition", QString::number(static_cast<qulonglong>(position))},
-                {"hasPreviousDraftAction", !archived && position > 0},
-                {"hasNextDraftAction", !archived && position < draft.journalCount},
+                {"hasPreviousDraftAction", !archived && position > 0 &&
+                    (draft.baseRevision.has_value() || !previous.isNull())},
+                {"hasNextDraftAction", !archived && position < draft.journalCount &&
+                    (draft.baseRevision.has_value() || !next.isNull())},
                 {"canBranchFromHistory", archived &&
                     draft.historyArchiveCommitOperationId.has_value()},
                 {"forkRevisionId", draft.historyForkRevisionId

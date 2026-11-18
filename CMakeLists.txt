@@ -613,6 +613,13 @@ if(AOWIS_DVMDB_WITH_MODEL_CODEC)
             "${CMAKE_CURRENT_SOURCE_DIR}/include")
         target_link_libraries(aowis-dvmdb-annotation-integrity PUBLIC
             aowis-dvmdb-annotations aowis-dvmdb-hydraulic)
+        # The standard sync CLI must validate imported engineering history,
+        # not silently become a second unvalidated publication route. Native
+        # Qt-free builds keep the generic-only CLI, which fails closed on
+        # engineering imports without this validator.
+        target_link_libraries(aowis-dvmdb-sync PRIVATE aowis-dvmdb-annotation-integrity)
+        target_compile_definitions(aowis-dvmdb-sync PRIVATE
+            AOWIS_DVMDB_SYNC_WITH_ANNOTATIONS=1)
         # Annotation-only archived MODEL action replay must prove both
         # intermediate boundaries and exact native delta coverage. This is a
         # read-only proof primitive; History publication remains a separate gate.

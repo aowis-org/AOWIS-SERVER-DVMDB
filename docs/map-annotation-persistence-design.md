@@ -632,10 +632,50 @@ HEAD, never relative to the archived fork state. This prevents abandoned
 archived Redo actions from reappearing. An incomplete, nonlocal, or unsupported
 fork witness fails closed; the existing immutable archive is never rewritten.
 
-Annotation editing on an unborn draft can still be saved; its action
-navigation remains non-navigable until the initial seed can be reconstructed
-without inventing provenance. Hydraulic member transient ownership in
+Unborn annotation drafts can navigate their active MODEL journal without a
+fabricated immutable parent. The server reconstructs their unjournaled
+Distribution root and annotation-layer seed by reversing actions from the
+saved cursor, then replays the original ordered journal forward and checks
+exact native bytes at that cursor. The reconstructed seed is a baseline,
+**not** an Undo action. Unborn journals containing deletions of preexisting
+members remain non-navigable where reversing them would invent their prior
+membership indices. The history cursor only advertises boundaries whose
+full replay proof succeeds. Publication remains protected by the native
+lease, null-HEAD, generation, and idempotency fences. Hydraulic member transient ownership in
 multi-network History remains fail-closed where immutable endpoints cannot
 prove the owning network. The live journal is fsync-pinned, not an immutable
 Commit witness: its digest must never be described as authenticated by a
 Commit's SHA-256 action chain.
+
+## B4 final audit — import/publication integrity (2026-11-18)
+
+**Native revision-bundle imports now enforce semantic validation before any
+pack or branch writes.** `Repository::importRevisionBundle` visits every
+newly transferred model-indexed revision (including historical parents and
+merge parents), deduplicates identical immutable model roots, and rejects
+engineering roots/annotation records when no validator was supplied. For
+validated engineering candidates, it invokes the caller's full-candidate
+semantic validator against that exact revision snapshot, not merely the tip.
+The HTTP import route and the Qt-backed `aowis-dvmdb-sync` executable provide
+B2 `validateAnnotationSnapshot`. The Qt-free sync tool cannot validate MODEL
+semantics and therefore rejects engineering bundle imports; generic bundle
+imports still work. On a semantic rejection, no objects are written and no
+branch is created or advanced. Existing locally verified incremental-base
+revisions remain trusted; only newly carried revisions are rechecked.
+
+This remains **structural/model integrity**, not hydraulic simulation or
+solvability validation. Native record kinds 1–17 without a distribution root
+cannot always be distinguished from generic native MODEL records by the
+Qt-free repository. Never treat an arbitrary native record of kind 1 as
+sufficient evidence of an engineering network. An independent, legacy direct
+hydraulic editor still uses low-level Commit without passing the B2 callback,
+and old root-only fixtures remain outside the strict new annotation format.
+Those APIs must either accept and forward an explicit validator or be retired
+before being advertised as supported engineering publication interfaces.
+
+**Performance qualification still required:** the native Commit guard and
+revision-bundle semantic preflight enumerate complete MODEL snapshots;
+large-network timing, peak memory, cancellation/limits, and incremental sync
+throughput must be benchmarked before claiming production-scale performance.
+Imported immutable revisions without original locally indexed action archives
+are valid History checkpoints, not invented action-by-action Undo/Redo histories.

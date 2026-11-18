@@ -1,5 +1,9 @@
 #include "aowis/dvmdb/native_store.h"
 
+#ifdef AOWIS_DVMDB_SYNC_WITH_ANNOTATIONS
+#include "aowis/dvmdb/map_annotation_snapshot_validation.h"
+#endif
+
 #include <cerrno>
 #include <exception>
 #include <filesystem>
@@ -104,7 +108,12 @@ int main(int argc, char** argv) {
             std::cout << "exported revision bundle for " << argv[4] << " to " << output.string() << '\n';
         } else {
             BundleDescriptor bundle(argv[4]);
-            const RevisionBundleImport result = repository.importRevisionBundle(project, bundle.fd(), argv[5]);
+            const RevisionBundleImport result = repository.importRevisionBundle(
+                project, bundle.fd(), argv[5], {}, nullptr
+#ifdef AOWIS_DVMDB_SYNC_WITH_ANNOTATIONS
+                , aowis::dvmdb::annotations::validateAnnotationSnapshot
+#endif
+            );
             const char* outcome = result.status == BundleImportStatus::Created ? "created" :
                 result.status == BundleImportStatus::FastForward ? "fast-forward" : "up-to-date";
             std::cout << outcome << " " << argv[5] << " at " << result.head.toString()
