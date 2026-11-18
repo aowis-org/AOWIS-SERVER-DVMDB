@@ -19,6 +19,14 @@ def main() -> None:
     if len(sys.argv) != 4:
         raise SystemExit("usage: annotation_http_contract_tests.py ROUTES TESTS OPENAPI")
     routes, tests, api = (Path(name).read_text(encoding="utf-8") for name in sys.argv[1:])
+    cmake = (Path(__file__).resolve().parents[1] / "CMakeLists.txt").read_text(encoding="utf-8")
+    require(cmake, r"target_link_libraries\(aowis-dvmdb-http PUBLIC\s+"
+            r"aowis-dvmdb-hydraulic\s+aowis-dvmdb-annotation-integrity\s+"
+            r"aowis-dvmdb-annotation-action-replay\s*\)",
+            "production HTTP target must export annotation action replay linkage")
+    if re.search(r"target_link_libraries\(aowis-dvmdb-http-tests\s+PRIVATE\s+"
+                 r"aowis-dvmdb-annotation-action-replay", cmake):
+        raise AssertionError("replay linkage must not be test-only")
     for route in ("routeAnnotationLayers", "routeAnnotationLayer", "routeDraftAnnotationLayer"):
         require(routes, rf"server\.Get\(\s*{route}\s*,", f"missing GET registration: {route}")
     for symbol in (
@@ -35,6 +43,10 @@ def main() -> None:
             r".*?isAnnotationNativeKind\(record\.kind\)"
             r".*?annotations::validateAnnotationSnapshot\(candidate\)",
             "conditional engineering candidate validation was lost")
+    require(routes, r"annotations::navigateVerifiedAnnotationAction\(service, operationId",
+            "annotation archived History lost its fenced HTTP publication adapter")
+    require(tests, r"annotation archived Redo to tip did not recover clean committed HEAD",
+            "annotation archived History publication regression was removed")
     require(routes, r"server\.Post\(routeModelCommits.*?service\.commitModel\(.*?"
             r"validateEngineeringCandidateIfNeeded\(candidate\)",
             "direct MODEL HTTP Commit lost semantic candidate validation")

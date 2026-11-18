@@ -669,8 +669,10 @@ if(AOWIS_DVMDB_WITH_MODEL_CODEC)
         if(BUILD_TESTING)
             add_executable(aowis-dvmdb-annotation-record-tests
                 tests/map_annotation_persistence_tests.cpp)
+            # The record fixture invokes the full B2 candidate validator.
+            # Link its implementation, not just its underlying record adapters.
             target_link_libraries(aowis-dvmdb-annotation-record-tests PRIVATE
-                aowis-dvmdb-annotations aowis-dvmdb-hydraulic)
+                aowis-dvmdb-annotation-integrity)
             add_test(NAME aowis-dvmdb-annotation-record-tests
                 COMMAND aowis-dvmdb-annotation-record-tests)
             set_tests_properties(aowis-dvmdb-annotation-record-tests PROPERTIES
@@ -759,8 +761,12 @@ if(AOWIS_DVMDB_WITH_HTTP_SERVER)
         target_compile_options(aowis-dvmdb-http PRIVATE -Wall -Wextra)
     endif()
     if(TARGET aowis-dvmdb-hydraulic)
+        # HTTP invokes archived annotation navigation in the production server,
+        # not only in tests. Export the replay archive dependency from the
+        # library providing that call, so every HTTP consumer links it.
         target_link_libraries(aowis-dvmdb-http PUBLIC
-            aowis-dvmdb-hydraulic aowis-dvmdb-annotation-integrity)
+            aowis-dvmdb-hydraulic aowis-dvmdb-annotation-integrity
+            aowis-dvmdb-annotation-action-replay)
         target_compile_definitions(aowis-dvmdb-http PUBLIC AOWIS_DVMDB_HTTP_WITH_HYDRAULIC=1)
     endif()
 
