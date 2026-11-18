@@ -586,6 +586,17 @@ if(AOWIS_DVMDB_WITH_MODEL_CODEC)
             "${CMAKE_CURRENT_SOURCE_DIR}/include")
         target_link_libraries(aowis-dvmdb-annotation-integrity PUBLIC
             aowis-dvmdb-annotations aowis-dvmdb-hydraulic)
+        # Annotation-only archived MODEL action replay must prove both
+        # intermediate boundaries and exact native delta coverage. This is a
+        # read-only proof primitive; History publication remains a separate gate.
+        add_library(aowis-dvmdb-annotation-action-replay STATIC
+            src/map_annotation_action_replay.cpp)
+        add_library(AOWIS::DvmdbAnnotationActionReplay ALIAS aowis-dvmdb-annotation-action-replay)
+        target_compile_features(aowis-dvmdb-annotation-action-replay PUBLIC cxx_std_20)
+        target_include_directories(aowis-dvmdb-annotation-action-replay PUBLIC
+            "${CMAKE_CURRENT_SOURCE_DIR}/include")
+        target_link_libraries(aowis-dvmdb-annotation-action-replay PUBLIC
+            aowis-dvmdb-annotation-integrity)
         if(BUILD_TESTING)
             add_executable(aowis-dvmdb-annotation-integrity-tests
                 tests/map_annotation_snapshot_validation_tests.cpp)
@@ -596,6 +607,16 @@ if(AOWIS_DVMDB_WITH_MODEL_CODEC)
             set_tests_properties(aowis-dvmdb-annotation-integrity-tests PROPERTIES
                 LABELS "aowis;annotations;integrity")
             add_dependencies(aowis-dvmdb-tests aowis-dvmdb-annotation-integrity-tests)
+
+            add_executable(aowis-dvmdb-annotation-action-replay-tests
+                tests/map_annotation_action_replay_tests.cpp)
+            target_link_libraries(aowis-dvmdb-annotation-action-replay-tests PRIVATE
+                aowis-dvmdb-annotation-action-replay)
+            add_test(NAME aowis-dvmdb-annotation-action-replay-tests
+                COMMAND aowis-dvmdb-annotation-action-replay-tests)
+            set_tests_properties(aowis-dvmdb-annotation-action-replay-tests PROPERTIES
+                LABELS "aowis;annotations;integrity;history")
+            add_dependencies(aowis-dvmdb-tests aowis-dvmdb-annotation-action-replay-tests)
 
             add_executable(aowis-dvmdb-annotation-merge-tests
                 tests/map_annotation_merge_tests.cpp)
