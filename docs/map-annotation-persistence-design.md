@@ -609,3 +609,26 @@ Unsupported changes fail before any working-copy cursor or overlay publication;
 they are never silently dropped. Structural/model-integrity constraints are
 unchanged, and neither connectivity nor successful hydraulic simulation is
 required for saving or History navigation.
+
+### Live working-copy annotation History
+
+The `/working-copies/{draft}/history/navigate` endpoint now verifies retained
+active MODEL journals containing annotations, including journal actions mixing
+hydraulic root/member edits with annotation edits. The server replays **all**
+retained frames from the immutable draft base, checks the reconstructed state
+at the **currently persisted** action cursor (which may precede the Redo tip),
+then constructs the requested boundary's complete candidate relative to HEAD.
+The established atomic draft publisher protects lease, generation, HEAD and
+idempotent operation identity. Creating a new edit after Undo discards the Redo
+suffix through the unchanged atomic Save path. Hydraulic-only journals continue
+using their original single-network History planner.
+
+This increment is limited to drafts with an immutable base and no archived
+History fork/checkpoint. Annotation editing on an unborn draft can still be
+saved; its action navigation remains non-navigable until the initial seed can
+be reconstructed without inventing provenance. Archived fork resumes retain
+their existing restrictions. Hydraulic member transient ownership in
+multi-network History remains fail-closed where immutable endpoints cannot
+prove the owning network. The live journal is fsync-pinned, not an immutable
+Commit witness: its digest must never be described as authenticated by a
+Commit's SHA-256 action chain.

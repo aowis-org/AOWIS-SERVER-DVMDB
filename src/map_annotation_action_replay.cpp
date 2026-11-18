@@ -317,7 +317,8 @@ static std::optional<VerifiedAnnotationActionBoundary> replayActionBoundary(
         const std::vector<WorkingCopyEvent>& actions,
         const std::vector<ModelChange>& actualNativeChanges,
         const Hash& authenticatedActionChain,
-        std::size_t actionPosition, bool combined, QString* error) {
+        std::size_t actionPosition, bool combined, QString* error,
+        std::optional<std::size_t> persistedBoundary = std::nullopt) {
     if (error) error->clear();
     const std::function<std::optional<VerifiedAnnotationActionBoundary>(const QString&)> fail =
         [error](const QString& reason) -> std::optional<VerifiedAnnotationActionBoundary> {
@@ -325,7 +326,8 @@ static std::optional<VerifiedAnnotationActionBoundary> replayActionBoundary(
             return std::nullopt;
         };
     try {
-        require(actions.size() <= maximumArchiveActions && actionPosition <= actions.size(),
+        require(actions.size() <= maximumArchiveActions && actionPosition <= actions.size() &&
+                (!persistedBoundary || *persistedBoundary <= actions.size()),
                 "annotation archive action boundary is out of range");
         // Check the authenticated action order before accepting any boundary.
         // Transaction identities are not sequence numbers, even for UUIDv7.
@@ -350,6 +352,7 @@ static std::optional<VerifiedAnnotationActionBoundary> replayActionBoundary(
 
         Records current = before;
         Records selected = before;
+        Records persisted = before;
         std::set<Key> changedLayers;
         bool annotationSeen = false;
         bool hydraulicSeen = false;
@@ -422,17 +425,19 @@ static std::optional<VerifiedAnnotationActionBoundary> replayActionBoundary(
             }
             validate(current);
             if (index + 1 == actionPosition) selected = current;
+            if (persistedBoundary && index + 1 == *persistedBoundary) persisted = current;
         }
         if (combined)
             require(annotationSeen && hydraulicSeen,
                     "combined history archive must contain both annotation and hydraulic edits");
         // Membership manifests, member bytes and unrelated native records
         // must ALL match the real immutable child, not just changed objects.
-        require(current.size() == after.size(),
+        const Records& verifiedPosition = persistedBoundary ? persisted : current;
+        require(verifiedPosition.size() == after.size(),
                 "annotation MODEL archive does not cover the committed native snapshot");
         for (const std::pair<const Key, ModelRecord>& entry : after) {
-            const Records::const_iterator reproduced = current.find(entry.first);
-            require(reproduced != current.end() && equalRecord(reproduced->second, entry.second),
+            const Records::const_iterator reproduced = verifiedPosition.find(entry.first);
+            require(reproduced != verifiedPosition.end() && equalRecord(reproduced->second, entry.second),
                     "annotation MODEL archive differs from committed native records");
         }
         VerifiedAnnotationActionBoundary result;
@@ -682,6 +687,118 @@ std::optional<WorkingCopyInfo> navigateVerifiedCombinedAction(
     return navigateVerifiedAction(service, operationId, draftId, sessionId, fencingToken,
                                   expectedHead, revision, actionPosition,
                                   expectedGeneration, true, error);
+}
+
+
+// A retained working-copy journal is not an immutable Commit archive. Its
+// fsync-pinned MODEL frames and the saved candidate nevertheless form a
+// complete replay witness at the *persisted cursor*, which may be behind the
+// journal tip after Undo. Check that cursor before offering another boundary.
+// The native publisher supplies the actual lease, HEAD, generation and
+// operation-ID fences; no native deltas are accepted from HTTP clients.
+std::optional<WorkingCopyInfo> navigateVerifiedActiveDraftAction(
+        ProjectService& service, std::string_view operationId,
+        std::string_view draftId, std::string_view sessionId,
+        std::string_view fencingToken, std::optional<RevisionId> expectedHead,
+        std::size_t actionPosition, std::uint64_t expectedGeneration,
+        QString* error) {
+    if (error) error->clear();
+    const std::function<std::optional<WorkingCopyInfo>(const QString&)> fail =
+        [error](const QString& reason) -> std::optional<WorkingCopyInfo> {
+            if (error) *error = reason;
+            return std::nullopt;
+        };
+    try {
+        const WorkingCopyInfo draft = service.workingCopy(draftId, true);
+        // Retry the exact native operation before planning against the new
+        // generation. The publisher itself checks argument identity.
+        if (draft.lastHistoryNavigationOperationId == operationId)
+            return service.publishVerifiedDraftActionNavigation(
+                operationId, draftId, sessionId, fencingToken,
+                expectedGeneration, expectedHead, actionPosition, {});
+        require(draft.journal.size() == draft.journalCount &&
+                draft.journalCount <= maximumArchiveActions &&
+                actionPosition <= draft.journalCount,
+                "active annotation journal is incomplete or boundary is invalid");
+        bool hasAnnotation = false;
+        bool hasHydraulic = false;
+        for (const WorkingCopyEvent& event : draft.journal) {
+            QString decodeError;
+            const std::optional<aowis::model::ModelEditTransaction> decoded =
+                aowis::model::ModelEditTransactionCodec::decode(
+                    record::qByteArrayFromBytes(event.encoded), &decodeError);
+            require(decoded && !decoded->edits.empty() &&
+                    decoded->transactionId.toString(QUuid::WithoutBraces).toStdString() == event.id,
+                    "active annotation journal contains invalid MODEL transaction");
+            for (const aowis::model::ModelEntityEdit& edit : decoded->edits) {
+                if (edit.entityType == QStringLiteral("map.annotation")) hasAnnotation = true;
+                else hasHydraulic = true;
+            }
+        }
+        // Preserve the existing single-network hydraulic (including unborn
+        // network) navigator without routing its frames through annotations.
+        if (!hasAnnotation)
+            return hydraulic::navigateVerifiedHydraulicDraftAction(
+                service, operationId, draftId, sessionId, fencingToken,
+                expectedHead, actionPosition, expectedGeneration, error);
+        require(draft.generation == expectedGeneration &&
+                draft.baseRevision == expectedHead && draft.baseRevision.has_value(),
+                "active annotation journal generation or committed base changed");
+        require(!draft.historyCheckpointRevisionId && !draft.historyForkRevisionId &&
+                !draft.historyActionPosition && !draft.historyArchiveCommitOperationId,
+                "active annotation journal cannot replay an archived fork or checkpoint");
+        const std::optional<RevisionGraphHead> branch =
+            service.branchById(draft.projectId, draft.branchId);
+        require(branch && branch->revision == draft.baseRevision,
+                "active annotation journal does not follow its branch HEAD");
+        Records parent;
+        for (const std::pair<Key, ModelRecord>& entry :
+             service.modelRecordsAtRevision(draft.projectId, *draft.baseRevision))
+            require(parent.emplace(entry.first, entry.second).second,
+                    "duplicate record in active History base");
+        Records saved = parent;
+        std::set<Key> changedKeys;
+        for (const ModelChange& change : draft.candidateChanges) {
+            require(changedKeys.insert(change.key).second,
+                    "duplicate native key in active annotation draft");
+            if (change.record) saved[change.key] = *change.record;
+            else saved.erase(change.key);
+        }
+        const std::size_t currentPosition = static_cast<std::size_t>(
+            draft.draftActionPosition.value_or(draft.journalCount));
+        require(currentPosition <= draft.journalCount,
+                "invalid retained active annotation History position");
+        const std::vector<ModelChange> persistedDelta = changesBetween(parent, saved);
+        QString replayError;
+        const std::optional<VerifiedAnnotationActionBoundary> selected =
+            replayActionBoundary(view(parent), view(saved), draft.journal,
+                persistedDelta, archiveActionChain(draft.journal),
+                actionPosition, hasHydraulic, &replayError, currentPosition);
+        if (!selected)
+            return fail(QStringLiteral("Active annotation History failed MODEL verification: ") + replayError);
+        Records desired = parent;
+        applyChanges(desired, selected->changesFromParent);
+        validate(desired);
+        // Publish an overlay relative to HEAD, never relative to the currently
+        // selected Undo boundary; otherwise Redo would resurrect stale keys.
+        const std::vector<ModelChange> changes = changesBetween(parent, desired);
+        require(changes.size() <= 20000,
+                "active annotation History candidate exceeds draft change limit");
+        const WorkingCopyInfo fresh = service.workingCopy(draftId, false);
+        const std::optional<RevisionGraphHead> currentBranch =
+            service.branchById(draft.projectId, draft.branchId);
+        require(fresh.generation == expectedGeneration &&
+                fresh.baseRevision == draft.baseRevision &&
+                fresh.draftActionPosition == draft.draftActionPosition &&
+                fresh.journalCount == draft.journalCount &&
+                currentBranch && currentBranch->revision == draft.baseRevision,
+                "active annotation draft changed during History verification");
+        return service.publishVerifiedDraftActionNavigation(
+            operationId, draftId, sessionId, fencingToken, expectedGeneration,
+            expectedHead, actionPosition, changes);
+    } catch (const std::exception& exception) {
+        return fail(QString::fromUtf8(exception.what()));
+    }
 }
 
 } // namespace aowis::dvmdb::annotations

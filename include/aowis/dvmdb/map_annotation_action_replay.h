@@ -12,9 +12,10 @@
 //
 // The replay primitive is read-only. The separate verified annotation-only
 // navigation adapter uses the existing fenced native History publisher.
-// Combined existing-hydraulic-entity updates/root metadata and annotations are
-// supported by a separate verified path. Hydraulic membership changes, layer
-// creation/deletion, and archived History forks are not supported yet.
+// Combined hydraulic root/member changes and annotations are verified by the
+// shared native membership materializer. Layer creation/deletion, ambiguous
+// multi-network transient hydraulic ownership and archived History forks are
+// not supported yet.
 
 #include "aowis/dvmdb/native_store.h"
 #include "aowis/dvmdb/project_service.h"
@@ -59,11 +60,11 @@ std::optional<VerifiedAnnotationActionBoundary> replayVerifiedAnnotationActionBo
     std::size_t actionPosition,
     QString* error = nullptr);
 
-// Combined read-only replay for canonical action streams containing both
-// annotations and existing hydraulic entity updates/root metadata. It verifies
-// every intermediate candidate and the full native revision delta in original
-// authenticated action order. Hydraulic member creation/deletion, membership
-// reparenting and archived forks fail closed until separately implemented.
+// Combined read-only replay for canonical action streams containing hydraulic
+// and annotation edits, including membership creation/deletion with provable
+// network ownership. Verifies each intermediate candidate and exact immutable
+// native delta in authenticated action order. Ambiguous multi-network transient
+// ownership and archived forks fail closed.
 std::optional<VerifiedAnnotationActionBoundary> replayVerifiedCombinedActionBoundary(
     const MergeCandidate& parent,
     const MergeCandidate& committed,
@@ -113,5 +114,17 @@ std::optional<WorkingCopyInfo> navigateVerifiedCombinedAction(
     std::string_view fencingToken, const RevisionId& expectedHead,
     const RevisionId& revision, std::size_t actionPosition,
     std::uint64_t expectedGeneration, QString* error = nullptr);
+
+// Live, already-saved MODEL journal navigation. Annotations (and mixed
+// hydraulic/annotation actions) replay against their complete persisted
+// cursor, then publish through the existing fenced draft History writer.
+// Hydraulic-only journals retain their established navigator. Archived forks
+// and unborn annotation drafts remain explicit non-navigable boundaries.
+std::optional<WorkingCopyInfo> navigateVerifiedActiveDraftAction(
+    ProjectService& service, std::string_view operationId,
+    std::string_view draftId, std::string_view sessionId,
+    std::string_view fencingToken, std::optional<RevisionId> expectedHead,
+    std::size_t actionPosition, std::uint64_t expectedGeneration,
+    QString* error = nullptr);
 
 } // namespace aowis::dvmdb::annotations

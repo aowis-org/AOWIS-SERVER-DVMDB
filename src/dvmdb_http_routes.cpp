@@ -2265,7 +2265,7 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                   ? hydraulic::navigateVerifiedHydraulicAction(service, operationId,
                       draftId, sessionId, fencingToken, *expectedHead, *revision,
                       static_cast<std::size_t>(position), generation, &reason)
-                  : hydraulic::navigateVerifiedHydraulicDraftAction(service, operationId,
+                  : annotations::navigateVerifiedActiveDraftAction(service, operationId,
                       draftId, sessionId, fencingToken, expectedHead,
                       static_cast<std::size_t>(position), generation, &reason);
             if (!result)

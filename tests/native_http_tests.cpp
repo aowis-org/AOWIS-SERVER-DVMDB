@@ -2957,6 +2957,169 @@ void exerciseAnnotationDraftHttp() {
           service.workingCopy(combinedNavigation.id).generation == 2,
           "combined History accepted stale draft generation");
 
+    // B4.3 active annotation History: the retained MODEL journal is verified
+    // against the currently saved boundary, not just against the journal tip.
+    // This independent draft does not publish a new immutable revision.
+    const native::WorkingCopyInfo liveAnnotation = service.createWorkingCopy(
+        project.id, "main", mixedRevision, session.toStdString());
+    const native::WorkingCopyLease liveAnnotationLease = service.acquireWorkingCopyLease(
+        liveAnnotation.id, session.toStdString(), 90);
+    const QString liveAnnotationPath = QStringLiteral("/dvmdb/v1/working-copies/") +
+        QString::fromStdString(liveAnnotation.id);
+    const QString liveAnnotationToken = QString::fromStdString(liveAnnotationLease.token);
+    MapAnnotation liveValue = combinedAnnotation;
+    liveValue.text = QStringLiteral("Live annotation Undo");
+    const QByteArray liveImage = native::ModelCodec<MapAnnotation>::encode(liveValue);
+    const std::function<QJsonObject(const QString&, const QByteArray&)> liveSave =
+        [&session, &liveAnnotationToken, &layerId](const QString& generation,
+                                                    const QByteArray& event) {
+            return QJsonObject{{"sessionId", session}, {"fencingToken", liveAnnotationToken},
+                {"expectedGeneration", generation}, {"annotationLayerId", layerId},
+                {"changes", QJsonArray{}},
+                {"events", QJsonArray{QString::fromLatin1(event.toBase64())}}};
+        };
+    const std::function<QJsonObject(const QString&, const QString&, const QString&)> liveNavigate =
+        [&session, &liveAnnotationToken, &mixedRevisionText](
+                const QString& operationId, const QString& generation, const QString& position) {
+            return QJsonObject{{"operationId", operationId},
+                {"sessionId", session}, {"fencingToken", liveAnnotationToken},
+                {"expectedGeneration", generation}, {"expectedHead", mixedRevisionText},
+                {"actionPosition", position}};
+        };
+    check(client.call("POST", liveAnnotationPath + "/save-events",
+              liveSave("0", frame(annotation, combinedAnnotationImage, liveImage))).status == 200,
+          "active annotation-only journal Save failed");
+    const QString annotationUndoId = QString::fromStdString(native::UuidV7::generate().toString());
+    const QJsonObject annotationUndo = liveNavigate(annotationUndoId, "1", "0");
+    const Response annotationUndone = client.call("POST", liveAnnotationPath + "/history/navigate",
+                                                        annotationUndo);
+    const Response annotationUndoLayer = client.call("GET", liveAnnotationPath +
+                                                     "/annotation-layers/" + layerId);
+    check(annotationUndone.status == 200 && annotationUndone.json.value("generation") == "2" &&
+          annotationUndone.json.value("draftActionPosition") == "0" &&
+          annotationUndoLayer.json.value("annotations").toArray().first().toObject()
+              .value("payloadBase64").toString().toLatin1() == combinedAnnotationImage.toBase64() &&
+          client.call("POST", liveAnnotationPath + "/history/navigate", annotationUndo).status == 200 &&
+          service.workingCopy(liveAnnotation.id).generation == 2,
+          "active annotation-only Undo or idempotent retry failed");
+    check(client.call("POST", liveAnnotationPath + "/history/navigate",
+              liveNavigate(QString::fromStdString(native::UuidV7::generate().toString()),
+                           "1", "1")).status == 409,
+          "active annotation Undo accepted a stale generation");
+    const Response annotationRedone = client.call("POST", liveAnnotationPath + "/history/navigate",
+        liveNavigate(QString::fromStdString(native::UuidV7::generate().toString()), "2", "1"));
+    const Response annotationRedoLayer = client.call("GET", liveAnnotationPath +
+                                                      "/annotation-layers/" + layerId);
+    check(annotationRedone.status == 200 && annotationRedone.json.value("generation") == "3" &&
+          annotationRedoLayer.json.value("annotations").toArray().first().toObject()
+              .value("payloadBase64").toString().toLatin1() == liveImage.toBase64() &&
+          service.optionalHead(project.id, "main") == mixedRevision,
+          "active annotation-only Redo changed committed HEAD or lost the saved image");
+
+    // Two live actions, the second touching both domains. After Undo, the
+    // journal still contains the second action; its authenticated before
+    // images are replayed from HEAD even though the saved candidate is at 1.
+    const native::WorkingCopyInfo liveCombined = service.createWorkingCopy(
+        project.id, "main", mixedRevision, session.toStdString());
+    const native::WorkingCopyLease liveCombinedLease = service.acquireWorkingCopyLease(
+        liveCombined.id, session.toStdString(), 90);
+    const QString liveCombinedPath = QStringLiteral("/dvmdb/v1/working-copies/") +
+        QString::fromStdString(liveCombined.id);
+    const QString liveCombinedToken = QString::fromStdString(liveCombinedLease.token);
+    const std::function<QJsonObject(const QString&, const QByteArray&)> combinedLiveSave =
+        [&session, &liveCombinedToken, &layerId](const QString& generation,
+                                                const QByteArray& event) {
+            return QJsonObject{{"sessionId", session}, {"fencingToken", liveCombinedToken},
+                {"expectedGeneration", generation}, {"annotationLayerId", layerId},
+                {"changes", QJsonArray{}},
+                {"events", QJsonArray{QString::fromLatin1(event.toBase64())}}};
+        };
+    const std::function<QJsonObject(const QString&, const QString&, const QString&)> combinedLiveNav =
+        [&session, &liveCombinedToken, &mixedRevisionText](
+                const QString& operationId, const QString& generation, const QString& position) {
+            return QJsonObject{{"operationId", operationId}, {"sessionId", session},
+                {"fencingToken", liveCombinedToken}, {"expectedGeneration", generation},
+                {"expectedHead", mixedRevisionText}, {"actionPosition", position}};
+        };
+    MapAnnotation mixedLiveFirst = combinedAnnotation;
+    mixedLiveFirst.text = QStringLiteral("Live mixed stage 1");
+    const QByteArray mixedLiveFirstImage = native::ModelCodec<MapAnnotation>::encode(mixedLiveFirst);
+    MapAnnotation mixedLiveLast = mixedLiveFirst;
+    mixedLiveLast.text = QStringLiteral("Live mixed stage 2");
+    const QByteArray mixedLiveLastImage = native::ModelCodec<MapAnnotation>::encode(mixedLiveLast);
+    NetworkHydraulicDistribution mixedLiveNetwork = mixedAfter;
+    mixedLiveNetwork.title_line_1 = QStringLiteral("Live mixed hydraulic stage 2");
+    aowis::model::ModelEditTransaction mixedLiveEvent;
+    mixedLiveEvent.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+    mixedLiveEvent.operation = QStringLiteral("hydraulic.annotation.live");
+    mixedLiveEvent.edits.append(aowis::model::ModelEntityEdit{
+        QUuid(networkId), QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType),
+        aowis::model::hydraulicDistributionRootImage(mixedAfter),
+        aowis::model::hydraulicDistributionRootImage(mixedLiveNetwork), std::nullopt});
+    mixedLiveEvent.edits.append(aowis::model::ModelEntityEdit{
+        annotation.uuid, QStringLiteral("map.annotation"),
+        mixedLiveFirstImage, mixedLiveLastImage, layerUuid});
+    const QByteArray mixedLiveFrame = aowis::model::ModelEditTransactionCodec::encode(mixedLiveEvent);
+    check(client.call("POST", liveCombinedPath + "/save-events",
+              combinedLiveSave("0", frame(annotation, combinedAnnotationImage,
+                                          mixedLiveFirstImage))).status == 200 &&
+          client.call("POST", liveCombinedPath + "/save-events",
+              combinedLiveSave("1", mixedLiveFrame)).status == 200,
+          "active mixed MODEL journal could not save both actions");
+    const Response mixedLiveUndo = client.call("POST", liveCombinedPath + "/history/navigate",
+        combinedLiveNav(QString::fromStdString(native::UuidV7::generate().toString()), "2", "1"));
+    const Response mixedLiveUndoLayer = client.call("GET", liveCombinedPath +
+                                                    "/annotation-layers/" + layerId);
+    const Response mixedLiveUndoNetwork = client.call("GET", liveCombinedPath +
+                                                      "/networks/" + networkId);
+    const std::optional<NetworkHydraulicDistribution> mixedLiveUndoneNetwork =
+        native::ModelCodec<NetworkHydraulicDistribution>::decode(
+            QByteArray::fromBase64(mixedLiveUndoNetwork.json.value("payloadBase64")
+                .toString().toLatin1()));
+    check(mixedLiveUndo.status == 200 && mixedLiveUndo.json.value("generation") == "3" &&
+          mixedLiveUndo.json.value("draftActionPosition") == "1" &&
+          mixedLiveUndoLayer.json.value("annotations").toArray().first().toObject()
+              .value("payloadBase64").toString().toLatin1() == mixedLiveFirstImage.toBase64() &&
+          mixedLiveUndoneNetwork && mixedLiveUndoneNetwork->title_line_1 == mixedAfter.title_line_1,
+          "active mixed Undo failed to reconstruct saved journal boundary 1");
+    const Response mixedLiveRedo = client.call("POST", liveCombinedPath + "/history/navigate",
+        combinedLiveNav(QString::fromStdString(native::UuidV7::generate().toString()), "3", "2"));
+    const Response mixedLiveRedoNetwork = client.call("GET", liveCombinedPath +
+                                                      "/networks/" + networkId);
+    const std::optional<NetworkHydraulicDistribution> mixedLiveRedoneNetwork =
+        native::ModelCodec<NetworkHydraulicDistribution>::decode(
+            QByteArray::fromBase64(mixedLiveRedoNetwork.json.value("payloadBase64")
+                .toString().toLatin1()));
+    check(mixedLiveRedo.status == 200 && mixedLiveRedo.json.value("generation") == "4" &&
+          mixedLiveRedoneNetwork &&
+          mixedLiveRedoneNetwork->title_line_1 == mixedLiveNetwork.title_line_1,
+          "active mixed Redo failed after previously selected journal boundary");
+    const Response mixedLiveZero = client.call("POST", liveCombinedPath + "/history/navigate",
+        combinedLiveNav(QString::fromStdString(native::UuidV7::generate().toString()), "4", "0"));
+    const Response mixedLiveZeroLayer = client.call("GET", liveCombinedPath +
+                                                    "/annotation-layers/" + layerId);
+    check(mixedLiveZero.status == 200 && mixedLiveZero.json.value("generation") == "5" &&
+          mixedLiveZeroLayer.json.value("annotations").toArray().first().toObject()
+              .value("payloadBase64").toString().toLatin1() == combinedAnnotationImage.toBase64() &&
+          service.optionalHead(project.id, "main") == mixedRevision,
+          "active mixed boundary zero did not restore immutable HEAD image");
+    const Response mixedLiveOne = client.call("POST", liveCombinedPath + "/history/navigate",
+        combinedLiveNav(QString::fromStdString(native::UuidV7::generate().toString()), "5", "1"));
+    MapAnnotation forkedLive = mixedLiveFirst;
+    forkedLive.text = QStringLiteral("New edit abandons mixed Redo");
+    const Response newBranchAction = client.call("POST", liveCombinedPath + "/save-events",
+        combinedLiveSave("6", frame(annotation, mixedLiveFirstImage,
+                                    native::ModelCodec<MapAnnotation>::encode(forkedLive))));
+    check(mixedLiveOne.status == 200 && mixedLiveOne.json.value("generation") == "6" &&
+          newBranchAction.status == 200 && newBranchAction.json.value("generation") == "7" &&
+          client.call("GET", liveCombinedPath + "/history/cursor").json
+              .value("journalCount") == "2" &&
+          client.call("POST", liveCombinedPath + "/history/navigate",
+              combinedLiveNav(QString::fromStdString(native::UuidV7::generate().toString()),
+                              "7", "3")).status == 409 &&
+          service.optionalHead(project.id, "main") == mixedRevision,
+          "active mixed new edit failed to invalidate obsolete Redo tail");
+
     // A direct native/library Save can bypass the HTTP event validator.
     // A new draft with an orphaned annotation must be refused at HTTP Commit,
     // without changing the immutable branch HEAD or the saved draft.

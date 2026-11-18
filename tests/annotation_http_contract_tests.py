@@ -47,6 +47,12 @@ def main() -> None:
             "annotation archived History lost its fenced HTTP publication adapter")
     require(routes, r"annotations::navigateVerifiedCombinedAction\(service, operationId",
             "combined hydraulic/annotation History lost its fenced navigation adapter")
+    require(routes, r"annotations::navigateVerifiedActiveDraftAction\(service, operationId",
+            "active annotation/mixed draft History lost its fenced navigation adapter")
+    require(tests, r"active mixed new edit failed to invalidate obsolete Redo tail",
+            "active combined Undo/Redo and branching regression was removed")
+    require(tests, r"active annotation-only Undo or idempotent retry failed",
+            "active annotation-only Undo/Redo regression was removed")
     require(tests, r"combined action boundary 1 failed to restore committed hydraulic and annotation values",
             "mixed HTTP History publication regression was removed")
     require(tests, r"annotation archived Redo to tip did not recover clean committed HEAD",
