@@ -3117,6 +3117,9 @@ RevisionNativeActionWitness ProjectService::verifiedRevisionNativeActionWitness(
     result.historyForkArchiveCommitOperationId =
         commit.info.historyForkArchiveCommitOperationId;
     result.actions = commit.actions;
+    // readLocalCommit/indexedLocalCommit verified this ordered chain against
+    // the immutable sidecar's action-chain field before returning `commit`.
+    result.authenticatedActionChain = chainJournal(Hash{}, commit.actions);
 
     withRepository(projectId, [&](Repository& repository) {
         // Enumerate committed and parent root manifests, including unchanged

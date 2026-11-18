@@ -373,3 +373,55 @@ Covered by the expanded `aowis-dvmdb-annotation-merge-tests` target: parallel
 first-chunk additions, 255-to-257 boundary splitting, exact membership order,
 object-level delete/modify choices, concurrent reorder conflicts and immutable
 historical snapshots. Imported history/action replay is still **B4.3**.
+
+## B4.3.1 — Authenticated chronological action order
+
+For independent edits, replaying a reordered sequence can still produce the
+identical immutable endpoint. Comparing native deltas is insufficient to prove
+which historical state came after each action. The annotation replay verifier
+therefore requires the **authenticated action-chain SHA-256 digest** from the
+verified local Commit, separate from the untrusted event sequence being checked.
+DVMDB already persists `action-chain` and verifies it when reading the immutable
+Commit sidecar. `RevisionNativeActionWitness::authenticatedActionChain` exposes
+the corresponding digest to the MODEL-aware replay planner. The digest algorithm
+is identical to the existing DVMDB journal chain: 32 zero bytes initially,
+then SHA-256(previous digest concatenated with each raw MODEL frame).
+
+Replayers must pass the chain from a trusted revision witness; hashing the
+caller-supplied action vector on the fly and passing that as the expected chain
+would destroy this chronological proof. Transaction UUIDv7 ordering is not a
+substitute for an authenticated archive sequence. The original Commit archive
+remains immutable and no stored format migration is required.
+
+## B4.3.1 — Immutable annotation-only MODEL archive replay proof
+
+`map_annotation_action_replay.h/.cpp` supplies a **read-only proof primitive**
+for archived annotation-only MODEL transactions. It accepts complete parent
+and committed native snapshots, exact archived action bytes (oldest first),
+and the actual native revision delta from a verified local Commit witness.
+
+It reconstructs intermediate states through the server-owned annotation draft
+materializer and validates the *entire* network-and-annotation candidate after
+each action. It must reproduce both the byte-exact committed snapshot and the
+actual native change set. `actionPosition` selects a boundary, returning a
+minimal overlay relative to the immutable parent. Multi-layer edits are
+attributed by immutable membership, without accepting an untrusted HTTP layer
+selector. It rejects stale images, duplicate transaction identities, unknown
+entity types, unjournaled native modifications, and unprovable ownership.
+
+**Not yet a general History implementation:** The existing hydraulic History
+planner cannot consume this proof, nor safely publish annotation positions.
+Mixed hydraulic/annotation actions, a network/layer creation checkpoint,
+archived History forks, and create-then-delete annotations absent from both
+immutable snapshots currently fail closed. The last case requires durable
+owner-layer provenance in the canonical MODEL action envelope: inventing an
+owner from the number of layers in a project would be unsafe. These gaps need
+a coordinated MODEL/DVMDB revision before enabling GUI annotation Undo/Redo.
+
+**Imported histories:** The native revision bundle verifies hashes, Merkle
+structure, and reference indices, but it does not carry a trusted local
+MODEL action archive. Imported revisions are therefore **checkpoints**, not
+action-navigable histories. Generalizing candidate-wide B2 semantic validation
+to untrusted bundle pre-publication (including every imported revision) and
+to generic direct native commits remains an explicit B4.3 follow-up. Do not
+claim this read-only helper enforces those ingestion boundaries.

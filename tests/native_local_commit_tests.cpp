@@ -721,11 +721,23 @@ void testVerifiedRevisionNativeWitness() {
         const aowis::dvmdb::RevisionNativeActionWitness initial =
             service.verifiedRevisionNativeActionWitness(
                 projectId, "main", *RevisionId::parse(firstId));
+        const aowis::dvmdb::Hash emptyChain{};
+        aowis::dvmdb::Bytes firstChainInput(emptyChain.begin(), emptyChain.end());
+        firstChainInput.insert(firstChainInput.end(), eventOne.begin(), eventOne.end());
+        const aowis::dvmdb::Hash firstActionDigest =
+            aowis::dvmdb::sha256(firstChainInput);
+        aowis::dvmdb::Bytes secondChainInput(firstActionDigest.begin(), firstActionDigest.end());
+        secondChainInput.insert(secondChainInput.end(), eventTwo.begin(), eventTwo.end());
+        const aowis::dvmdb::Hash expectedArchivedChain =
+            aowis::dvmdb::sha256(secondChainInput);
+        require(initial.authenticatedActionChain == expectedArchivedChain,
+                "HIST-03c3 authenticated action chain differs from persisted order");
         require(initial.revisionId == firstId &&
                 initial.commitOperationId == committed.id &&
                 !initial.parentRevision && initial.actions.size() == 2 &&
                 initial.actions[0].encoded == eventOne &&
                 initial.actions[1].encoded == eventTwo &&
+                initial.authenticatedActionChain != aowis::dvmdb::Hash{} &&
                 initial.actualNativeChanges.size() == 2 &&
                 initial.actualNativeChanges[0].key == one.key &&
                 initial.actualNativeChanges[1].key == two.key &&
