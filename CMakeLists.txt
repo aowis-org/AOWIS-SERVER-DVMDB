@@ -140,6 +140,16 @@ if(BUILD_TESTING)
             --cmake "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ModelCodecFingerprint.cmake"
             --model "${CMAKE_CURRENT_SOURCE_DIR}/external/AOWIS-SERVER-MODEL")
     set_tests_properties(aowis-dvmdb-model-fingerprint-tests PROPERTIES LABELS "aowis;qualification")
+    # Prevent later source snapshots from silently dropping the annotation
+    # HTTP implementation while keeping the standalone record tests green.
+    add_test(NAME aowis-dvmdb-annotation-http-contract-tests
+        COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/annotation_http_contract_tests.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/dvmdb_http_routes.cpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/native_http_tests.cpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/docs/dvmdb-http-api.yaml")
+    set_tests_properties(aowis-dvmdb-annotation-http-contract-tests PROPERTIES
+        LABELS "aowis;annotations;http;qualification" TIMEOUT 30)
     # Checks that every canonical UUIDv7 HTTP route matches its OpenAPI
     # method/path, even in native-only builds without Qt development headers.
     add_test(NAME aowis-dvmdb-http-uuidv7-route-contract-tests
@@ -586,6 +596,16 @@ if(AOWIS_DVMDB_WITH_MODEL_CODEC)
             set_tests_properties(aowis-dvmdb-annotation-integrity-tests PROPERTIES
                 LABELS "aowis;annotations;integrity")
             add_dependencies(aowis-dvmdb-tests aowis-dvmdb-annotation-integrity-tests)
+
+            add_executable(aowis-dvmdb-annotation-merge-tests
+                tests/map_annotation_merge_tests.cpp)
+            target_link_libraries(aowis-dvmdb-annotation-merge-tests PRIVATE
+                aowis-dvmdb-annotation-integrity)
+            add_test(NAME aowis-dvmdb-annotation-merge-tests
+                COMMAND aowis-dvmdb-annotation-merge-tests)
+            set_tests_properties(aowis-dvmdb-annotation-merge-tests PROPERTIES
+                LABELS "aowis;annotations;merge")
+            add_dependencies(aowis-dvmdb-tests aowis-dvmdb-annotation-merge-tests)
         endif()
         if(BUILD_TESTING)
             add_executable(aowis-dvmdb-annotation-draft-edit-tests
@@ -691,7 +711,8 @@ if(AOWIS_DVMDB_WITH_HTTP_SERVER)
         target_compile_options(aowis-dvmdb-http PRIVATE -Wall -Wextra)
     endif()
     if(TARGET aowis-dvmdb-hydraulic)
-        target_link_libraries(aowis-dvmdb-http PUBLIC aowis-dvmdb-hydraulic)
+        target_link_libraries(aowis-dvmdb-http PUBLIC
+            aowis-dvmdb-hydraulic aowis-dvmdb-annotation-integrity)
         target_compile_definitions(aowis-dvmdb-http PUBLIC AOWIS_DVMDB_HTTP_WITH_HYDRAULIC=1)
     endif()
 

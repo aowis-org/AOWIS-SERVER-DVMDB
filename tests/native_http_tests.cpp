@@ -4,6 +4,7 @@
 #include "aowis/dvmdb/dvmdb_http_routes.h"
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
 #include "aowis/dvmdb/hydraulic_distribution_network_persistence.h"
+#include "aowis/dvmdb/map_annotation_persistence.h"
 #include <aowis/model/edit/model_edit_transaction.h>
 #include <aowis/model/edit/hydraulic_distribution_root_edit.h>
 #endif
@@ -2252,11 +2253,18 @@ void exerciseUnbornNetworkInitializationHttp() {
         check(client.call("GET", path).json.value("generation") == QStringLiteral("0"),
               "failed first-network initialization changed draft generation");
         const Response initialized = client.call("POST", path + "/initialize-network", request);
+        const QJsonArray initialChanges = initialized.json.value("changes").toArray();
         check(initialized.status == 200 && initialized.json.value("generation") == QStringLiteral("1") &&
               initialized.json.value("dirty").toBool() &&
-              initialized.json.value("changes").toArray().size() == 1 &&
-              initialized.json.value("changes").toArray().first().toObject()
-                  .value("kind").toInt() == 100 &&
+              initialChanges.size() == 2 &&
+              std::count_if(initialChanges.cbegin(), initialChanges.cend(),
+                  [](const QJsonValue& change) {
+                      return change.toObject().value("kind").toInt() == 100;
+                  }) == 1 &&
+              std::count_if(initialChanges.cbegin(), initialChanges.cend(),
+                  [](const QJsonValue& change) {
+                      return change.toObject().value("kind").toInt() == 110;
+                  }) == 1 &&
               initialized.json.value("events").toArray().isEmpty() &&
               !service.optionalHead(project.id, "main").has_value(),
               "first network changed committed HEAD or did not save root in unborn draft");
@@ -2537,6 +2545,130 @@ void exerciseUnbornNetworkInitializationHttp() {
     }
 }
 
+void exerciseAnnotationDraftHttp() {
+    namespace native = aowis::dvmdb;
+    TemporaryRoot root;
+    native::ProjectService service(root.root());
+    const native::ProjectInfo project = service.createUnbornProject("annotation draft");
+    service.configureRepositoryRole(native::RepositoryRole::Private);
+    TestServer server(service, native::BundleLimits{4ULL * 1024ULL * 1024ULL,
+                                                    10000ULL, 1024ULL * 1024ULL});
+    Client client(server.port());
+    const QString session = QString::fromStdString(native::UuidV7::generate().toString());
+    const QString branchId = QString::fromStdString(service.branchId(project.id, "main")->toString());
+    const QString networkId = QString::fromStdString(native::UuidV7::generate().toString());
+    const QUuid layerUuid = native::annotations::distributionLayerUuid(QUuid(networkId));
+    const QString layerId = layerUuid.toString(QUuid::WithoutBraces);
+    const Response created = client.call("POST", "/dvmdb/v1/working-copies",
+        QJsonObject{{"projectId", QString::fromStdString(project.id)},
+                    {"branchId", branchId}, {"baseRevision", QJsonValue::Null},
+                    {"sessionId", session}});
+    check(created.status == 201, "annotation draft creation failed");
+    const QString draftPath = QStringLiteral("/dvmdb/v1/working-copies/") +
+        created.json.value("id").toString();
+    const QString layerPath = draftPath + QStringLiteral("/annotation-layers/") + layerId;
+    const Response lease = client.call("POST", draftPath + "/lease",
+        QJsonObject{{"sessionId", session}, {"seconds", 90}});
+    check(lease.status == 200, "annotation draft lease failed");
+    const QString token = lease.json.value("token").toString();
+    const QJsonObject initialize{{"sessionId", session}, {"fencingToken", token},
+        {"expectedGeneration", "0"}, {"networkId", networkId}, {"name", "annotation-test"}};
+    const Response started = client.call("POST", draftPath + "/initialize-network", initialize);
+    check(started.status == 200 && started.json.value("generation") == "1" &&
+          started.json.value("changes").toArray().size() == 2,
+          "annotation layer not atomically initialized with network");
+    const Response empty = client.call("GET", layerPath);
+    check(empty.status == 200 && empty.json.value("generation") == "1" &&
+          empty.json.value("ownerNetworkId") == networkId &&
+          empty.json.value("count") == 0,
+          "initialized annotation layer not readable in draft");
+
+    MapAnnotation annotation;
+    annotation.uuid = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+    annotation.text = QStringLiteral("Pumping station");
+    annotation.position_wgs84.longitude_deg = 14.1;
+    annotation.position_wgs84.latitude_deg = 11.2;
+    const QByteArray initial = native::ModelCodec<MapAnnotation>::encode(annotation);
+    check(!initial.isEmpty(), "MODEL rejected valid annotation");
+    const QString annotationId = annotation.uuid.toString(QUuid::WithoutBraces);
+    const std::function<QByteArray(const MapAnnotation&, const std::optional<QByteArray>&,
+                                   const std::optional<QByteArray>&)> frame = [](const MapAnnotation& item, const std::optional<QByteArray>& before,
+                          const std::optional<QByteArray>& after) -> QByteArray {
+        aowis::model::ModelEditTransaction transaction;
+        transaction.transactionId = QUuid(QString::fromStdString(
+            aowis::dvmdb::UuidV7::generate().toString()));
+        transaction.operation = QStringLiteral("map.annotation.edit");
+        transaction.edits.append(aowis::model::ModelEntityEdit{
+            item.uuid, QStringLiteral("map.annotation"), before, after});
+        return aowis::model::ModelEditTransactionCodec::encode(transaction);
+    };
+    const std::function<QJsonObject(const QString&, const QByteArray&)> request = [&session, &token, &layerId](
+        const QString& generation, const QByteArray& encoded) -> QJsonObject {
+        return QJsonObject{{"sessionId", session}, {"fencingToken", token},
+            {"expectedGeneration", generation}, {"annotationLayerId", layerId},
+            {"changes", QJsonArray{}},
+            {"events", QJsonArray{QString::fromLatin1(encoded.toBase64())}}};
+    };
+    const QByteArray createFrame = frame(annotation, std::nullopt, initial);
+    check(!createFrame.isEmpty(), "annotation create event could not be encoded");
+    const QJsonObject createRequest = request("1", createFrame);
+    const Response added = client.call("POST", draftPath + "/save-events", createRequest);
+    if (added.status != 200)
+        throw std::runtime_error("annotation CREATE failed: " +
+            QJsonDocument(added.json).toJson(QJsonDocument::Compact).toStdString());
+    check(added.json.value("generation") == "2" &&
+          added.json.value("acceptedEventIds").toArray().size() == 1 &&
+          client.call("GET", layerPath).json.value("count") == 1,
+          "annotation create did not atomically persist member and event");
+    const Response replay = client.call("POST", draftPath + "/save-events", createRequest);
+    check(replay.status == 200 && replay.json.value("generation") == "2" &&
+          client.call("GET", layerPath).json.value("count") == 1,
+          "lost-response annotation create replay was not idempotent");
+
+    MapAnnotation changed = annotation;
+    changed.text = QStringLiteral("Pumping station — updated");
+    const QByteArray revised = native::ModelCodec<MapAnnotation>::encode(changed);
+    const Response edited = client.call("POST", draftPath + "/save-events",
+        request("2", frame(annotation, initial, revised)));
+    check(edited.status == 200 && edited.json.value("generation") == "3",
+          "annotation update event failed");
+    const QJsonArray members = client.call("GET", layerPath).json.value("annotations").toArray();
+    check(members.size() == 1 && members.first().toObject().value("uuid") == annotationId &&
+          QByteArray::fromBase64(members.first().toObject().value("payloadBase64")
+              .toString().toLatin1()) == revised,
+          "annotation update did not return canonical MODEL bytes");
+    check(client.call("POST", draftPath + "/save-events",
+        request("3", frame(annotation, initial, revised))).status == 409,
+        "stale annotation before-image was accepted");
+    MapAnnotation foreignAnchor = changed;
+    MapAnnotationAnchor anchor;
+    anchor.entity_uuid = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+    anchor.entity_type = QStringLiteral("HydraulicNodeJunction");
+    foreignAnchor.anchor = anchor;
+    const Response refusedAnchor = client.call("POST", draftPath + "/save-events",
+        request("3", frame(annotation, revised,
+            native::ModelCodec<MapAnnotation>::encode(foreignAnchor))));
+    check(refusedAnchor.status == 400 &&
+          client.call("GET", draftPath).json.value("generation") == "3",
+          "candidate preflight accepted an annotation anchored outside its network");
+    const Response removed = client.call("POST", draftPath + "/save-events",
+        request("3", frame(annotation, revised, std::nullopt)));
+    check(removed.status == 200 && removed.json.value("generation") == "4" &&
+          client.call("GET", layerPath).json.value("count") == 0,
+          "annotation delete did not remove native membership and member");
+    // Raw clients must not forge native member records, including the deleted
+    // UUID, even when sending a syntactically valid canonical payload.
+    const QJsonObject forge{{"sessionId", session}, {"fencingToken", token},
+        {"expectedGeneration", "4"},
+        {"changes", QJsonArray{QJsonObject{{"uuid", annotationId}, {"kind", 112},
+            {"references", QJsonArray{}},
+            {"payloadBase64", QString::fromLatin1(initial.toBase64())}}}}};
+    check(client.call("POST", draftPath + "/save", forge).status == 400 &&
+          client.call("GET", draftPath).json.value("generation") == "4",
+          "generic Save accepted a forged annotation record");
+    server.stop();
+}
+
 void exerciseCompleteNetworkDraftImportHttp() {
     namespace native = aowis::dvmdb;
     TemporaryRoot root;
@@ -2660,6 +2792,15 @@ void exerciseHydraulicDraftMembershipHttp() {
     service.withRepository(project.id, [&](native::Repository& repository) {
         base = native::hydraulic::saveHydraulicDistributionNetwork(repository, projectUuid,
                                                          "main", network, head, commitMetadata());
+        // The pre-release B2 ownership contract requires a Distribution
+        // annotation layer even for fixtures created by the native API.
+        MapAnnotationLayer layer;
+        layer.uuid = native::annotations::distributionLayerUuid(networkUuid);
+        layer.domain = MapAnnotationDomain::Distribution;
+        layer.owner_network_uuid = networkUuid;
+        base = repository.commitModel(projectUuid, "main",
+            native::annotations::fullDraftAnnotationLayerChanges(layer, {}),
+            commitMetadata(), base, true);
     });
     service.configureRepositoryRole(native::RepositoryRole::Private);
     TestServer server(service, native::BundleLimits{4ULL * 1024ULL * 1024ULL,
@@ -3856,6 +3997,7 @@ int main(int argc, char** argv) {
         exerciseHistoryDeletionHttp();
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
         exerciseUnbornNetworkInitializationHttp();
+        exerciseAnnotationDraftHttp();
         exerciseCompleteNetworkDraftImportHttp();
         exerciseHydraulicDraftMembershipHttp();
 #endif

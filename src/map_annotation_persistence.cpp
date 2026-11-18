@@ -218,6 +218,17 @@ Root decodeRoot(const ModelRecord& record, const QUuid& expectedId) {
 
 } // namespace
 
+QUuid distributionLayerUuid(const QUuid& networkId) {
+    if (networkId.isNull())
+        throw StorageError(StorageErrorKind::InvalidInput, "null distribution network UUID");
+    QByteArray seed("aowis-distribution-annotation-layer-v1");
+    seed.append(networkId.toRfc4122());
+    QByteArray digest = QCryptographicHash::hash(seed, QCryptographicHash::Sha256).left(16);
+    digest[6] = static_cast<char>((static_cast<unsigned char>(digest[6]) & 0x0fU) | 0x80U);
+    digest[8] = static_cast<char>((static_cast<unsigned char>(digest[8]) & 0x3fU) | 0x80U);
+    return QUuid::fromRfc4122(digest);
+}
+
 std::vector<ModelChange> fullDraftAnnotationLayerChanges(
     const MapAnnotationLayer& layer, const QList<MapAnnotation>& annotations) {
     validateLayer(layer);

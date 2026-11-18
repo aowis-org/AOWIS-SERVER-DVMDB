@@ -3207,7 +3207,8 @@ MergeResolution resolveHydraulicRecord(const Key& key, const ModelRecord& base,
 template<typename Callback>
 std::invoke_result_t<Callback, const MergeOptions&> mergeHydraulicWithChoices(
         const std::vector<HydraulicFieldChoice>& fields,
-        const std::vector<HydraulicObjectChoice>& objects, Callback invoke) {
+        const std::vector<HydraulicObjectChoice>& objects, Callback invoke,
+        const std::function<void(MergeOptions&)>& configure) {
     // Build an immutable lookup before entering the Repository's merge lock.
     // A duplicate (UUID, field) is rejected rather than choosing an arbitrary
     // last-write-wins interpretation of the user's instructions.
@@ -3279,6 +3280,7 @@ std::invoke_result_t<Callback, const MergeOptions&> mergeHydraulicWithChoices(
                                                     sourceReader, objectChoices);
     };
     options.validate = validateMergedHydraulicSnapshot;
+    if (configure) configure(options);
     return invoke(options);
 }
 
@@ -3286,13 +3288,14 @@ std::invoke_result_t<Callback, const MergeOptions&> mergeHydraulicWithChoices(
 MergeResult mergeHydraulicBranches(Repository& repository, const ProjectId& project,
                                        std::string_view target, std::string_view source,
                                        const HydraulicMergeSelections& selections,
-                                       const CommitMetadata& metadata) {
+                                       const CommitMetadata& metadata,
+                                       const std::function<void(MergeOptions&)>& configure) {
     validateCommitMetadata(metadata);
     return mergeHydraulicWithChoices(selections.fields, selections.objects,
         [&](const MergeOptions& options) {
             return repository.mergeBranches(project, target, source, metadata,
                 selections.expectedTargetHead, selections.expectedSourceHead, options);
-        });
+        }, configure);
 }
 
 std::optional<QList<QUuid>> listHydraulicEntityIdsAtRevisionLimited(

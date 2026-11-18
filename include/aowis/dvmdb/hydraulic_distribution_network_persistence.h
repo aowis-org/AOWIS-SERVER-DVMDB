@@ -275,7 +275,8 @@ struct HydraulicMergeSelections {
 MergeResult mergeHydraulicBranches(Repository& repository, const ProjectId& project,
                                        std::string_view target, std::string_view source,
                                        const HydraulicMergeSelections& selections,
-                                       const CommitMetadata& metadata);
+                                       const CommitMetadata& metadata,
+                                       const std::function<void(MergeOptions&)>& configure = {});
 
 // Canonical project-scoped UUIDv7 hydraulic operations. All reads pin an
 // immutable revision; saves/edits compare expected HEAD during atomic commit.

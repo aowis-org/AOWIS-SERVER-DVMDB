@@ -261,6 +261,54 @@ create their required empty annotation layer atomically, because B2 requires
 exactly one Distribution layer per network. Until then, B3.1 is not exposed
 as an HTTP write API and does not claim complete atomic publication.
 
+## B3.2 — Fenced draft HTTP publication (current increment)
+
+The HTTP `POST /dvmdb/v1/working-copies/{draft}/save-events` endpoint accepts an
+optional `annotationLayerId` (canonical UUID string) alongside existing
+`sessionId`, `fencingToken`, `expectedGeneration`, `changes`, and `events`.
+The event frames must contain canonical `map.annotation` MODEL before/after
+edits addressed to that one layer. `changes` is **not** the way to send
+annotation member/chunk/root bytes: native kinds 110/111/112 are server-owned.
+
+The handler pins the draft's generation, checks the non-annotation before-images,
+materializes the annotation edit batch against the pinned pre-edit candidate,
+then validates the **complete resulting project candidate** using the B2
+validator. It passes the derived record delta and **original event frames** to
+`ProjectService::saveWorkingCopyTransactions`; that service rechecks the lease,
+fencing token and generation and atomically fsyncs the candidate and journal.
+The logical request fingerprint (not derived chunk bytes) allows exact
+replays after lost HTTP acknowledgements without reapplying membership edits.
+
+Distribution network bootstrap and full-network import create their empty
+annotation layers in the **same** working-copy save. The layer UUID is a
+namespaced deterministic UUIDv8 derived from the network's UUID, so a
+retransmitted initialization request identifies the same native layer.
+
+Read API:
+
+- `GET /dvmdb/v1/working-copies/{draft}/annotation-layers/{layer}` returns
+  one pinned draft generation and ordered canonical annotation payloads.
+- `GET /dvmdb/v1/projects/{project}/branches/{branch}/annotation-layers`
+  lists layer IDs/owners/counts at a single selected immutable revision.
+- `GET /dvmdb/v1/projects/{project}/branches/{branch}/annotation-layers/{layer}`
+  returns canonical member payloads at that immutable revision. The existing
+  `?revision=` selector follows normal branch/revision reachability rules.
+
+The whole-candidate HTTP preflight is performed before acquiring the draft
+writer lock to avoid reversing the project's lock order. The generation CAS
+makes a successful preflight immutable relative to the subsequent Save: a
+concurrent edit changes the generation and the Save is rejected. This is an
+initial correctness-first implementation: enumerating the complete base-model
+record set is O(project size) on each validated HTTP Save and needs future
+incremental indexing/performance work.
+
+**Scope limitations:** This increment integrates the **working-copy HTTP**
+writer and its reader/bootstrap routes. It does **not** yet enforce B2 in
+native `Repository::commitModel`, the direct branch hydraulic commit route,
+merges, bundle import, archive verification or historical action replay.
+Those paths remain on the B4/final integration checklist; do not claim that
+all possible repository ingress paths enforce annotation integrity yet.
+
 ## B4.1 — annotation-aware revision merge preflight
 
 The domain merge route now uses `annotations::mergeDistributionAnnotationBranches`,

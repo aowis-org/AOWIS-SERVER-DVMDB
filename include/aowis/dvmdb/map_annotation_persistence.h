@@ -27,6 +27,11 @@ struct AnnotationLayerSnapshot final {
     QList<MapAnnotation> annotations;
 };
 
+// Stable Distribution layer UUID derived from its network UUID. This is a
+// namespace-scoped UUIDv8, not another allocated project/branch/revision ID.
+// Deterministic identity makes initialize/import safe to retry after a lost ACK.
+QUuid distributionLayerUuid(const QUuid& networkId);
+
 // Pure, server-owned record materialization for an entire new annotation layer.
 // Membership order is stable; IDs are deterministic per layer and chunk serial.
 // For a Distribution layer its owning network root must be present in the

@@ -5,12 +5,43 @@ info:
   description: |
     DVMDB HTTP API: projects, branches, immutable revisions, hydraulic
     persistence and merges, revision bundles, repository identity and
-    private drafts. All identities are UUIDv7; SHA-256 values are integrity
-    data. No authentication. Conventions: docs/rest-api-design.md; errors and
+    private drafts. Project, branch and revision identities are UUIDv7; deterministic
+    Distribution annotation-layer and membership identities are UUIDv8.
+    SHA-256 values are integrity data. No authentication. Conventions: docs/rest-api-design.md; errors and
     limits: docs/native-database-service.md.
 servers:
   - url: http://127.0.0.1:8755/dvmdb/v1
 paths:
+  /projects/{projectId}/branches/{branch}/annotation-layers:
+    get:
+      operationId: listRevisionAnnotationLayers
+      description: |
+        List domain-neutral map annotation layers at one immutable revision.
+        Resolve branch HEAD once or select a reachable revision using the
+        same revision selector as other branch model reads. Every layer has a
+        domain, optional owning network UUID and member count.
+      responses:
+        '200': {description: Pinned revision and array of annotation layer descriptors}
+        '404': {description: Project, branch or revision not found}
+  /projects/{projectId}/branches/{branch}/annotation-layers/{layer}:
+    get:
+      operationId: readRevisionAnnotationLayer
+      description: |
+        Return canonical MODEL MapAnnotation payloadBase64 for each ordered
+        member in a pinned immutable revision, plus layer metadata.
+      responses:
+        '200': {description: Immutable annotation layer snapshot}
+        '404': {description: Layer not found at the selected revision}
+  /working-copies/{draftId}/annotation-layers/{layer}:
+    get:
+      operationId: readDraftAnnotationLayer
+      description: |
+        Return the canonical annotation records visible at one pinned draft
+        generation (base plus its candidate overlay). Reading is allowed in
+        read-only inspection, but editing uses the fenced save-events route.
+      responses:
+        '200': {description: Draft generation and annotation members}
+        '404': {description: Draft or layer not found}
   /health:
     get:
       operationId: health
@@ -483,6 +514,9 @@ paths:
         '200': {description: Unborn draft with durable empty network root and incremented generation}
         '400': {description: Invalid identity, name or malformed request}
         '409': {description: Stale writer, non-unborn draft or existing candidate data}
+  # Canonical annotation CRUD reuses the existing fenced MODEL event writer.
+  # Supply optional annotationLayerId in the JSON request to derive native
+  # kinds 110/111/112 on the server; never include them in changes[].
   /working-copies/{draftId}/save-events:
     parameters:
       - {name: draftId, in: path, required: true, schema: {type: string, format: uuid}}

@@ -81,6 +81,22 @@ void mustReject(Callback&& callback, const char* message) {
     require(rejected, message);
 }
 
+void testDeterministicDistributionLayerIdentity() {
+    const QUuid first = ann::distributionLayerUuid(uuid(1));
+    const QUuid same = ann::distributionLayerUuid(uuid(1));
+    const QUuid different = ann::distributionLayerUuid(uuid(3));
+    require(!first.isNull() && first == same && first != different &&
+            first != uuid(1),
+            "distribution annotation layer UUID must be stable, unique by network and distinct from owner");
+    const QByteArray bytes = first.toRfc4122();
+    require(bytes.size() == 16 &&
+            ((static_cast<unsigned char>(bytes[6]) >> 4U) == 8U) &&
+            ((static_cast<unsigned char>(bytes[8]) >> 6U) == 2U),
+            "derived annotation layer must be an RFC 9562 UUIDv8");
+    mustReject([&]() { ann::distributionLayerUuid(QUuid()); },
+               "null network must not produce a layer identity");
+}
+
 void testMembershipSizes() {
     for (const int count : {0, 1, 255, 256, 257, 513}) {
         const MapAnnotationLayer layer = distributionLayer();
@@ -222,6 +238,7 @@ void testNativeRevisionRoundtrip() {
 int main(int argc, char** argv) {
     QCoreApplication application(argc, argv);
     try {
+        testDeterministicDistributionLayerIdentity();
         testMembershipSizes();
         testDrainageAndInvalidInput();
         testCorruptReferences();

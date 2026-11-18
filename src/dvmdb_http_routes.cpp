@@ -5,6 +5,9 @@
 
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
 #include "aowis/dvmdb/hydraulic_distribution_network_persistence.h"
+#include "aowis/dvmdb/map_annotation_persistence.h"
+#include "aowis/dvmdb/map_annotation_snapshot_validation.h"
+#include "aowis/dvmdb/model_record_conversion.h"
 #include <QByteArray>
 #include <aowis/model/edit/model_edit_transaction.h>
 #include <aowis/model/edit/hydraulic_distribution_root_edit.h>
@@ -78,6 +81,9 @@ const char* const routeEdits = "/dvmdb/v1/projects/:id/branches/:branch/networks
 const char* const routeModelCommits = "/dvmdb/v1/projects/:id/branches/:branch/model-commits";
 const char* const routeMerges = "/dvmdb/v1/projects/:id/merges";
 const char* const routeHydraulicMerges = "/dvmdb/v1/projects/:id/hydraulic-merges";
+const char* const routeAnnotationLayers = "/dvmdb/v1/projects/:id/branches/:branch/annotation-layers";
+const char* const routeAnnotationLayer = "/dvmdb/v1/projects/:id/branches/:branch/annotation-layers/:layer";
+const char* const routeDraftAnnotationLayer = "/dvmdb/v1/working-copies/:draft/annotation-layers/:layer";
 
 // A handled request produces a JSON body and a status.
 struct Reply {
@@ -963,7 +969,7 @@ std::vector<hydraulic::HydraulicEntityChange> parseHydraulicChanges(const QJsonO
             requireInput(!change.contains("delete"), "delete must be true or omitted");
             requireInput(change.value("type").isDouble(), "missing entity type");
             const int type = change.value("type").toInt(-1);
-            requireInput(type >= 0 && type < 18 && change.value("type").toDouble() == type,
+            requireInput(type >= 0 && type < 17 && change.value("type").toDouble() == type,
                          "invalid entity type");
             HydraulicEntity decoded = decodeEntity(static_cast<std::size_t>(type),
                                                    decodePayload(change, "payloadBase64"));
@@ -995,6 +1001,111 @@ std::optional<std::size_t> jsonBodyLimit(const httplib::Request& request) {
 }
 
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
+// User-provided model records must never create, modify, or delete the
+// server-owned annotation root/chunk/member records. Only the materializer
+// may publish native kinds 110..112, under the existing lease and generation.
+bool isAnnotationNativeKind(std::uint16_t kind) {
+    return kind == annotations::annotationLayerKind ||
+           kind == annotations::annotationChunkKind ||
+           kind == annotations::annotationMemberKind;
+}
+
+// Builds one complete pinned native-model candidate for semantic validation.
+// The immutable base is scanned outside the draft writer lock. The writer's
+// generation CAS ensures the candidate cannot change between this preflight
+// and atomic publication. No repository call occurs while holding a draft lock.
+using CandidateRecords = std::map<Key, ModelRecord>;
+CandidateRecords completeDraftCandidate(
+    ProjectService& service, const WorkingCopyInfo& draft,
+    const std::vector<ModelChange>& changes) {
+    CandidateRecords records;
+    if (draft.baseRevision) {
+        const std::optional<ProjectId> project = ProjectId::parse(draft.projectId);
+        requireInput(project.has_value(), "invalid draft project identity");
+        service.withRepository(draft.projectId, [&](Repository& repository) {
+            for (const std::pair<Key, Bytes>& entry :
+                 repository.scanAtRevision(*project, *draft.baseRevision)) {
+                records.emplace(entry.first, decodeModelRecord(entry.second));
+            }
+        });
+    }
+    const std::function<void(const std::vector<ModelChange>&)> merge =
+        [&records](const std::vector<ModelChange>& delta) {
+        for (const ModelChange& change : delta) {
+            if (change.record) records[change.key] = *change.record;
+            else records.erase(change.key);
+        }
+    };
+    merge(draft.candidateChanges);
+    merge(changes);
+    return records;
+}
+
+void validateDraftAnnotationCandidate(const CandidateRecords& records) {
+    // A raw, legacy test model may contain standalone member records. The
+    // annotation-aware graph contract applies once there is a network or any
+    // annotation record; all such candidates must have complete ownership.
+    bool usesLayers = false;
+    for (const std::pair<const Key, ModelRecord>& item : records) {
+        if (item.second.kind == hydraulic::hydraulicDistributionNetworkKind ||
+            isAnnotationNativeKind(item.second.kind)) {
+            usesLayers = true;
+            break;
+        }
+    }
+    if (!usesLayers) return;
+    MergeCandidate candidate;
+    candidate.get = [&records](const Key& id) -> std::optional<ModelRecord> {
+        const CandidateRecords::const_iterator item = records.find(id);
+        return item != records.end() ? std::optional<ModelRecord>(item->second) : std::nullopt;
+    };
+    candidate.forEach = [&records](
+        const std::function<void(const Key&, const ModelRecord&)>& visit) {
+        for (const std::pair<const Key, ModelRecord>& item : records)
+            visit(item.first, item.second);
+    };
+    const std::optional<std::string> error = annotations::validateAnnotationSnapshot(candidate);
+    requireInput(!error.has_value(), "invalid model candidate annotation ownership or references");
+}
+
+void checkNoClientAnnotationChanges(
+    const CandidateRecords& before, const std::vector<ModelChange>& changes) {
+    for (const ModelChange& change : changes) {
+        const CandidateRecords::const_iterator current = before.find(change.key);
+        requireInput((!change.record || !isAnnotationNativeKind(change.record->kind)) &&
+                     (current == before.end() || !isAnnotationNativeKind(current->second.kind)),
+                     "annotation native records must be edited through canonical annotation events");
+    }
+}
+
+std::vector<ModelChange> emptyDistributionAnnotationLayer(const QUuid& networkId) {
+    MapAnnotationLayer layer;
+    layer.uuid = annotations::distributionLayerUuid(networkId);
+    layer.domain = MapAnnotationDomain::Distribution;
+    layer.owner_network_uuid = networkId;
+    return annotations::fullDraftAnnotationLayerChanges(layer, {});
+}
+
+QJsonObject layerJson(const annotations::AnnotationLayerSnapshot& snapshot,
+                      bool includeMembers) {
+    QJsonObject result{{"id", uuidString(snapshot.layer.uuid)},
+                       {"domain", snapshot.layer.domain == MapAnnotationDomain::Distribution
+                           ? QStringLiteral("distribution") : QStringLiteral("drainage")},
+                       {"ownerNetworkId", snapshot.layer.owner_network_uuid
+                           ? QJsonValue(uuidString(*snapshot.layer.owner_network_uuid))
+                           : QJsonValue(QJsonValue::Null)},
+                       {"count", static_cast<int>(snapshot.annotations.size())}};
+    if (includeMembers) {
+        QJsonArray members;
+        for (const MapAnnotation& item : snapshot.annotations)
+            members.append(QJsonObject{{"uuid", uuidString(item.uuid)},
+                {"payloadBase64", QString::fromLatin1(
+                    ModelCodec<MapAnnotation>::encode(item).toBase64())}});
+        result.insert(QStringLiteral("annotations"), members);
+    }
+    return result;
+}
+
 // The MODEL event journal is the undo/redo history of exactly the saved
 // candidate, so both must agree. Applied in order, every edit's before-image
 // must equal the entity's current state (earlier edit of this batch, else the
@@ -1002,7 +1113,8 @@ std::optional<std::size_t> jsonBodyLimit(const httplib::Request& request) {
 // entity must be the batch's candidate record (deleted: a tombstone).
 void verifyEditImages(ProjectService& service, const WorkingCopyInfo& draft,
                       const std::vector<aowis::model::ModelEditTransaction>& transactions,
-                      const std::vector<ModelChange>& changes) {
+                      const std::vector<ModelChange>& changes,
+                      bool hasAnnotationLayer) {
     std::map<Key, std::optional<ModelRecord>> candidate;
     for (const ModelChange& change : draft.candidateChanges) candidate.emplace(change.key, change.record);
     const std::function<std::optional<Bytes>(const Key&)> stored =
@@ -1021,7 +1133,8 @@ void verifyEditImages(ProjectService& service, const WorkingCopyInfo& draft,
             // The native root record is a server-owned manifest, not the
             // MODEL metadata image. A separate materializer verifies its
             // before-image and creates the matching manifest change.
-            if (edit.entityType == QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType))
+            if (edit.entityType == QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType) ||
+                (hasAnnotationLayer && edit.entityType == QStringLiteral("map.annotation")))
                 continue;
             const Key key = hydraulic::keyFromUuid(edit.entityId);
             const std::map<Key, std::optional<Bytes>>::const_iterator known = state.find(key);
@@ -1229,6 +1342,88 @@ QJsonObject hydraulicDistributionNetworkSummaryJson(const NetworkHydraulicDistri
 }
 
 void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
+    // Read all annotation layers at one explicitly selected immutable revision.
+    // The branch's moving HEAD is resolved ONCE, never once per member.
+    server.Get(routeAnnotationLayers, [&service](const httplib::Request& request,
+                                               httplib::Response& response) {
+        guarded(response, [&]() {
+            const ProjectId project = requestProject(request);
+            QJsonArray layers;
+            std::optional<RevisionId> revision;
+            service.withRepository(pathParam(request, "id"), [&](Repository& repository) {
+                revision = revisionForRead(repository, project,
+                                            pathParam(request, "branch"), request);
+                requireModelIndexed(repository, project, *revision, "model data not found");
+                const std::vector<std::pair<Key, Bytes>> records =
+                    repository.scanAtRevision(project, *revision);
+                for (const std::pair<Key, Bytes>& item : records) {
+                    const ModelRecord decoded = decodeModelRecord(item.second);
+                    if (decoded.kind != annotations::annotationLayerKind) continue;
+                    const QUuid layerId = record::uuidFromKey(item.first);
+                    const std::optional<annotations::AnnotationLayerSnapshot> layer =
+                        annotations::loadAnnotationLayerAtRevision(
+                            repository, project, *revision, layerId);
+                    if (!layer)
+                        throw StorageError(StorageErrorKind::Corruption,
+                                           "missing annotation layer in indexed revision");
+                    layers.append(layerJson(*layer, false));
+                    requireInput(layers.size() <= static_cast<int>(maxHttpEntityIds),
+                                 "too many annotation layers for HTTP listing");
+                }
+            });
+            return Reply{200, QJsonObject{{"revision", revisionIdString(*revision)},
+                                          {"layers", layers}}};
+        });
+    });
+    server.Get(routeAnnotationLayer, [&service](const httplib::Request& request,
+                                              httplib::Response& response) {
+        guarded(response, [&]() {
+            const ProjectId project = requestProject(request);
+            const QUuid layerId = parseUuid(pathParam(request, "layer"));
+            QJsonObject result;
+            service.withRepository(pathParam(request, "id"), [&](Repository& repository) {
+                const RevisionId revision = revisionForRead(repository, project,
+                                               pathParam(request, "branch"), request);
+                requireModelIndexed(repository, project, revision, "model data not found");
+                const std::optional<annotations::AnnotationLayerSnapshot> layer =
+                    annotations::loadAnnotationLayerAtRevision(
+                        repository, project, revision, layerId);
+                if (!layer) throw ProjectError(ProjectErrorKind::NotFound,
+                                               "annotation layer not found in revision");
+                requireInput(layer->annotations.size() <= static_cast<qsizetype>(maxHttpEntityIds),
+                             "annotation layer exceeds HTTP listing limit");
+                result = layerJson(*layer, true);
+                result.insert(QStringLiteral("revision"), revisionIdString(revision));
+            });
+            return Reply{200, result};
+        });
+    });
+    server.Get(routeDraftAnnotationLayer, [&service](const httplib::Request& request,
+                                                   httplib::Response& response) {
+        guarded(response, [&]() {
+            const WorkingCopyInfo draft = service.workingCopy(pathParam(request, "draft"), false);
+            const QUuid layerId = parseUuid(pathParam(request, "layer"));
+            const CandidateRecords records = completeDraftCandidate(service, draft, {});
+            validateDraftAnnotationCandidate(records);
+            const std::function<std::optional<ModelRecord>(const Key&)> read =
+                [&records](const Key& key) -> std::optional<ModelRecord> {
+                const CandidateRecords::const_iterator item = records.find(key);
+                return item == records.end() ? std::nullopt
+                                             : std::optional<ModelRecord>(item->second);
+            };
+            const std::optional<annotations::AnnotationLayerSnapshot> layer =
+                annotations::loadAnnotationLayer(read, layerId);
+            if (!layer) throw ProjectError(ProjectErrorKind::NotFound,
+                                           "annotation layer not found in working copy");
+            requireInput(layer->annotations.size() <= static_cast<qsizetype>(maxHttpEntityIds),
+                         "annotation layer exceeds HTTP listing limit");
+            QJsonObject result = layerJson(*layer, true);
+            result.insert(QStringLiteral("generation"),
+                          QString::number(static_cast<qulonglong>(draft.generation)));
+            result.insert(QStringLiteral("draftId"), QString::fromStdString(draft.id));
+            return Reply{200, result};
+        });
+    });
     // Distinct domain-validated merge route; generic merges do not perform
     // hydraulic semantic validation.
     server.Post(routeHydraulicMerges, [&service](const httplib::Request& request,
@@ -1274,7 +1469,7 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
             }
             MergeResult result;
             service.withRepository(pathParam(request, "id"), [&](Repository& repository) {
-                result = hydraulic::mergeHydraulicBranches(
+                result = annotations::mergeDistributionAnnotationBranches(
                     repository, project, target, source, selections, metadata);
             });
             return Reply{result.status == MergeStatus::Conflicts ? 409 : 200, mergeJson(result)};
@@ -1380,7 +1575,7 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
             const std::optional<std::string> typeText = queryValue(request, "type");
             bool validType = false;
             const unsigned type = typeText ? QString::fromStdString(*typeText).toUInt(&validType) : 0U;
-            requireInput(validType && type < 18, "entity type must be integer in 0..17");
+            requireInput(validType && type < 17, "entity type must be integer in 0..16");
             QJsonObject result;
             service.withRepository(pathParam(request, "id"), [&](Repository& repository) {
                 const RevisionId revision = revisionForRead(repository, project,
@@ -2215,8 +2410,21 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             for (const ModelChange& change : changes)
                 requireInput(!change.record ||
                              (change.record->kind != hydraulic::hydraulicDistributionNetworkKind &&
-                              change.record->kind != 101),
-                             "native hydraulic manifest/chunk writes are server-owned");
+                              change.record->kind != 101 &&
+                              !isAnnotationNativeKind(change.record->kind)),
+                             "native manifest, membership, and annotation writes are server-owned");
+            const WorkingCopyInfo draft = service.workingCopy(pathParam(request, "draft"), false);
+            // The underlying writer rejects plain Save at an archived History
+            // boundary. Preserve that conflict before annotation preflight can
+            // reject the candidate for an unrelated reason (and mask HTTP 409).
+            if (draft.historyCheckpointRevisionId)
+                throw ProjectError(ProjectErrorKind::Conflict,
+                                   "archived history edits require atomic MODEL event saves");
+            if (draft.generation == strictUint64(body, "expectedGeneration")) {
+                const CandidateRecords before = completeDraftCandidate(service, draft, {});
+                checkNoClientAnnotationChanges(before, changes);
+                validateDraftAnnotationCandidate(completeDraftCandidate(service, draft, changes));
+            }
 #endif
             return Reply{200, workingCopyJson(service.saveWorkingCopyChanges(
                 pathParam(request, "draft"), requiredString(body, "sessionId"),
@@ -2246,8 +2454,10 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                                    "invalid canonical imported hydraulic distribution network: " + error.toStdString());
             requireInput(UuidV7::parse(uuidString(network->uuid).toStdString()).has_value(),
                          "imported hydraulic distribution network UUID must be UUIDv7");
-            const std::vector<ModelChange> changes =
+            std::vector<ModelChange> changes =
                 hydraulic::fullDraftHydraulicDistributionNetworkChanges(*network);
+            const std::vector<ModelChange> layer = emptyDistributionAnnotationLayer(network->uuid);
+            changes.insert(changes.end(), layer.begin(), layer.end());
             const std::string draftId = pathParam(request, "draft");
             const WorkingCopyInfo draft = service.workingCopy(draftId, false);
             if (draft.baseRevision.has_value() || !draft.candidateChanges.empty() ||
@@ -2256,6 +2466,8 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                                    "import requires a new empty unborn draft; existing network data cannot be replaced");
             if (draft.generation != expected)
                 throw ProjectError(ProjectErrorKind::Conflict, "working copy generation changed");
+            validateDraftAnnotationCandidate(
+                completeDraftCandidate(service, draft, changes));
             const WorkingCopyInfo saved = service.saveWorkingCopyChanges(
                 draftId, session, token, expected, changes);
             return Reply{200, workingCopyJson(saved)};
@@ -2279,8 +2491,11 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             const QString name = body.value("name").toString();
             requireInput(body.value("name").isString() && !name.trimmed().isEmpty() &&
                          name.size() <= 255, "invalid new hydraulic distribution network name");
-            const ModelChange initial = hydraulic::emptyDraftHydraulicDistributionNetworkRoot(
-                QUuid(QString::fromStdString(networkId)), name);
+            const QUuid networkUuid(QString::fromStdString(networkId));
+            const ModelChange initial = hydraulic::emptyDraftHydraulicDistributionNetworkRoot(networkUuid, name);
+            const std::vector<ModelChange> layer = emptyDistributionAnnotationLayer(networkUuid);
+            requireInput(layer.size() == 1, "empty annotation layer must be one root");
+            const std::vector<ModelChange> initialized{initial, layer.front()};
             const std::string draftId = pathParam(request, "draft");
             const WorkingCopyInfo draft = service.workingCopy(draftId, false);
             requireInput(!draft.baseRevision.has_value(),
@@ -2293,21 +2508,26 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 draft.generation == expected + 1 &&
                 draft.leaseSessionId == std::optional<std::string>(session) &&
                 draft.leaseToken == std::optional<std::string>(token) &&
-                draft.journalCount == 0 && draft.candidateChanges.size() == 1 &&
-                draft.candidateChanges.front().key == initial.key &&
-                draft.candidateChanges.front().record.has_value() &&
-                initial.record.has_value() &&
-                draft.candidateChanges.front().record->kind == initial.record->kind &&
-                draft.candidateChanges.front().record->references == initial.record->references &&
-                draft.candidateChanges.front().record->payload == initial.record->payload) {
+                draft.journalCount == 0 && draft.candidateChanges.size() == initialized.size() &&
+                std::all_of(initialized.begin(), initialized.end(), [&draft](const ModelChange& expectedChange) {
+                    return std::any_of(draft.candidateChanges.begin(), draft.candidateChanges.end(),
+                        [&expectedChange](const ModelChange& found) {
+                            return found.key == expectedChange.key && found.record && expectedChange.record &&
+                                   found.record->kind == expectedChange.record->kind &&
+                                   found.record->references == expectedChange.record->references &&
+                                   found.record->payload == expectedChange.record->payload;
+                        });
+                })) {
                 return Reply{200, workingCopyJson(draft)};
             }
             if (draft.generation != expected || !draft.candidateChanges.empty() ||
                 draft.journalCount != 0)
                 throw ProjectError(ProjectErrorKind::Conflict,
                                    "first network requires an untouched working copy");
+            validateDraftAnnotationCandidate(
+                completeDraftCandidate(service, draft, initialized));
             const WorkingCopyInfo saved = service.saveWorkingCopyChanges(
-                draftId, session, token, expected, {initial});
+                draftId, session, token, expected, initialized);
             return Reply{200, workingCopyJson(saved)};
         });
     });
@@ -2316,7 +2536,7 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                                                       httplib::Response& response) {
         guarded(response, [&]() {
             const QJsonObject body = parseBody(request, maxJsonModelBytes);
-            requireKeys(body, {"sessionId", "fencingToken", "expectedGeneration", "changes", "events", "membership"});
+            requireKeys(body, {"sessionId", "fencingToken", "expectedGeneration", "changes", "events", "membership", "annotationLayerId"});
             // Root-only MODEL events intentionally carry no client model records.
             // Other empty batches are rejected below after decoding the events.
             const std::vector<ModelChange> changes = parseModelChanges(body, false, true);
@@ -2324,8 +2544,9 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             for (const ModelChange& change : changes)
                 requireInput(!change.record ||
                              (change.record->kind != hydraulic::hydraulicDistributionNetworkKind &&
-                              change.record->kind != 101),
-                             "native hydraulic manifest/chunk writes are server-owned");
+                              change.record->kind != 101 &&
+                              !isAnnotationNativeKind(change.record->kind)),
+                             "native manifest, membership, and annotation writes are server-owned");
 #endif
             requireInput(body.value("events").isArray(), "missing edit events array");
             const QJsonArray items = body.value("events").toArray();
@@ -2362,6 +2583,21 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                                     reinterpret_cast<const std::uint8_t*>(decoded.constData()) + decoded.size());
             }
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
+            const bool hasAnnotationLayer = body.contains("annotationLayerId");
+            std::optional<QUuid> annotationLayerId;
+            std::vector<aowis::model::ModelEntityEdit> annotationEdits;
+            if (hasAnnotationLayer)
+                annotationLayerId = parseUuid(requiredString(body, "annotationLayerId"));
+            for (const aowis::model::ModelEditTransaction& transaction : transactions) {
+                for (const aowis::model::ModelEntityEdit& edit : transaction.edits) {
+                    if (edit.entityType == QStringLiteral("map.annotation")) {
+                        requireInput(hasAnnotationLayer, "annotation edits require annotationLayerId");
+                        annotationEdits.push_back(edit);
+                    }
+                }
+            }
+            requireInput(!hasAnnotationLayer || !annotationEdits.empty(),
+                         "annotationLayerId requires annotation MODEL events");
             // Creating or removing an entity changes its network's membership.
             // Without explicit membership intents the candidate would hold an
             // entity record that no membership chunk lists (or a chunk that
@@ -2371,7 +2607,8 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             if (!body.contains("membership")) {
                 for (const aowis::model::ModelEditTransaction& transaction : transactions)
                     for (const aowis::model::ModelEntityEdit& edit : transaction.edits)
-                        requireInput(edit.before.has_value() && edit.after.has_value(),
+                        requireInput(edit.entityType == QStringLiteral("map.annotation") ||
+                                     (edit.before.has_value() && edit.after.has_value()),
                                      "missing membership for created or removed entity");
             }
 #endif
@@ -2380,7 +2617,7 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             // Save changes the generation, which the Save below rejects.
             const WorkingCopyInfo current = service.workingCopy(pathParam(request, "draft"), false);
             if (current.generation == strictUint64(body, "expectedGeneration"))
-                verifyEditImages(service, current, transactions, changes);
+                verifyEditImages(service, current, transactions, changes, hasAnnotationLayer);
 #endif
             std::vector<ModelChange> materialized = changes;
             std::optional<std::string> logicalRequestFingerprint;
@@ -2400,9 +2637,9 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                     rootEdit = &edit;
                 }
             }
-            requireInput(rootEdit != nullptr || !changes.empty(),
+            requireInput(rootEdit != nullptr || !changes.empty() || !annotationEdits.empty(),
                          "ordinary edit events require model records");
-            if (rootEdit) {
+            if (rootEdit || hasAnnotationLayer) {
                 // Materialized manifest/chunk bytes depend on the current
                 // generation; fingerprint the logical request for exact
                 // lost-acknowledgement replay instead.
@@ -2431,7 +2668,7 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                     const double collection = entry.value("collectionIndex").toDouble();
                     requireInput(kind >= 1 && kind <= 65535 &&
                                  kind == static_cast<double>(static_cast<std::uint16_t>(kind)) &&
-                                 collection >= 0 && collection < 18 &&
+                                 collection >= 0 && collection < 17 &&
                                  collection == static_cast<double>(static_cast<std::uint16_t>(collection)),
                                  "invalid membership kind or collection index");
                     hydraulic::DraftMembershipIntent intent;
@@ -2493,7 +2730,8 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                     for (const aowis::model::ModelEditTransaction& transaction : transactions) {
                         for (const aowis::model::ModelEntityEdit& edit : transaction.edits) {
                             const Key key = hydraulic::keyFromUuid(edit.entityId);
-                            if ((!edit.before || !edit.after) && !intentKeys.contains(key))
+                            if (edit.entityType != QStringLiteral("map.annotation") &&
+                                (!edit.before || !edit.after) && !intentKeys.contains(key))
                                 requireInput(false, "missing membership for created or removed entity");
                             if (intentKeys.contains(key)) {
                                 requireInput(eventMembership.emplace(key, edit).second,
@@ -2560,6 +2798,37 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                     *existing = std::move(metadata);
                 else
                     materialized.push_back(std::move(metadata));
+            }
+#endif
+#ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
+            if (current.generation == strictUint64(body, "expectedGeneration")) {
+                const CandidateRecords before = completeDraftCandidate(service, current, {});
+                checkNoClientAnnotationChanges(before, changes);
+                if (hasAnnotationLayer) {
+                    // Resolve all native annotation changes from the same pinned
+                    // pre-edit draft. Other MODEL changes in the same request are
+                    // validated against the final combined candidate below.
+                    const std::function<std::optional<ModelRecord>(const Key&)> readBefore =
+                        [&before](const Key& key) -> std::optional<ModelRecord> {
+                        const CandidateRecords::const_iterator item = before.find(key);
+                        return item != before.end() ? std::optional<ModelRecord>(item->second)
+                                                    : std::nullopt;
+                    };
+                    const std::vector<ModelChange> delta =
+                        annotations::materializeDraftAnnotationEdits(
+                            readBefore, *annotationLayerId, annotationEdits);
+                    std::set<Key> produced;
+                    for (const ModelChange& change : materialized)
+                        requireInput(produced.insert(change.key).second,
+                                     "multiple edits generated the same native model key");
+                    for (const ModelChange& change : delta) {
+                        requireInput(produced.insert(change.key).second,
+                                     "annotation materializer collided with another model edit");
+                        materialized.push_back(change);
+                    }
+                }
+                validateDraftAnnotationCandidate(
+                    completeDraftCandidate(service, current, materialized));
             }
 #endif
             const WorkingCopyInfo saved = service.saveWorkingCopyTransactions(
@@ -3114,8 +3383,46 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 parseCommitMetadata(object, "Merge " + source + " into " + target);
             const RevisionId expectedTarget = parseRevisionId(requiredString(object, "expectedTargetHead"));
             const RevisionId expectedSource = parseRevisionId(requiredString(object, "expectedSourceHead"));
-            const MergeResult result = service.mergeBranches(pathParam(request, "id"),
-                                             target, source, metadata, expectedTarget, expectedSource);
+            // The generic model merge endpoint must not bypass annotation
+            // ownership validation when either pinned branch contains a native
+            // annotation layer. Keep raw/other generic model merge semantics.
+            bool annotationProject = false;
+#ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
+            const std::string projectText = pathParam(request, "id");
+            const std::optional<ProjectId> project = ProjectId::parse(projectText);
+            requireInput(project.has_value(), "project ID must be UUIDv7");
+            service.withRepository(projectText, [&](Repository& repository) {
+                for (const RevisionId& tip : {expectedTarget, expectedSource}) {
+                    const std::optional<Bytes> encoded = repository.readRevision(*project, tip);
+                    if (!encoded || !decodeRevisionRecord(*encoded).modelIndexed) continue;
+                    const std::vector<std::pair<Key, Bytes>> records =
+                        repository.scanAtRevision(*project, tip);
+                    for (const std::pair<Key, Bytes>& entry : records) {
+                        const ModelRecord record = decodeModelRecord(entry.second);
+                        if (record.kind == hydraulic::hydraulicDistributionNetworkKind ||
+                            record.kind == annotations::annotationLayerKind) {
+                            annotationProject = true;
+                            break;
+                        }
+                    }
+                    if (annotationProject) break;
+                }
+            });
+#endif
+            MergeResult result;
+            if (annotationProject) {
+#ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
+                hydraulic::HydraulicMergeSelections selections{
+                    expectedTarget, expectedSource, {}, {}};
+                service.withRepository(projectText, [&](Repository& repository) {
+                    result = annotations::mergeDistributionAnnotationBranches(
+                        repository, *project, target, source, selections, metadata);
+                });
+#endif
+            } else {
+                result = service.mergeBranches(pathParam(request, "id"),
+                                               target, source, metadata, expectedTarget, expectedSource);
+            }
             return Reply{result.status == MergeStatus::Conflicts ? 409 : 200, mergeJson(result)};
         });
     });
