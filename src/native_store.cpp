@@ -4413,6 +4413,47 @@ std::vector<Key> Repository::referencingModelAtRevision(const ProjectId& project
     return readReferrers(snapshot->record.referencesRoot, key);
 }
 
+Repository::PinnedModelRevision Repository::pinModelRevision(const ProjectId& project,
+                                                             const RevisionId& revisionId) {
+    std::lock_guard<std::mutex> guarded(this->mutex_);
+    ScopedFileLock locked(this->lockFd_);
+    refreshIndex();
+    const std::filesystem::path namespacePath = this->directory_ / "revision-v2";
+    if (!std::filesystem::exists(namespacePath) && !std::filesystem::is_symlink(namespacePath))
+        throw StorageError(StorageErrorKind::NotFound, "revision UUID not found");
+    RevisionResolver resolver(this->directory_, project);
+    const RevisionObjectReader reader = [this](const Hash& digest) -> std::optional<Bytes> {
+        if (!containsIndex(digest)) return std::nullopt;
+        return load(digest);
+    };
+    const std::optional<ResolvedRevision> snapshot = resolver.resolve(revisionId, reader);
+    require(Err::NotFound, snapshot.has_value(), "revision UUID not found");
+    require(Err::InvalidInput, snapshot->record.modelIndexed,
+            "pinned model reads require a model-indexed revision");
+    return PinnedModelRevision{snapshot->record.root, snapshot->record.referencesRoot};
+}
+
+std::optional<ModelRecord> Repository::getModelAtPinned(const PinnedModelRevision& pinned,
+                                                        const Key& key) {
+    std::lock_guard<std::mutex> guarded(this->mutex_);
+    ScopedFileLock locked(this->lockFd_);
+    refreshIndex();
+    const std::optional<Hash> value = lookup(pinned.root, key);
+    if (!value) return std::nullopt;
+    const Bytes stored = load(*value);
+    require(Err::Corruption, !stored.empty() && stored.front() == 'V',
+            "invalid model object envelope");
+    return decodeModelRecord(Bytes(stored.begin() + 1, stored.end()));
+}
+
+std::vector<Key> Repository::referencingModelAtPinned(const PinnedModelRevision& pinned,
+                                                      const Key& key) {
+    std::lock_guard<std::mutex> guarded(this->mutex_);
+    ScopedFileLock locked(this->lockFd_);
+    refreshIndex();
+    return readReferrers(pinned.referencesRoot, key);
+}
+
 Repository::PreparedModelCommit Repository::prepareModelCommitLocked(
         const Hash& root, const Hash& referencesRoot, std::vector<ModelChange> changes) {
     // Canonicalize the owned change list in place. Large initial imports no

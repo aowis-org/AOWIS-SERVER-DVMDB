@@ -4247,6 +4247,35 @@ std::optional<ModelRecord> ProjectService::getModelAtRevision(
     });
 }
 
+PinnedModelReader ProjectService::pinModelRevision(std::string_view projectId,
+                                                   const RevisionId& revisionId) {
+    const std::optional<ProjectId> project = ProjectId::parse(projectId);
+    if (!project) throw ProjectError(ProjectErrorKind::InvalidInput, "UUIDv7 project required");
+    const std::shared_ptr<Project> entry = findProject(projectId);
+    PinnedModelReader reader;
+    reader.repository_ = openRepository(*entry);
+    reader.pinned_ = translated<Repository::PinnedModelRevision>([&]() {
+        return reader.repository_->pinModelRevision(*project, revisionId);
+    });
+    return reader;
+}
+
+std::optional<ModelRecord> PinnedModelReader::get(const Key& key) const {
+    if (!this->repository_)
+        throw ProjectError(ProjectErrorKind::InvalidInput, "pinned model reader is empty");
+    return translated<std::optional<ModelRecord>>([&]() {
+        return this->repository_->getModelAtPinned(this->pinned_, key);
+    });
+}
+
+std::vector<Key> PinnedModelReader::referrers(const Key& key) const {
+    if (!this->repository_)
+        throw ProjectError(ProjectErrorKind::InvalidInput, "pinned model reader is empty");
+    return translated<std::vector<Key>>([&]() {
+        return this->repository_->referencingModelAtPinned(this->pinned_, key);
+    });
+}
+
 RevisionGraphRevision ProjectService::revision(std::string_view projectId, const RevisionId& id) {
     const std::optional<ProjectId> project = ProjectId::parse(projectId);
     if (!project) throw ProjectError(ProjectErrorKind::InvalidInput, "UUIDv7 project required");

@@ -1,5 +1,6 @@
 #include "aowis/dvmdb/map_annotation_action_replay.h"
 #include "aowis/dvmdb/map_annotation_persistence.h"
+#include "aowis/dvmdb/map_annotation_snapshot_validation.h"
 #include "aowis/dvmdb/hydraulic_distribution_network_persistence.h"
 #include "aowis/dvmdb/model_codec.h"
 #include "aowis/dvmdb/model_record_conversion.h"
@@ -622,6 +623,40 @@ void testAmbiguousHydraulicMembershipOwnership() {
            "transient hydraulic member of ambiguous network was accepted");
 }
 
+// A2: the complete snapshot validator runs on the parent, the child and the
+// requested boundary, not after every archived action. An archive whose
+// intermediate state violates the candidate contract stays navigable to its
+// valid boundaries and still refuses the invalid one.
+void testOnlySelectedBoundaryIsValidated() {
+    const Records parent = makeParent(true);
+    MapAnnotation stray = annotation(7);
+    MapAnnotationAnchor anchor;
+    // The network root exists, so the record-level materializer accepts the
+    // anchor reference, but it is not an anchor-capable member of the network.
+    anchor.entity_uuid = uuid(1);
+    anchor.entity_type = QStringLiteral("HydraulicNodeJunction");
+    stray.anchor = anchor;
+    const std::vector<db::WorkingCopyEvent> actions{
+        event(70, {create(stray)}), event(71, {remove(stray)})};
+    Records intermediate = parent;
+    applyEvent(intermediate, layer().uuid, {create(stray)});
+    ensure(ann::validateAnnotationSnapshot(view(intermediate)).has_value(),
+           "fixture intermediate must violate the complete candidate contract");
+    const Records committed = parent;
+    QString error;
+    const std::optional<ann::VerifiedAnnotationActionBoundary> start =
+        replay(parent, committed, actions, 0, &error);
+    ensure(start && start->changesFromParent.empty(),
+           "boundary 0 equals the validated parent and must be navigable");
+    const std::optional<ann::VerifiedAnnotationActionBoundary> tip =
+        replay(parent, committed, actions, 2, &error);
+    ensure(tip && tip->changesFromParent.empty(),
+           "the tip equals the validated child and must be navigable");
+    error.clear();
+    ensure(!replay(parent, committed, actions, 1, &error) && !error.isEmpty(),
+           "an invalid intermediate boundary must never be returned");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -638,6 +673,7 @@ int main(int argc, char** argv) {
         testHydraulicMembershipOrderPreserved();
         testTwoNetworkEndpointOwnedInsertion();
         testAmbiguousHydraulicMembershipOwnership();
+        testOnlySelectedBoundaryIsValidated();
         std::cout << "B4.3 annotation-only archive replay proofs passed\n";
         return 0;
     } catch (const std::exception& error) {

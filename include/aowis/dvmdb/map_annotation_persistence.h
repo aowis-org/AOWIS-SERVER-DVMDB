@@ -67,6 +67,19 @@ std::optional<AnnotationLayerSnapshot> loadAnnotationLayer(
     const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
     const QUuid& layerId);
 
+// Point read of ONE annotation member: record kind, canonical MODEL payload,
+// UUID and exact anchor reference are checked. Layer ownership is NOT proven
+// here (see validateAnnotationSnapshotDelta). Absent member returns nullopt.
+std::optional<MapAnnotation> loadAnnotationMember(
+    const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
+    const QUuid& annotationId);
+
+// Root-only read of a layer's canonical MODEL metadata; no chunk or member is
+// read. Absent layer returns nullopt; an invalid root throws Corruption.
+std::optional<MapAnnotationLayer> loadAnnotationLayerMetadata(
+    const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
+    const QUuid& layerId);
+
 // Convenience wrapper that pins every lookup to the SAME immutable revision.
 std::optional<AnnotationLayerSnapshot> loadAnnotationLayerAtRevision(
     Repository& store, const ProjectId& project, const RevisionId& revision,

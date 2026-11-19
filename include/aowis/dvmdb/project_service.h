@@ -265,6 +265,22 @@ struct WorkingCopyLease {
     std::uint64_t generation = 0;    // caller must pin for Save
 };
 
+// Revision-pinned point reads (see ProjectService::pinModelRevision). The
+// revision is resolved once; get/referrers then only read immutable tries.
+// Holds no project operation lock and no queue place. Storage errors are
+// translated like ProjectService::getModelAtRevision.
+class PinnedModelReader final {
+public:
+    std::optional<ModelRecord> get(const Key& key) const;
+    // Sorted keys of records in the pinned revision that reference `key`.
+    std::vector<Key> referrers(const Key& key) const;
+
+private:
+    friend class ProjectService;
+    std::shared_ptr<Repository> repository_;
+    Repository::PinnedModelRevision pinned_{};
+};
+
 class ProjectService final {
     struct Project;
 public:
@@ -386,6 +402,9 @@ public:
             validate = {});
     std::optional<ModelRecord> getModelAtRevision(std::string_view projectId,
                                                    const RevisionId& revision, const Key& key);
+    // Resolve a model-indexed revision once for many point reads. NotFound for
+    // an unknown revision, InvalidInput for a revision without a model index.
+    PinnedModelReader pinModelRevision(std::string_view projectId, const RevisionId& revision);
     // Complete, revision-pinned MODEL snapshot for authenticated history
     // verification. This is a bounded native read; callers must not merge
     // results from a moving branch HEAD into the same candidate.

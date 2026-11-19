@@ -315,7 +315,11 @@ void applyChanges(Records& records, const std::vector<ModelChange>& changes) {
 
 // Shared canonical single-action materializer, used both for forward replay
 // and for reversing an unborn journal back to its unjournaled initialization
-// seed. The snapshot validator runs after each complete atomic action.
+// seed. Each action is materialized with the same per-domain checks as a Save
+// (before-images, membership, reference index). The complete snapshot
+// validator is NOT run per action (A2: that made History O(actions x
+// project)); callers validate every state they return or publish, and the
+// endpoints are proven against the immutable, validated revisions.
 static void applyVerifiedActionEdits(Records& current,
         const QVector<aowis::model::ModelEntityEdit>& edits, bool combined,
         std::map<Key, Key>& owners, HydraulicOwnership& hydraulicOwners,
@@ -374,7 +378,6 @@ static void applyVerifiedActionEdits(Records& current,
         if (edit.entityType == QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType))
             applyHydraulicRoot(current, edit);
     if (!reversing) materializeAnnotations();
-    validate(current);
 }
 
 // An unborn draft has no immutable parent. Reverse ONLY the actions that led
@@ -503,6 +506,13 @@ static std::optional<VerifiedAnnotationActionBoundary> replayActionBoundary(
             require(reproduced != verifiedPosition.end() && equalRecord(reproduced->second, entry.second),
                     "annotation MODEL archive differs from committed native records");
         }
+        // The selected boundary is the only replayed state handed to a
+        // caller. Position 0 is `before`; the proven position (journal tip,
+        // or the persisted cursor of an active draft) equals `after`. Both
+        // were validated above; every other boundary is validated here.
+        const std::size_t provenPosition = persistedBoundary ? *persistedBoundary : actions.size();
+        if (actionPosition != 0 && actionPosition != provenPosition)
+            validate(selected);
         VerifiedAnnotationActionBoundary result;
         result.actionCount = actions.size();
         result.changesFromParent = changesBetween(before, selected);
@@ -696,7 +706,9 @@ static std::optional<WorkingCopyInfo> navigateVerifiedAction(
             require(found != candidate.end() && equalRecord(found->second, entry.second),
                     "annotation History checkpoint differs from verified archived state");
         }
-        validate(candidate);
+        // `candidate` equals the replayed boundary record for record, and
+        // replayActionBoundary validated that boundary (or proved it equal to
+        // a validated immutable revision): no second complete validation.
         // Normalize redundant writes so returning to the archived tip produces
         // a clean draft when the revision is the current HEAD.
         for (std::map<Key, std::optional<ModelRecord>>::iterator item = overlay.begin();
@@ -850,7 +862,7 @@ static std::optional<std::vector<ModelChange>> planVerifiedActiveAnnotationDraft
                 require(parent.emplace(entry.first, entry.second).second,
                         "duplicate record in active History fork parent");
             applyChanges(parent, source->boundary.changesFromParent);
-            validate(parent);
+            // Validated as the replay's `before` snapshot below.
         }
         Records saved = head;
         std::set<Key> changedKeys;
@@ -881,9 +893,10 @@ static std::optional<std::vector<ModelChange>> planVerifiedActiveAnnotationDraft
             throw std::runtime_error(
                 (QStringLiteral("Active annotation History failed MODEL verification: ") +
                  replayError).toStdString());
+        // `desired` is exactly the replay's selected boundary, which
+        // replayActionBoundary validated or proved equal to a validated end.
         Records desired = parent;
         applyChanges(desired, selected->changesFromParent);
-        validate(desired);
         // Publish an overlay relative to physical HEAD, not the logical
         // archived fork parent or the current Undo boundary. Otherwise
         // undoing the first fork action would resurrect abandoned Redo.

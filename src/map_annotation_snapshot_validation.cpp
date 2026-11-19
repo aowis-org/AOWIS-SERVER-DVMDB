@@ -4,6 +4,7 @@
 #include "aowis/dvmdb/map_annotation_persistence.h"
 #include "aowis/dvmdb/model_field_merge.h"
 #include "aowis/dvmdb/model_record_conversion.h"
+#include "aowis/dvmdb/project_service.h"
 #include "aowis/dvmdb/storage_error.h"
 
 #include <aowis/model/map/map_annotation.h>
@@ -174,6 +175,130 @@ std::optional<std::string> validateAnnotationSnapshot(const MergeCandidate& cand
             ensure(owned.contains(entry.first),
                    "candidate contains unowned or orphaned native model record");
         return std::nullopt;
+    } catch (const std::exception& error) {
+        return std::string(error.what());
+    }
+}
+
+namespace {
+
+// The MODEL anchor registry names the entity type; the native hydraulic
+// adapter owns the record kind of each collection. Same set as
+// allowedAnchors() above.
+std::uint16_t anchorRecordKind(const QString& entityType) {
+    struct AnchorKind final {
+        const char* entityType;
+        hydraulic::HydraulicEntityType collection;
+    };
+    static const AnchorKind anchorKinds[] = {
+        {"HydraulicNodeJunction", hydraulic::HydraulicEntityType::Junction},
+        {"HydraulicNodeReservoir", hydraulic::HydraulicEntityType::Reservoir},
+        {"HydraulicNodeTank", hydraulic::HydraulicEntityType::Tank},
+        {"HydraulicDemandPoint", hydraulic::HydraulicEntityType::DemandPoint},
+    };
+    for (const AnchorKind& entry : anchorKinds) {
+        if (entityType == QString::fromLatin1(entry.entityType))
+            return hydraulic::hydraulicMemberKindForCollection(
+                static_cast<std::size_t>(entry.collection));
+    }
+    ensure(false, "annotation anchor has an unsupported canonical entity type");
+    return 0;
+}
+
+Key singleReferrer(const EngineeringCandidateView& view, const Key& id,
+                   std::uint16_t kind, const char* description) {
+    const std::vector<Key> owners = engineeringReferrersOfKind(view, id, kind);
+    ensure(owners.size() == 1, description);
+    return owners.front();
+}
+
+bool sameLayerMetadata(const MapAnnotationLayer& first, const MapAnnotationLayer& second) {
+    return aowis::model::ModelCodec<MapAnnotationLayer>::encode(first) ==
+           aowis::model::ModelCodec<MapAnnotationLayer>::encode(second);
+}
+
+// Point-read equivalent of the anchor rules in validateAnnotationSnapshot:
+// the target exists, has the record kind of its declared MODEL type and is a
+// member of the layer's owner network.
+void checkAnchorScope(const EngineeringCandidateView& after, const MapAnnotationLayer& layer,
+                      const MapAnnotation& annotation) {
+    if (!annotation.anchor) return;
+    ensure(layer.domain == MapAnnotationDomain::Distribution &&
+           layer.owner_network_uuid.has_value(),
+           "pre-network drainage annotation must not have an anchor");
+    const Key target = record::keyFromUuid(annotation.anchor->entity_uuid);
+    const std::optional<ModelRecord> targetRecord = after.get(target);
+    ensure(targetRecord.has_value(), "annotation anchor target is missing");
+    ensure(targetRecord->kind == anchorRecordKind(annotation.anchor->entity_type),
+           "annotation anchor has the wrong canonical entity type");
+    const Key chunk = singleReferrer(after, target, engineeringNetworkChunkKind,
+                                     "annotation anchor is not owned by this distribution network");
+    const Key network = singleReferrer(after, chunk, engineeringNetworkKind,
+                                       "annotation anchor is not owned by this distribution network");
+    ensure(network == record::keyFromUuid(*layer.owner_network_uuid),
+           "annotation anchor is not owned by this distribution network");
+}
+
+// Failures that describe the environment, not the candidate.
+bool propagatesUnchanged(StorageErrorKind kind) {
+    return kind == StorageErrorKind::Io || kind == StorageErrorKind::ResourceExhausted ||
+           kind == StorageErrorKind::Unavailable || kind == StorageErrorKind::Busy ||
+           kind == StorageErrorKind::Internal;
+}
+
+} // namespace
+
+std::optional<std::string> validateAnnotationSnapshotDelta(
+    const EngineeringCandidateView& before, const EngineeringCandidateView& after,
+    const std::vector<ModelChange>& delta,
+    const std::function<std::optional<std::string>()>& completeValidation) {
+    try {
+        const EngineeringDeltaScope scope = engineeringDeltaScope(before, after, delta);
+        if (scope.fullValidationRequired) return completeValidation();
+        // Hydraulic semantics (values, topology, catalogue references) are
+        // proven by the canonical network loader, one touched network at a time.
+        for (const Key& network : scope.networks) {
+            const std::optional<NetworkHydraulicDistribution> loaded =
+                hydraulic::loadDraftHydraulicDistributionNetwork(
+                    after.get, record::uuidFromKey(network));
+            ensure(loaded.has_value(), "invalid candidate distribution network");
+        }
+        std::set<Key> checked;
+        for (const Key& layerKey : scope.layers) {
+            const QUuid layerId = record::uuidFromKey(layerKey);
+            const std::optional<MapAnnotationLayer> previous =
+                loadAnnotationLayerMetadata(before.get, layerId);
+            const std::optional<AnnotationLayerSnapshot> current =
+                loadAnnotationLayer(after.get, layerId);
+            ensure(current.has_value(), "invalid candidate annotation layer");
+            // Domain or owner changes alter project-wide layer cardinality.
+            if (!previous || !sameLayerMetadata(*previous, current->layer))
+                return completeValidation();
+            for (const MapAnnotation& annotation : current->annotations) {
+                checkAnchorScope(after, current->layer, annotation);
+                checked.insert(record::keyFromUuid(annotation.uuid));
+            }
+        }
+        for (const Key& member : scope.annotations) {
+            if (checked.contains(member)) continue;
+            const std::optional<MapAnnotation> annotation =
+                loadAnnotationMember(after.get, record::uuidFromKey(member));
+            ensure(annotation.has_value(), "missing annotation member in candidate");
+            const Key chunk = singleReferrer(after, member, engineeringLayerChunkKind,
+                                             "annotation belongs to multiple layers or chunks");
+            const Key layerKey = singleReferrer(after, chunk, engineeringLayerKind,
+                                                "annotation membership chunk belongs to multiple layers");
+            const std::optional<MapAnnotationLayer> layer =
+                loadAnnotationLayerMetadata(after.get, record::uuidFromKey(layerKey));
+            ensure(layer.has_value(), "missing annotation layer in candidate");
+            checkAnchorScope(after, *layer, *annotation);
+        }
+        return std::nullopt;
+    } catch (const ProjectError&) {
+        throw;
+    } catch (const StorageError& error) {
+        if (propagatesUnchanged(error.kind())) throw;
+        return std::string(error.what());
     } catch (const std::exception& error) {
         return std::string(error.what());
     }

@@ -8,8 +8,12 @@
 #include "aowis/dvmdb/native_store.h"
 #include "aowis/dvmdb/hydraulic_distribution_network_persistence.h"
 
+#include "aowis/dvmdb/engineering_delta_scope.h"
+
+#include <functional>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace aowis::dvmdb::annotations {
 
@@ -19,6 +23,21 @@ namespace aowis::dvmdb::annotations {
 // native record kinds and missing Distribution layers fail closed. An empty
 // project and one optional pre-network Drainage layer are permitted.
 std::optional<std::string> validateAnnotationSnapshot(const MergeCandidate& candidate);
+
+// Incremental counterpart of validateAnnotationSnapshot for a working-copy
+// Save. `before` must be a candidate that satisfied the complete validator;
+// `after` is `before` with `delta` applied. Only the networks, layers and
+// annotation members the delta can affect are decoded (point reads through
+// the reverse-reference index); root creation/deletion, generic records and
+// layer ownership changes run `completeValidation` instead.
+// Same result contract as validateAnnotationSnapshot: nullopt = valid,
+// diagnostic = reject. Storage failures that are not a property of the
+// candidate (I/O, ENOSPC, busy, unavailable, internal, ProjectError) are
+// rethrown so callers can map them to their own status.
+std::optional<std::string> validateAnnotationSnapshotDelta(
+    const EngineeringCandidateView& before, const EngineeringCandidateView& after,
+    const std::vector<ModelChange>& delta,
+    const std::function<std::optional<std::string>()>& completeValidation);
 
 // Canonical merge for projects with Distribution networks and independent
 // annotation layers. Wraps the existing hydraulic selections and membership

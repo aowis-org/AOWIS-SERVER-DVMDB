@@ -491,6 +491,17 @@ public:
     // Sorted IDs of entities referring to key; O(log N + inbound references).
     std::vector<Key> referencingModelAtRevision(const ProjectId& project,
                                                    const RevisionId& revisionId, const Key& key);
+    // A model-indexed revision resolved ONCE. Point reads through the pinned
+    // roots only walk the immutable value and reverse-reference tries; they
+    // do not re-resolve and re-hash the revision record for every key. Used
+    // for incremental candidate validation with many small reads.
+    struct PinnedModelRevision {
+        Hash root{};
+        Hash referencesRoot{};
+    };
+    PinnedModelRevision pinModelRevision(const ProjectId& project, const RevisionId& revisionId);
+    std::optional<ModelRecord> getModelAtPinned(const PinnedModelRevision& pinned, const Key& key);
+    std::vector<Key> referencingModelAtPinned(const PinnedModelRevision& pinned, const Key& key);
     // Work is proportional to the changed trie paths; more than
     // maxDifferences results raise StorageError(LimitExceeded) before the full
     // difference is materialized.

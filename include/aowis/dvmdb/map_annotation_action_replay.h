@@ -47,9 +47,11 @@ struct VerifiedAnnotationActionBoundary final {
 // chronological order even when independent actions commute and produce the
 // same endpoint snapshot. DVMDB's chain uses SHA-256 with a zero initial hash
 // and SHA-256(previous || raw MODEL frame) for each archived action.
-// The replay derives server-owned member/chunk/root changes, revalidates each
-// full candidate, and proves exact equality with the immutable child AND the
-// authenticated native revision delta. actionPosition is a boundary
+// The replay derives server-owned member/chunk/root changes with the Save
+// materializers, validates the parent, the child and the selected boundary
+// as complete candidates (not every intermediate action: A2), and proves
+// exact equality with the immutable child AND the authenticated native
+// revision delta. actionPosition is a boundary
 // 0..actions.size(), not an array index.
 std::optional<VerifiedAnnotationActionBoundary> replayVerifiedAnnotationActionBoundary(
     const MergeCandidate& parent,

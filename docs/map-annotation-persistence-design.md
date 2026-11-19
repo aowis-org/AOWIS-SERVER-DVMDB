@@ -101,8 +101,9 @@ Merkle sharing and normal branch ancestry provide version identity.
 ## Draft transaction and revision rules
 
 - The GUI sends canonical MODEL before/after images and **logical** membership
-  intents, never native manifest or membership-chunk bytes. `ProjectService`
-  validates a complete candidate under the same writer lease, base HEAD,
+  intents, never native manifest or membership-chunk bytes. The Save
+  validates the resulting candidate (incrementally, see "Validation cost")
+  and `ProjectService` publishes it under the same writer lease, base HEAD,
   generation and idempotency fence already used for hydraulic MODEL edits.
 - A transaction can combine `MapAnnotation`, a layer-root edit, hydraulic
   entity changes and annotation membership changes. Either the whole event,
@@ -174,6 +175,45 @@ request are rejected before publication. Native Commit and merge require an
 explicit full candidate validator for engineering kinds, including orphan
 members and fast-forward merges. Generic records in the old 1–17 space remain
 ordinary opaque records, never inferred to be hydraulic.
+
+## Validation cost
+
+The complete validator (`validateAnnotationSnapshot`) decodes every network
+and every layer of a project. It runs at the trust boundaries: local Commit,
+merge (including fast-forward), bundle import and repository verification.
+
+An event Save uses `validateAnnotationSnapshotDelta` instead. The saved draft
+candidate already satisfied the contract, so only what the delta can break is
+checked:
+
+- graph invariants of the changed records (`engineering_delta_scope.h`,
+  Qt-free): record kinds and in-place kind changes, references that must
+  resolve, allowed child kinds of containers, exactly one owner for every
+  added, moved or changed owned record, no surviving reference to a deleted
+  record (chunk entries, pipe end nodes, annotation anchors), and one layer
+  per network for every network whose ownership is touched;
+- semantics of the touched scope only: each network whose root, chunk or
+  member changed is loaded by the canonical network loader; each layer whose
+  root or chunk changed is loaded whole; every other changed annotation, and
+  every annotation anchored to a changed or moved hydraulic member, is
+  decoded on its own and its anchor is resolved through the reverse-reference
+  index (target kind, owning network);
+- creating or deleting a network or layer root, a layer ownership or domain
+  change, and generic (non-engineering) records fall back to the complete
+  validator.
+
+Reads go through a pinned base revision (`ProjectService::pinModelRevision`:
+resolved once, no project operation lock). A delta that touches a hydraulic
+network loads the base once in bulk, because the network has to be decoded
+completely anyway; annotation-only Saves read only the records they need.
+A candidate that was already invalid before the Save (for example written by
+a raw native caller) is still rejected at local Commit.
+
+Archived and live History replay applies every action with the Save
+materializers but runs the complete validator only on the parent, the child
+and the selected boundary; the endpoints are additionally proven equal to
+the immutable revisions. An archive whose intermediate state is invalid can
+therefore be navigated to its valid boundaries, never to the invalid one.
 
 The older native hydraulic convenience writers are not the canonical editing
 entry point and require migration to the event-backed path; use the working

@@ -439,6 +439,22 @@ std::optional<AnnotationLayerSnapshot> loadAnnotationLayer(
     return result;
 }
 
+std::optional<MapAnnotation> loadAnnotationMember(
+    const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
+    const QUuid& annotationId) {
+    const std::optional<ModelRecord> found = readCurrent(key(annotationId));
+    if (!found) return std::nullopt;
+    return decodeMember(*found, annotationId);
+}
+
+std::optional<MapAnnotationLayer> loadAnnotationLayerMetadata(
+    const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
+    const QUuid& layerId) {
+    const std::optional<ModelRecord> found = readCurrent(key(layerId));
+    if (!found) return std::nullopt;
+    return decodeRoot(*found, layerId).layer;
+}
+
 std::optional<AnnotationLayerSnapshot> loadAnnotationLayerAtRevision(
     Repository& store, const ProjectId& project, const RevisionId& revision,
     const QUuid& layerId) {

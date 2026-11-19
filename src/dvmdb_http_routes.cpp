@@ -1002,7 +1002,7 @@ CandidateRecords completeDraftCandidate(
     return records;
 }
 
-void validateDraftAnnotationCandidate(const CandidateRecords& records) {
+std::optional<std::string> completeDraftDiagnostic(const CandidateRecords& records) {
     // The B2 graph contract applies only to engineering candidates. This
     // shares the same predicate as direct MODEL and local Commit publication.
     MergeCandidate candidate;
@@ -1015,7 +1015,89 @@ void validateDraftAnnotationCandidate(const CandidateRecords& records) {
         for (const std::pair<const Key, ModelRecord>& item : records)
             visit(item.first, item.second);
     };
-    const std::optional<std::string> error = validateEngineeringCandidateIfNeeded(candidate);
+    return validateEngineeringCandidateIfNeeded(candidate);
+}
+
+void validateDraftAnnotationCandidate(const CandidateRecords& records) {
+    requireInput(!completeDraftDiagnostic(records).has_value(),
+                 "invalid model candidate annotation ownership or references");
+}
+
+// Base snapshot of a draft for incremental validation, resolved once and
+// read without the project operation lock. Point reads serve annotation and
+// other small deltas. A delta that touches a hydraulic network must load
+// that network completely; one bulk scan is cheaper than one point read per
+// member, so `bulk` loads the base records once (shared by both views).
+struct DraftBase final {
+    std::function<std::optional<ModelRecord>(const Key&)> get;
+    std::function<std::vector<Key>(const Key&)> referrers;
+};
+
+DraftBase draftBase(ProjectService& service, const WorkingCopyInfo& draft, bool bulk) {
+    DraftBase base;
+    if (!draft.baseRevision) return base;
+    const std::shared_ptr<const PinnedModelReader> pinned =
+        std::make_shared<const PinnedModelReader>(
+            service.pinModelRevision(draft.projectId, *draft.baseRevision));
+    base.referrers = [pinned](const Key& key) -> std::vector<Key> {
+        return pinned->referrers(key);
+    };
+    if (!bulk) {
+        base.get = [pinned](const Key& key) -> std::optional<ModelRecord> {
+            return pinned->get(key);
+        };
+        return base;
+    }
+    const std::optional<ProjectId> project = ProjectId::parse(draft.projectId);
+    requireInput(project.has_value(), "invalid draft project identity");
+    const std::shared_ptr<CandidateRecords> records = std::make_shared<CandidateRecords>();
+    service.withRepository(draft.projectId, [&](Repository& repository) {
+        for (const std::pair<Key, Bytes>& entry :
+             repository.scanAtRevision(*project, *draft.baseRevision))
+            records->emplace(entry.first, decodeModelRecord(entry.second));
+    });
+    base.get = [records](const Key& key) -> std::optional<ModelRecord> {
+        const CandidateRecords::const_iterator found = records->find(key);
+        return found == records->end() ? std::nullopt
+                                       : std::optional<ModelRecord>(found->second);
+    };
+    return base;
+}
+
+// The draft candidate (base + saved overlay + `extra`) as a point-read view.
+EngineeringCandidateView draftCandidateView(const DraftBase& base, const WorkingCopyInfo& draft,
+                                            const std::vector<ModelChange>& extra) {
+    return overlayEngineeringCandidateView(base.get, base.referrers,
+                                           {draft.candidateChanges, extra});
+}
+
+bool touchesHydraulicNetwork(const EngineeringCandidateView& before,
+                             const std::vector<ModelChange>& delta) {
+    for (const ModelChange& change : delta) {
+        std::optional<ModelRecord> previous;
+        if (!change.record) previous = before.get(change.key);
+        const std::uint16_t kind = change.record ? change.record->kind
+                                                 : (previous ? previous->kind : 0);
+        if (kind == hydraulic::hydraulicDistributionNetworkKind ||
+            kind == engineeringNetworkChunkKind || isHydraulicMemberKind(kind))
+            return true;
+    }
+    return false;
+}
+
+// Incremental B2 validation of one Save (see validateAnnotationSnapshotDelta).
+// The saved draft candidate was validated when it was written; the complete
+// validator remains authoritative at local Commit, merge and import.
+void validateDraftAnnotationDelta(ProjectService& service, const WorkingCopyInfo& draft,
+                                  const EngineeringCandidateView& pointBefore,
+                                  const std::vector<ModelChange>& delta) {
+    const DraftBase base = draftBase(service, draft, touchesHydraulicNetwork(pointBefore, delta));
+    const EngineeringCandidateView before = draftCandidateView(base, draft, {});
+    const EngineeringCandidateView after = draftCandidateView(base, draft, delta);
+    const std::optional<std::string> error = annotations::validateAnnotationSnapshotDelta(
+        before, after, delta, [&service, &draft, &delta]() {
+            return completeDraftDiagnostic(completeDraftCandidate(service, draft, delta));
+        });
     requireInput(!error.has_value(), "invalid model candidate annotation ownership or references");
 }
 
@@ -1034,11 +1116,11 @@ void requireGenericChangesOnly(const CandidateRecords& before,
 }
 
 void checkNoClientAnnotationChanges(
-    const CandidateRecords& before, const std::vector<ModelChange>& changes) {
+    const EngineeringCandidateView& before, const std::vector<ModelChange>& changes) {
     for (const ModelChange& change : changes) {
-        const CandidateRecords::const_iterator current = before.find(change.key);
+        const std::optional<ModelRecord> current = before.get(change.key);
         requireInput((!change.record || !isAnnotationNativeKind(change.record->kind)) &&
-                     (current == before.end() || !isAnnotationNativeKind(current->second.kind)),
+                     (!current || !isAnnotationNativeKind(current->kind)),
                      "annotation native records must be edited through canonical annotation events");
     }
 }
@@ -1377,16 +1459,13 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
         guarded(response, [&]() {
             const WorkingCopyInfo draft = service.workingCopy(pathParam(request, "draft"), false);
             const QUuid layerId = parseUuid(pathParam(request, "layer"));
-            const CandidateRecords records = completeDraftCandidate(service, draft, {});
-            validateDraftAnnotationCandidate(records);
-            const std::function<std::optional<ModelRecord>(const Key&)> read =
-                [&records](const Key& key) -> std::optional<ModelRecord> {
-                const CandidateRecords::const_iterator item = records.find(key);
-                return item == records.end() ? std::nullopt
-                                             : std::optional<ModelRecord>(item->second);
-            };
+            // The draft candidate was validated when it was saved; the layer
+            // loader still checks this layer's structure and references. Point
+            // reads only: no project scan and no project operation lock (A1).
+            const EngineeringCandidateView read =
+                draftCandidateView(draftBase(service, draft, false), draft, {});
             const std::optional<annotations::AnnotationLayerSnapshot> layer =
-                annotations::loadAnnotationLayer(read, layerId);
+                annotations::loadAnnotationLayer(read.get, layerId);
             if (!layer) throw ProjectError(ProjectErrorKind::NotFound,
                                            "annotation layer not found in working copy");
             requireInput(layer->annotations.size() <= static_cast<qsizetype>(maxHttpEntityIds),
@@ -2828,21 +2907,18 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
 #endif
 #ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
             if (current.generation == strictUint64(body, "expectedGeneration")) {
-                const CandidateRecords before = completeDraftCandidate(service, current, {});
+                // Point reads of the pinned pre-edit draft; no full scan and
+                // no project operation lock (A1).
+                const EngineeringCandidateView before =
+                    draftCandidateView(draftBase(service, current, false), current, {});
                 checkNoClientAnnotationChanges(before, changes);
                 if (hasAnnotationLayer) {
                     // Resolve all native annotation changes from the same pinned
                     // pre-edit draft. Other MODEL changes in the same request are
                     // validated against the final combined candidate below.
-                    const std::function<std::optional<ModelRecord>(const Key&)> readBefore =
-                        [&before](const Key& key) -> std::optional<ModelRecord> {
-                        const CandidateRecords::const_iterator item = before.find(key);
-                        return item != before.end() ? std::optional<ModelRecord>(item->second)
-                                                    : std::nullopt;
-                    };
                     const std::vector<ModelChange> delta =
                         annotations::materializeDraftAnnotationEdits(
-                            readBefore, *annotationLayerId, annotationEdits);
+                            before.get, *annotationLayerId, annotationEdits);
                     std::set<Key> produced;
                     for (const ModelChange& change : materialized)
                         requireInput(produced.insert(change.key).second,
@@ -2853,8 +2929,7 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                         materialized.push_back(change);
                     }
                 }
-                validateDraftAnnotationCandidate(
-                    completeDraftCandidate(service, current, materialized));
+                validateDraftAnnotationDelta(service, current, before, materialized);
             }
 #endif
             const WorkingCopyInfo saved = service.saveWorkingCopyTransactions(

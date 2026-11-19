@@ -71,7 +71,8 @@ aowis_dvmdb_configure_store(aowis-dvmdb-store)
 # by the standalone build independently of network transport.
 option(AOWIS_DVMDB_VM_DELETION_BARRIERS
     "Enable blocking deletion crash barriers (VM qualification builds ONLY)" OFF)
-add_library(aowis-dvmdb-project-service STATIC src/project_service.cpp)
+add_library(aowis-dvmdb-project-service STATIC src/project_service.cpp
+    src/engineering_delta_scope.cpp)
 add_library(AOWIS::DvmdbProjectService ALIAS aowis-dvmdb-project-service)
 target_compile_features(aowis-dvmdb-project-service PUBLIC cxx_std_20)
 if(AOWIS_DVMDB_VM_DELETION_BARRIERS)
@@ -371,6 +372,17 @@ if(BUILD_TESTING)
         COMMAND aowis-dvmdb-canonical-project-service-tests)
     set_tests_properties(aowis-dvmdb-canonical-project-service-tests PROPERTIES LABELS "aowis;identity")
 
+    # Incremental engineering candidate scope (graph invariants, overlay
+    # reverse references, pinned revision reads). Qt-free, so it runs in the
+    # sanitizer builds as well.
+    add_executable(aowis-dvmdb-engineering-delta-scope-tests
+        tests/engineering_delta_scope_tests.cpp)
+    target_link_libraries(aowis-dvmdb-engineering-delta-scope-tests PRIVATE
+        aowis-dvmdb-project-service)
+    add_test(NAME aowis-dvmdb-engineering-delta-scope-tests
+        COMMAND aowis-dvmdb-engineering-delta-scope-tests)
+    set_tests_properties(aowis-dvmdb-engineering-delta-scope-tests PROPERTIES
+        LABELS "aowis;integrity;working-copy")
     add_executable(aowis-dvmdb-project-service-tests tests/project_service_tests.cpp)
     target_link_libraries(aowis-dvmdb-project-service-tests PRIVATE aowis-dvmdb-project-service)
     add_test(NAME aowis-dvmdb-project-service-tests COMMAND aowis-dvmdb-project-service-tests)
@@ -518,7 +530,7 @@ if(BUILD_TESTING)
     target_link_libraries(aowis-dvmdb-store-tests PRIVATE aowis-dvmdb-store)
     add_test(NAME aowis-dvmdb-store-tests COMMAND aowis-dvmdb-store-tests)
     set_tests_properties(aowis-dvmdb-store-tests PROPERTIES LABELS "aowis")
-    add_custom_target(aowis-dvmdb-tests DEPENDS aowis-dvmdb-engineering-publication-guard-tests aowis-dvmdb-local-commit-tests aowis-dvmdb-working-copy-tests aowis-dvmdb-canonical-project-service-tests aowis-dvmdb-revision-bundle-large-tests aowis-dvmdb-revision-bundle-tests aowis-dvmdb-revision-graph-tests aowis-dvmdb-merge-tests aowis-dvmdb-project-model-tests aowis-dvmdb-packed-revision-tests aowis-dvmdb-revision-resolver-tests aowis-dvmdb-revision-record-tests aowis-dvmdb-branch-id-tests aowis-dvmdb-object-id-tests aowis-dvmdb-vm-powercut-worker aowis-dvmdb-sigkill-restart-tests aowis-dvmdb-physical-enospc-tests aowis-dvmdb-offline-backup-tests aowis-dvmdb-transfer-staging-budget-tests aowis-dvmdb-index-scaling-benchmark aowis-dvmdb-pack-operational-stress-tests aowis-dvmdb-bundle-import-profile-tests aowis-dvmdb-replication-scaling-benchmark aowis-dvmdb-bundle-revision-marks-tests aowis-dvmdb-bundle-disk-index-tests aowis-dvmdb-merge-ancestry-tests aowis-dvmdb-bundle-limit-tests aowis-dvmdb-project-service-tests aowis-dvmdb-project-concurrency-tests aowis-dvmdb-recovery-tests aowis-dvmdb-scratch-tests aowis-dvmdb-error-kind-tests aowis-dvmdb-repository-verify-tests aowis-dvmdb-model-import-integrity-tests aowis-dvmdb-merkle-integrity-tests aowis-dvmdb-store-tests aowis-dvmdb-diff-scope-tests aowis-dvmdb-incremental-sync-tests aowis-dvmdb-sync-tests aowis-dvmdb-sync-cli-tests aowis-dvmdb-access-tests)
+    add_custom_target(aowis-dvmdb-tests DEPENDS aowis-dvmdb-engineering-publication-guard-tests aowis-dvmdb-local-commit-tests aowis-dvmdb-working-copy-tests aowis-dvmdb-canonical-project-service-tests aowis-dvmdb-revision-bundle-large-tests aowis-dvmdb-revision-bundle-tests aowis-dvmdb-revision-graph-tests aowis-dvmdb-merge-tests aowis-dvmdb-project-model-tests aowis-dvmdb-packed-revision-tests aowis-dvmdb-revision-resolver-tests aowis-dvmdb-revision-record-tests aowis-dvmdb-branch-id-tests aowis-dvmdb-object-id-tests aowis-dvmdb-vm-powercut-worker aowis-dvmdb-sigkill-restart-tests aowis-dvmdb-physical-enospc-tests aowis-dvmdb-offline-backup-tests aowis-dvmdb-transfer-staging-budget-tests aowis-dvmdb-index-scaling-benchmark aowis-dvmdb-pack-operational-stress-tests aowis-dvmdb-bundle-import-profile-tests aowis-dvmdb-replication-scaling-benchmark aowis-dvmdb-bundle-revision-marks-tests aowis-dvmdb-bundle-disk-index-tests aowis-dvmdb-merge-ancestry-tests aowis-dvmdb-bundle-limit-tests aowis-dvmdb-project-service-tests aowis-dvmdb-engineering-delta-scope-tests aowis-dvmdb-project-concurrency-tests aowis-dvmdb-recovery-tests aowis-dvmdb-scratch-tests aowis-dvmdb-error-kind-tests aowis-dvmdb-repository-verify-tests aowis-dvmdb-model-import-integrity-tests aowis-dvmdb-merkle-integrity-tests aowis-dvmdb-store-tests aowis-dvmdb-diff-scope-tests aowis-dvmdb-incremental-sync-tests aowis-dvmdb-sync-tests aowis-dvmdb-sync-cli-tests aowis-dvmdb-access-tests)
 endif()
 
 # Canonical AOWIS model serialization lives in AOWIS-SERVER-MODEL.
