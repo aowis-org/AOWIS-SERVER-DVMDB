@@ -1,14 +1,13 @@
 # Versioned map annotation layers — DVMDB storage design (A1)
 
-**Status:** B1, increment 2/2 has completed the native annotation
-record adapter (`map_annotation_persistence.h/.cpp`) with kinds 110/111/112,
-bounded 256-member chunks, canonical MODEL payloads, deterministic chunk IDs,
-exact reference-index checks, pinned-revision reads and native-record tests.
-The 18-to-17 hydraulic collection break is complete in B1.2. Project-wide
-format/owner closure, layer discovery, logical membership edits, HTTP/draft
-publication and history integration remain **B2–B4**. These standalone format builders
-are not HTTP/GUI write APIs. The canonical MODEL contract is in the MODEL
-repository at `docs/map-annotations-contract.md`.
+**Status:** Native annotation kinds 110–112, whole-candidate ownership
+validation, fenced draft/event publishing, immutable History and branch merge
+integration are implemented. The B5 hardening closes generic HTTP publication
+bypasses, reserves hydraulic member kinds 201–217 (old 1–17 retired), and
+requires explicit semantic validation for engineering native Commit and merge.
+Qt-backed full integration and physical power-cut qualification must be run
+on the supported development host. This document describes the intended
+native contract; the HTTP API is documented in `dvmdb-http-api.yaml`.
 
 ## Storage boundary
 
@@ -31,8 +30,9 @@ Native kinds **110** (`annotation layer root`), **111** (`annotation
 membership chunk`) and **112** (`MapAnnotation` member) are now used by the B1
 record adapter. Their payload formats carry explicit magic/version markers and
 reject wrong-kind, malformed, noncanonical and mismatched-reference records.
-The generic native store is still model-agnostic; candidate-wide kind/owner
-closure is the next gate, not a guarantee of this isolated record codec.
+The generic store reserves engineering record kinds and requires a semantic
+validator at publication; the complete candidate-wide graph validator proves
+layer ownership and the exact kind and reference closure.
 These IDs are native storage kinds, distinct from MODEL entity type names.
 
 ```text
@@ -40,7 +40,7 @@ Project repository / immutable revision R
   model trie
     Distribution network root N              kind 100
       -> ordinary hydraulic chunks           kind 101
-      -> hydraulic entity records            kinds 1..17 (after label removal)
+      -> hydraulic entity records            kinds 201..217 (reserved engineering kinds)
     Annotation layer L                        kind 110
       metadata: uuid L, domain, owner_network_uuid N
       refs: [N, annotation chunk C1, ...]
@@ -144,10 +144,11 @@ kind-110/111 records. Standard REST/library reads are authoritative.
 
 ## Format break and B-phase acceptance
 
-The first implementation must update the hydraulic membership count 18 -> 17,
-remove kind 18 and its codec/type support, change the native manifest/schema
-markers where required, reject earlier incompatible development repositories,
-and update repository fixtures/tests together. No legacy decoder or implicit
+The implementation reduces the hydraulic membership count 18 -> 17,
+removes kind 18, and places the remaining 17 member kinds in 201..217. The
+native manifest/schema markers change with this pre-release format break.
+Earlier incompatible development repositories must be recreated; they are
+not migrated, and their payload kinds must not be reinterpreted. No legacy decoder or implicit
 migration is needed; **never** convert unknown bytes to empty data.
 
 B-phase tests must cover: multiple distribution networks and distinct layers;
@@ -157,565 +158,25 @@ move/delete+annotation detach; invalid cross-network anchor; duplicate layer;
 unowned chunk/member; wrong record kind; field-merge conflict; independent
 branch additions; archive/revision coverage; replication and crash recovery.
 
-**A1 is documentation only**: no native kinds, route handlers, or new MODEL
-code have been installed by this step.
-
-## B1 implementation gate
-
-B1.1 is a **record-format increment**, not a complete editable persistence
-feature. `fullDraftAnnotationLayerChanges()` builds root, chunks and individual
-records for one layer and returns an ordinary `ModelChange` set. The caller must
-provide the owning distribution network record in the same candidate. The
-`loadAnnotationLayerAtRevision()` wrapper pins the entire read to one immutable
-revision. An empty layer is represented by a root without chunks. Chunk UUIDs
-are SHA-256-derived from a namespaced layer UUID and serial, with a maximum of
-4,096 chunks and 256 members per chunk. Independently addressed annotation
-records hold canonical MODEL bytes and optional anchor references.
-
-The builder and loader deliberately do **not** infer that an annotation belongs
-to a hydraulic network simply because it references some UUID. The missing
-candidate-wide ownership/anchor-closure validation is a hard B2 prerequisite
-before any untrusted draft publication or general import. The reader verifies
-owner record kind 100 when present, but full network-manifest verification and
-exactly-one-layer-per-distribution-network constraints remain to be implemented.
-
-DVMDB's archived submodule snapshot in the B1.1 input predates the A2/A3 MODEL
-annotation types. Update the actual MODEL Git submodule to the committed new
-MODEL contract as part of the **coordinated B1.2 update**. That step must also
-remove the old 18th hydraulic collection from DVMDB's adapter and fixtures;
-otherwise a full build with A3 MODEL will intentionally fail. No legacy shim
-will be added.
-
-## B1.2 — clean hydraulic contract transition
-
-The native hydraulic collection manifest is now **17** collections (member
-kinds `1..17`; kind `18` is retired), with manifest version **3**. This is an
-intentional pre-release format break; old 18-collection manifolds are rejected,
-not migrated. The canonical MODEL dependency must provide the **A3** types,
-with the independent annotation codecs and without `HydraulicMapLabel`.
-CMake rejects a stale MODEL submodule at configure time. Tests previously
-using labels to exercise general membership/merge/history behavior now use
-ordinary hydraulic generic curves; annotation-specific storage is tested in
-its independent record suite.
-
-The B1 record tests also commit a real hydraulic distribution root and its
-annotation layer in **one immutable revision**, then reload both at that
-pinned revision. This proves the record formats coexist, not that the
-exactly-one-layer ownership rule is enforced on all ingress paths. Mandatory
-candidate-wide ownership closure, referential integrity, and trusted layer
-creation for every new network remain **B2/B3**, respectively. In particular,
-`fullDraftHydraulicDistributionNetworkChanges` is not yet an all-domain
-project initializer and must not be mistaken for one.
-
-## B2 — Candidate-wide semantic integrity validator
-
-`AOWIS::DvmdbAnnotationIntegrity` now provides
-`annotations::validateAnnotationSnapshot(const MergeCandidate&)`. It accepts
-**the complete pinned candidate**, not a delta, and returns a diagnostic on
-failure. It checks:
-
-- Every format-3 Distribution root has **exactly one** layer; two networks may
-  not claim the same layer. The pre-network Drainage scope allows zero or one
-  separate, ownerless layer.
-- Canonical, typed hydraulic aggregates and native annotation layers are
-  reconstructed through their existing adapters before trusting references.
-  Their exact native record closure is checked against the enumerated keys:
-  no unowned member, dangling chunk, reused member, or unknown record kind.
-- Attached annotations can refer only to junctions, reservoirs, tanks or
-  demand points **in the layer's own Distribution network**, with an exact
-  canonical MODEL `entity_type`, not merely a matching UUID or record kind.
-- The independent layer adapter continues to check exact canonical root,
-  membership and member bytes, serialized references, and anchor existence.
-  Native reverse-index consistency remains the responsibility of the native
-  store's existing physical/reference verifier.
-
-This validation is an explicit **pre-publication prerequisite**, not a
-retroactive guarantee that all current `commitModel`, working-copy save,
-import, merge or history paths invoke it. The old hydraulic-only merge
-validator will still fail closed on annotation records until B3/B4 integrate
-annotation-aware reconciliation. **Never expose an untrusted annotation writer
-before wiring this validator to the actual fenced publication boundary**;
-validating one layer alone does not establish project-wide consistency.
-
-The B2 tests construct full in-memory candidates including real canonical
-hydraulic roots and typed entities; they include adversarial duplicate layers,
-missing owners, orphans, wrong kinds, cross-network anchors and mixed scopes.
-
-## B3.1: server-owned draft edit materialization
-
-`materializeDraftAnnotationEdits` is a **pure planner**, not a writer. It
-accepts canonical `map.annotation` MODEL entity edits in original action order
-against one pinned draft view, verifies every before-image, and derives only
-the changed native annotation member/chunk/layer records (including tombstones).
-It supports sequential edits to the same annotation and preserves membership
-ordering. It refuses missing layers, foreign MODEL entity types, malformed
-payloads and foreign UUID collisions. It uses only the existing MODEL codec.
-
-This planner must not be called with unrelated/native member kinds, nor may its
-result be saved with `saveWorkingCopyChanges` independently of the originating
-MODEL events. **B3.2 still must** route it through the fenced,
-generation-checked `saveWorkingCopyTransactions`, validate the complete
-candidate against B2 *before* publication, and use the identical action bytes
-for the durable journal and for replay. Also ensure network bootstrap/import
-create their required empty annotation layer atomically, because B2 requires
-exactly one Distribution layer per network. Until then, B3.1 is not exposed
-as an HTTP write API and does not claim complete atomic publication.
-
-## B3.2 — Fenced draft HTTP publication (current increment)
-
-The HTTP `POST /dvmdb/v1/working-copies/{draft}/save-events` endpoint accepts an
-optional `annotationLayerId` (canonical UUID string) alongside existing
-`sessionId`, `fencingToken`, `expectedGeneration`, `changes`, and `events`.
-The event frames must contain canonical `map.annotation` MODEL before/after
-edits addressed to that one layer. `changes` is **not** the way to send
-annotation member/chunk/root bytes: native kinds 110/111/112 are server-owned.
-
-The handler pins the draft's generation, checks the non-annotation before-images,
-materializes the annotation edit batch against the pinned pre-edit candidate,
-then validates the **complete resulting project candidate** using the B2
-validator. It passes the derived record delta and **original event frames** to
-`ProjectService::saveWorkingCopyTransactions`; that service rechecks the lease,
-fencing token and generation and atomically fsyncs the candidate and journal.
-The logical request fingerprint (not derived chunk bytes) allows exact
-replays after lost HTTP acknowledgements without reapplying membership edits.
-
-Distribution network bootstrap and full-network import create their empty
-annotation layers in the **same** working-copy save. The layer UUID is a
-namespaced deterministic UUIDv8 derived from the network's UUID, so a
-retransmitted initialization request identifies the same native layer.
-
-Read API:
-
-- `GET /dvmdb/v1/working-copies/{draft}/annotation-layers/{layer}` returns
-  one pinned draft generation and ordered canonical annotation payloads.
-- `GET /dvmdb/v1/projects/{project}/branches/{branch}/annotation-layers`
-  lists layer IDs/owners/counts at a single selected immutable revision.
-- `GET /dvmdb/v1/projects/{project}/branches/{branch}/annotation-layers/{layer}`
-  returns canonical member payloads at that immutable revision. The existing
-  `?revision=` selector follows normal branch/revision reachability rules.
-
-The whole-candidate HTTP preflight is performed before acquiring the draft
-writer lock to avoid reversing the project's lock order. The generation CAS
-makes a successful preflight immutable relative to the subsequent Save: a
-concurrent edit changes the generation and the Save is rejected. This is an
-initial correctness-first implementation: enumerating the complete base-model
-record set is O(project size) on each validated HTTP Save and needs future
-incremental indexing/performance work.
-
-**Scope limitations:** This increment integrates the **working-copy HTTP**
-writer and its reader/bootstrap routes. It does **not** yet enforce B2 in
-native `Repository::commitModel`, the direct branch hydraulic commit route,
-merges, bundle import, archive verification or historical action replay.
-Those paths remain on the B4/final integration checklist; do not claim that
-all possible repository ingress paths enforce annotation integrity yet.
-
-## B4.1 — annotation-aware revision merge preflight
-
-The domain merge route now uses `annotations::mergeDistributionAnnotationBranches`,
-which retains the existing hydraulic object-choice and membership resolver,
-but adds field-aware MODEL merging of **existing annotation members** with
-unchanged anchor references. It verifies the **entire** combined hydraulic and
-annotation snapshot through B2 before any diverged merge or fast-forward
-publication. The generic HTTP merge route detects hydraulic roots and native
-annotation layer roots in the pinned input revisions, forwarding those merges
-to the domain validator; raw/unrelated generic merges keep their previous path.
-
-Concurrent modifications to annotation membership chunks or layer roots are
-**not automatically reconciled in B4.1**: they result in a merge conflict,
-including independent additions that modify the same membership chunk.
-Explicit annotation field choices are not yet supported by the domain wrapper;
-unused selections are rejected. The planned B4.2 work adds coordinated
-membership reconciliation, and B4.3 covers archived action replay and imported
-revision candidates. A native caller that directly invokes unvalidated generic
-`Repository::mergeBranches` is not automatically domain-validated: callers must
-use the domain adapter or supply equivalent `MergeOptions` before publication.
-
-The merge regression test exercises nonconflicting member-field reconciliation,
-same-field conflict (HEAD unchanged), source fast-forward with an invalid
-missing layer (rejected), and revision immutability after merging.
-
-## B4.2 — ordered three-way annotation membership merging
-
-The annotation-aware merge reconstructs every affected layer against the
-actual common-ancestor, target and source revision snapshots, *before* the
-native store writes any pack objects or publishes HEAD. The native merge
-provides a read-only ancestor reader to a second reconciliation callback; the
-existing hydraulic reconciliation still executes first. This extension is
-optional and has no effect on other repository merge clients.
-
-Native annotation-layer roots and membership chunks (kinds 110/111) may
-temporarily resolve to one branch's structural record, but that record is
-**never published as-is**. The three-way reconciler reconstructs canonical
-chunk boundaries and root references from the merged ordered annotation
-sequence. This is essential for two branches independently allocating the
-same deterministic chunk UUID, especially at the 256-member limit.
-
-- Unchanged baseline members retain baseline order; one-sided deletions are
-  retained as deletions unless the user explicitly selects a surviving
-  delete-vs-modify object. Both branches' additions are appended in target
-  order first, then source order, deduplicated by UUID.
-- A one-sided reorder is preserved when the other branch's membership is
-  unchanged. Concurrent ordering changes are **not** silently linearized;
-  those require an explicit resolution workflow not yet exposed through HTTP.
-- Native whole-object choices for genuine annotation member conflicts
-  (including delete-versus-modify) are honored, with historical membership
-  restored when the chosen object survives. Explicit per-field annotation
-  conflict choices remain a separate follow-up.
-- Absent/different network ownership and concurrent changes to layer
-  metadata with no unambiguous three-way answer are conflicts. Unknown
-  record kinds, missing anchors, orphaned members and invalid references
-  still fail B2 candidate verification.
-- Every superseded native chunk or member record is tombstoned in the
-  ephemeral candidate, and the complete candidate passes normal reference
-  preflight and B2 validation before publication. Old revisions are untouched.
-
-Covered by the expanded `aowis-dvmdb-annotation-merge-tests` target: parallel
-first-chunk additions, 255-to-257 boundary splitting, exact membership order,
-object-level delete/modify choices, concurrent reorder conflicts and immutable
-historical snapshots. Imported history/action replay is still **B4.3**.
-
-## B4.3.1 — Authenticated chronological action order
-
-For independent edits, replaying a reordered sequence can still produce the
-identical immutable endpoint. Comparing native deltas is insufficient to prove
-which historical state came after each action. The annotation replay verifier
-therefore requires the **authenticated action-chain SHA-256 digest** from the
-verified local Commit, separate from the untrusted event sequence being checked.
-DVMDB already persists `action-chain` and verifies it when reading the immutable
-Commit sidecar. `RevisionNativeActionWitness::authenticatedActionChain` exposes
-the corresponding digest to the MODEL-aware replay planner. The digest algorithm
-is identical to the existing DVMDB journal chain: 32 zero bytes initially,
-then SHA-256(previous digest concatenated with each raw MODEL frame).
-
-Replayers must pass the chain from a trusted revision witness; hashing the
-caller-supplied action vector on the fly and passing that as the expected chain
-would destroy this chronological proof. Transaction UUIDv7 ordering is not a
-substitute for an authenticated archive sequence. The original Commit archive
-remains immutable and no stored format migration is required.
-
-## B4.3.1 — Immutable annotation-only MODEL archive replay proof
-
-`map_annotation_action_replay.h/.cpp` supplies a **read-only proof primitive**
-for archived annotation-only MODEL transactions. It accepts complete parent
-and committed native snapshots, exact archived action bytes (oldest first),
-and the actual native revision delta from a verified local Commit witness.
-
-It reconstructs intermediate states through the server-owned annotation draft
-materializer and validates the *entire* network-and-annotation candidate after
-each action. It must reproduce both the byte-exact committed snapshot and the
-actual native change set. `actionPosition` selects a boundary, returning a
-minimal overlay relative to the immutable parent. Multi-layer edits are
-attributed by immutable membership, without accepting an untrusted HTTP layer
-selector. It rejects stale images, duplicate transaction identities, unknown
-entity types, unjournaled native modifications, and unprovable ownership.
-
-**Not yet a general History implementation:** The existing hydraulic History
-planner cannot consume this proof, nor safely publish annotation positions.
-Mixed hydraulic/annotation actions, a network/layer creation checkpoint,
-archived History forks, and create-then-delete annotations absent from both
-immutable snapshots currently fail closed. The last case requires durable
-owner-layer provenance in the canonical MODEL action envelope: inventing an
-owner from the number of layers in a project would be unsafe. These gaps need
-a coordinated MODEL/DVMDB revision before enabling GUI annotation Undo/Redo.
-
-**Imported histories:** The native revision bundle verifies hashes, Merkle
-structure, and reference indices, but it does not carry a trusted local
-MODEL action archive. Imported revisions are therefore **checkpoints**, not
-action-navigable histories. Generalizing candidate-wide B2 semantic validation
-to untrusted bundle pre-publication (including every imported revision) and
-to generic direct native commits remains an explicit B4.3 follow-up. Do not
-claim this read-only helper enforces those ingestion boundaries.
-
-
-## B4.3 — durable MODEL action owner provenance
-
-The canonical `ModelEntityEdit` for `map.annotation` now includes a required
-`ownerLayerId`, authenticated by the transaction frame (version 2) and the
-immutable ordered SHA-256 Commit action chain. Ordinary hydraulic edits have
-no owner field and no extra encoded bytes. The HTTP `annotationLayerId` request
-parameter must match every included annotation edit's authenticated owner; it
-is not authoritative archival provenance. The native annotation materializer
-verifies the same owner before making any changes.
-
-The archive replay verifier uses `ownerLayerId` to attribute every action, even
-when an annotation is created and deleted between immutable endpoints. It also
-checks the parent/child membership owners for consistency and rejects any
-owner switch of the same annotation UUID during one archive. This change does
-not yet connect mixed hydraulic/annotation History navigation or generic
-direct Commit validation; those are separate B4.3 requirements. Old MODEL
-transaction frames without ownership are intentionally rejected.
-
-### HTTP local Commit candidate preflight (B4.3 incremental)
-
-The HTTP `POST /dvmdb/v1/local-commits` handler independently checks the
-complete saved candidate against `validateAnnotationSnapshot` immediately
-before invoking the existing fenced `ProjectService::commitWorkingCopy`. This
-closes the HTTP pathway where a library-side Save could have supplied native
-records without the HTTP `save-events` validator. Replayed Commit operation
-UUIDs are reconciled by ProjectService rather than validated against a
-newly rebased draft. Generation, base revision, lease and fencing checks
-prevent publication after a concurrent change between preflight and Commit.
-
-**Remaining boundary:** direct library callers of `ProjectService::commitWorkingCopy`
-still need a native pre-publication domain validation contract. This HTTP
-preflight is not a substitute for that or for mixed-history replay.
-
-## Native local Commit semantic gate (B4.3 increment)
-
-`ProjectService::commitWorkingCopy()` cannot rely on a prior HTTP Save: native
-callers can place raw `ModelChange` records into the draft. For candidates with
-annotation records (110–112), or a newly saved Distribution root (100), the
-Qt-free service requires a semantic candidate-validation callback. It resolves
-the complete pinned immutable base plus the saved draft overlay under the
-project operation and draft locks, calls the supplied validator, and rejects
-unvalidated or invalid candidates **before** creating a local Commit intent,
-revision index, or advancing HEAD. The callback must be pure; it must not
-call `Repository`/`ProjectService` again or retain candidate readers.
-
-The HTTP Commit route supplies the B2 `validateAnnotationSnapshot()` callback;
-this is not an HTTP-only integrity rule. Ordinary generic record repositories
-still Commit without a domain validator. Rejected new operations leave the
-same operation UUID available for a corrected retry. Already-succeeded and
-pending operations retain the existing durable idempotency semantics.
-
-**Remaining boundary:** direct legacy-style revisions which already contain a
-Distribution root *without any annotation layer*, and which only modify an
-ordinary hydraulic member, are not forced through this callback. That format
-is unsupported for new project initialization, but older native test fixtures
-still exercise it. Full fail-closed treatment of direct `commitModel()` and
-all historic root-only native fixtures remains a separate consolidation step.
-
-## B4.3 direct MODEL Commit preflight (native service)
-
-`ProjectService::commitModel()` and `commitModelAtExpectedHead()` now provide a
-pure `MergeCandidate` semantic-validation hook. The service builds the complete
-candidate from the immutable observed HEAD and submitted changes. If the base
-or changes contain native annotation record kinds 110–112, the hook is mandatory,
-even for edits that only touch unrelated generic records. Both methods reject
-invalid candidates before revision publication and preserve HEAD on rejection.
-The generic HTTP `model-commits` route supplies B2's
-`validateAnnotationSnapshot()`, exactly as the local-Commit route does. When
-validation is needed, even an unpinned direct writer pins the observed HEAD
-for the final native storage CAS, avoiding a stale preflight publication.
-
-This validates native MODEL **structure and ownership**, not hydraulic solver
-readiness. It deliberately does not require a connected or hydraulically
-solvable network. This increment preserves older root-only hydraulic test
-fixtures: direct root-only submissions without any annotation record are not
-yet forced to supply the semantic validator. Similarly, callers using the
-low-level `Repository::commitModel()` directly bypass ProjectService. Both
-remaining boundaries must be closed before claiming universal native
-engineering-publication integrity. The complete-candidate scan is currently
-O(number of records) and should be optimized before large-network benchmarks.
-
-## B4.3 — Low-level Repository Commit preflight
-
-`Repository::commitModel()` is a native API callable without HTTP or
-`ProjectService`. Under the repository's file/operation lock, it now builds
-an immutable MODEL candidate from the committed HEAD and the proposed changes.
-If **any** original or proposed record has annotation kind 110–112, the caller
-must supply a `MergeCandidate` semantic validator. A supplied validator runs
-before reference preparation, object writes, Commit revision creation, or
-branch HEAD update; failure leaves pack and HEAD untouched. The high-level
-Commit entry points forward their existing validator to this boundary.
-
-This native store stays free of MODEL/Qt dependencies: trusted engineering
-adapters must supply the actual B2 validator, not a permissive placeholder.
-Ordinary generic-model repositories still work without such a callback.
-When retrying an already durable pending local Commit after a crash, a missing
-annotation validator returns a caller error **without** permanently rejecting
-the intent; retry with the real domain adapter to complete it.
-
-**Performance and scope:** The native Commit guard now classifies immutable
-SHA-256 MODEL trie subtrees for annotation kinds 110–112. A bounded volatile
-cache proves that unchanged subtrees contain no annotations. Generic MODEL
-Commits with no validator no longer enumerate the whole previous snapshot;
-new or modified subtrees are inspected, and final reference-index validation
-still runs in the normal Commit pipeline. A Commit involving annotations,
-including one that *deletes the final annotation*, still requires a semantic
-validator. If a validator is supplied explicitly, it receives the complete
-pinned candidate even for generic records; there is no semantic shortcut.
-
-The cache is not persisted and may be evicted; reopening a repository may
-require one full classification pass, never a weaker validation decision.
-Root-only legacy hydraulic fixtures (kind 100 without annotation records) and
-direct low-level `writeRevision()` publication still need explicit
-engineering-format policy. Neither network connectivity nor hydraulic solver
-feasibility is a persistence condition.
-
-## B4.3 indexed Commit witness for annotation-only History (read-only)
-
-`verifyIndexedAnnotationActionBoundary()` connects the annotation MODEL replay
-primitive to **actual**, indexed, first-parent local Commits. It requests a
-`RevisionNativeActionWitness` from `ProjectService`, including the verified
-ordered SHA-256 action chain and complete native delta, then loads both full
-MODEL snapshots by pinned immutable revision UUID. A malformed or missing
-archive, initial Commit without a parent, forked archive, mixed MODEL event,
-wrong action coordinate, abandoned Redo suffix, ownership violation or unjournaled native delta
-fails closed. Intermediate action boundaries are returned as native deltas
-relative to the original immutable parent, **not** a draft-relative overlay.
-
-This increment is intentionally **read-only**: it does not change HTTP
-navigation, write any History cursor or claim that mixed hydraulic/annotation
-Undo/Redo works. Next: combine the hydraulic and annotation replay planners
-into one exact, all-domain candidate under the existing fenced/idempotent
-History publication operation; keep per-domain action order and ownership.
-
-### B4.3 — Fenced archived annotation navigation
-
-Annotation-only local Commit archives with an immutable first parent can now
-use the same `/working-copies/{draft}/history/navigate` endpoint and native
-atomic History publisher as hydraulic archives. The server classifies the
-original authenticated MODEL action frames; the client does not select the
-replay engine or provide candidate records. Archive SHA-256 ordering, exact
-revision delta, ownerLayerId and intermediate snapshots are proven before
-computing a complete HEAD-relative replacement overlay. The native publisher
-rechecks the lease, generation, HEAD, revision and Commit identity. Retries
-reuse the same operation UUID and never advance generation twice. Mixed
-hydraulic/annotation actions, forked archives and initial checkpoints are
-still refused for annotation action navigation until joint replay is proven.
-This is structural integrity validation, not a hydraulic simulation gate.
-
-### B4.3 — Verified combined hydraulic/annotation action boundaries (bounded scope)
-
-`replayVerifiedCombinedActionBoundary()` reuses the authenticated immutable
-local-Commit action chain and exact parent/child native delta proof, now applying
-both domains within the same chronological MODEL transaction. It accepts
-canonical annotation creates/updates/deletes (with authenticated `ownerLayerId`)
-and existing hydraulic entity **updates**, plus reversible hydraulic network-root
-metadata edits. Every complete intermediate candidate runs B2 semantic integrity
-validation; the terminal candidate must match **every byte and reference** of
-the immutable committed revision, and the native delta must match exactly.
-The same indexed Commit witness, checkpoint planner and fenced/idempotent
-History publisher serve combined archives, including transactions that contain
-edits from both domains. HTTP dispatch derives domain classification only from
-the authenticated MODEL frames.
-
-### B4.3 — Verified native hydraulic membership replay
-
-The mixed replay verifier now also applies hydraulic member creation and deletion
-through `materializeDraftMembership()`, the same deterministic native-owned
-kind-100/kind-101 chunk/manifest writer used by ordinary draft Saves. Each
-canonical MODEL edit supplies its own before/after image and type, while the
-native helper derives the exact entity reference index. Member insertions
-append in the MODEL event's order, and deletions preserve surviving member
-order. Every complete action is structurally validated, and the full replayed
-snapshot (including chunk serials, indices and member payloads) must match the
-authenticated immutable revision byte-for-byte. A mismatch in insertion order
-or unjournaled native mutation is rejected, not approximated.
-
-Hydraulic MODEL member events currently lack an authenticated network-owner
-field. For this reason the replay verifier proves ownership from the original
-and committed native membership graphs. A transient member absent at both
-endpoints can be replayed only when the revision has **exactly one** surviving
-network root; with two or more roots it is rejected as ambiguous. Cross-network
-member reassignment, network creation/deletion, imported revisions lacking
-authenticated action archives, and unsupported History forks remain
-checkpoint-only. Old reverse-preview APIs remain conservative and are not
-used as the new mixed archived History publisher.
-
-Unsupported changes fail before any working-copy cursor or overlay publication;
-they are never silently dropped. Structural/model-integrity constraints are
-unchanged, and neither connectivity nor successful hydraulic simulation is
-required for saving or History navigation.
-
-### Live working-copy annotation History
-
-The `/working-copies/{draft}/history/navigate` endpoint now verifies retained
-active MODEL journals containing annotations, including journal actions mixing
-hydraulic root/member edits with annotation edits. The server replays **all**
-retained frames from the immutable draft base, checks the reconstructed state
-at the **currently persisted** action cursor (which may precede the Redo tip),
-then constructs the requested boundary's complete candidate relative to HEAD.
-The established atomic draft publisher protects lease, generation, HEAD and
-idempotent operation identity. Creating a new edit after Undo discards the Redo
-suffix through the unchanged atomic Save path. Hydraulic-only journals continue
-using their original single-network History planner.
-
-An active journal can also originate from a verified annotation-only or
-combined immutable Commit boundary. Its archived source revision, action
-position, and operation ID are verified independently before reconstructing
-its logical starting model. New journal actions replay from that archived
-boundary, but the replacement overlay is calculated relative to physical
-HEAD, never relative to the archived fork state. This prevents abandoned
-archived Redo actions from reappearing. An incomplete, nonlocal, or unsupported
-fork witness fails closed; the existing immutable archive is never rewritten.
-
-Unborn annotation drafts can navigate their active MODEL journal without a
-fabricated immutable parent. The server reconstructs their unjournaled
-Distribution root and annotation-layer seed by reversing actions from the
-saved cursor, then replays the original ordered journal forward and checks
-exact native bytes at that cursor. The reconstructed seed is a baseline,
-**not** an Undo action. Unborn journals containing deletions of preexisting
-members remain non-navigable where reversing them would invent their prior
-membership indices. The history cursor only advertises boundaries whose
-full replay proof succeeds. Publication remains protected by the native
-lease, null-HEAD, generation, and idempotency fences. Hydraulic member transient ownership in
-multi-network History remains fail-closed where immutable endpoints cannot
-prove the owning network. The live journal is fsync-pinned, not an immutable
-Commit witness: its digest must never be described as authenticated by a
-Commit's SHA-256 action chain.
-
-## B4 final audit — import/publication integrity (2026-11-18)
-
-**Native revision-bundle imports now enforce semantic validation before any
-pack or branch writes.** `Repository::importRevisionBundle` visits every
-newly transferred model-indexed revision (including historical parents and
-merge parents), deduplicates identical immutable model roots, and rejects
-engineering roots/annotation records when no validator was supplied. For
-validated engineering candidates, it invokes the caller's full-candidate
-semantic validator against that exact revision snapshot, not merely the tip.
-The HTTP import route and the Qt-backed `aowis-dvmdb-sync` executable provide
-B2 `validateAnnotationSnapshot`. The Qt-free sync tool cannot validate MODEL
-semantics and therefore rejects engineering bundle imports; generic bundle
-imports still work. On a semantic rejection, no objects are written and no
-branch is created or advanced. Existing locally verified incremental-base
-revisions remain trusted; only newly carried revisions are rechecked.
-
-This remains **structural/model integrity**, not hydraulic simulation or
-solvability validation. Native record kinds 1–17 without a distribution root
-cannot always be distinguished from generic native MODEL records by the
-Qt-free repository. Never treat an arbitrary native record of kind 1 as
-sufficient evidence of an engineering network. An independent, legacy direct
-hydraulic editor still uses low-level Commit without passing the B2 callback,
-and old root-only fixtures remain outside the strict new annotation format.
-Those APIs must either accept and forward an explicit validator or be retired
-before being advertised as supported engineering publication interfaces.
-
-**Performance qualification status:** the native Commit guard uses a bounded
-immutable-subtree cache to avoid whole-snapshot scans for generic no-validator
-Commits. `aowis-dvmdb-model-commit-gate-benchmark` measures median/max latency
-for repeated single-record Commits at two model sizes and reports process peak
-RSS on Linux. Run, for example:
-
-```bash
-cmake --build build-linux-tests --target aowis-dvmdb-model-commit-gate-benchmark -j 8
-./build-linux-tests/aowis-dvmdb-model-commit-gate-benchmark 1024 16384 12
-```
-
-One Qt-free Debug/portable SHA-256 run in the development container measured
-median 3.820 ms at 1,024 generic records versus 3.533 ms at 16,384 records
-(0.925x); peak process RSS was 4,828 KiB. This is a **generic MODEL no-validator**
-measurement, not a hydraulic/annotation semantic-validator benchmark or a
-production-scale guarantee. Large-network B2 validator throughput, peak memory,
-History replay cost, interrupted writes, and replication on slow storage still
-require workload qualification. Imported immutable revisions without original
-locally indexed action archives are valid History checkpoints, not invented
-action-by-action Undo/Redo histories.
-
-## B4 closeout — retirement of direct hydraulic HTTP writers
-
-The two old branch-level HTTP POST routes (`/networks` and
-`/networks/{networkId}/edits`) now return **410 Gone** with
-`legacy_hydraulic_write_retired`. They do not decode a payload, write a
-revision, or move HEAD. Their original direct-commit behavior bypassed the
-MODEL action journal and could create a Distribution root without its
-required annotation layer. Revision-pinned GET routes remain supported.
-
-All supported HTTP engineering writes use the working-copy initialization /
-import, journaled `save-events`, and fenced `local-commits` APIs. This is a
-breaking retirement (no production compatibility guarantee). The legacy
-**native** hydraulic save/edit helpers remain available for historical test
-fixtures and benchmarks, not as supported production publication paths;
-their low-level engineering-root policy still requires a separate audit.
-Hydraulic solvability is never a storage validation prerequisite.
+## Implemented native boundaries and remaining qualification
+
+The standalone native annotation builder and loader are not write APIs. The
+HTTP `save-events` route materializes and validates the annotation and
+hydraulic record delta, then persists it atomically with its MODEL journal
+inside a fenced private draft. `local-commits` publishes the draft to an
+immutable revision. Revision-pinned reads, branch merges, immutable history,
+and verification operate over this combined engineering candidate. Legacy
+raw direct-to-branch hydraulic POST routes remain HTTP 410.
+
+Generic raw Save and direct MODEL Commit are for non-engineering projects only;
+engineering records already present in the pinned candidate or proposed by a
+request are rejected before publication. Native Commit and merge require an
+explicit full candidate validator for engineering kinds, including orphan
+members and fast-forward merges. Generic records in the old 1–17 space remain
+ordinary opaque records, never inferred to be hydraulic.
+
+The older native hydraulic convenience writers are not the canonical editing
+entry point and require migration to the event-backed path; use the working
+copy MODEL journal for normal editing. Before treating Phase B as fully
+qualified, execute the Qt-backed integration and existing hydraulic workload
+suite, plus a power-cut/restart annotation edit test on a supported host.

@@ -158,7 +158,7 @@ void testCorruptReferences() {
     owner.kind = 100;
     model.emplace(db::record::keyFromUuid(uuid(1)), owner);
     const std::map<db::Key, db::ModelRecord> valid = model;
-    model.at(db::record::keyFromUuid(annotation(9).uuid)).kind = 17;
+    model.at(db::record::keyFromUuid(annotation(9).uuid)).kind = 217;
     mustReject([&]() { ann::loadAnnotationLayer(reader(model), layer.uuid); },
                "wrong member kind must be rejected");
     model = valid;

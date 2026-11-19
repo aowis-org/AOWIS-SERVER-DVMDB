@@ -227,6 +227,10 @@ enum class HydraulicEntityType : std::size_t {
     RuleControl
 };
 
+// Authoritative native record-kind mapping for the 17 manifest collections.
+// History replay must not duplicate these numeric kinds.
+std::uint16_t hydraulicMemberKindForCollection(std::size_t collection);
+
 // Decode one canonical MODEL hydraulic member image into its exact native
 // payload/reference representation and manifest collection ordinal. History
 // replay uses this same encoder as the native membership writer; it never

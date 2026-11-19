@@ -15,10 +15,10 @@
 
 namespace aowis::dvmdb::hydraulic {
 
-// These local storage-kind values follow the native model-record contract, not
-// a finalized global entity catalog. Payloads use ModelCodec<T>.
-inline constexpr std::uint16_t junctionKind = 1;
-inline constexpr std::uint16_t pipeKind = 4;
+// Native hydraulic kinds use the reserved 201..217 range. Ordinary generic
+// MODEL callers retain their own kinds (including 1..17). Payloads use ModelCodec<T>.
+inline constexpr std::uint16_t junctionKind = hydraulicMemberKindBase + 1;
+inline constexpr std::uint16_t pipeKind = hydraulicMemberKindBase + 4;
 
 Key keyFromUuid(const QUuid& uuid);
 QUuid uuidFromKey(const Key& key);

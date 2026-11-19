@@ -30,10 +30,6 @@ void ensure(bool condition, const char* description) {
         throw StorageError(StorageErrorKind::Corruption, description);
 }
 
-bool isHydraulicMemberKind(std::uint16_t kind) {
-    return kind >= 1 && kind <= 17;
-}
-
 bool isKnownKind(std::uint16_t kind) {
     return isHydraulicMemberKind(kind) || kind == 100 || kind == 101 ||
            kind == annotationLayerKind || kind == annotationChunkKind ||

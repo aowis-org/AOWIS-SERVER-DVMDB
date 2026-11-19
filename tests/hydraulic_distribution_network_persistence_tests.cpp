@@ -2,6 +2,8 @@
 #include "aowis/dvmdb/hydraulic_distribution_network_persistence.h"
 #include "aowis/dvmdb/project_service.h"
 #include "aowis/dvmdb/revision_record.h"
+#include "aowis/dvmdb/map_annotation_snapshot_validation.h"
+#include "aowis/dvmdb/map_annotation_persistence.h"
 #include <aowis/model/edit/hydraulic_distribution_root_edit.h>
 
 #include <aowis/dvmdb/model_validation.h>
@@ -17,6 +19,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
+#include <iterator>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -36,6 +39,23 @@ namespace hydraulic = aowis::dvmdb::hydraulic;
 
 void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
+}
+
+// A hydraulic network cannot be published without its native annotation layer.
+// The two records are one engineering snapshot and one atomic first revision.
+std::vector<native::ModelChange> initialEngineeringSnapshot(
+    const NetworkHydraulicDistribution& network) {
+    std::vector<native::ModelChange> changes =
+        hydraulic::fullDraftHydraulicDistributionNetworkChanges(network);
+    MapAnnotationLayer layer;
+    layer.uuid = native::annotations::distributionLayerUuid(network.uuid);
+    layer.domain = MapAnnotationDomain::Distribution;
+    layer.owner_network_uuid = network.uuid;
+    std::vector<native::ModelChange> annotations =
+        native::annotations::fullDraftAnnotationLayerChanges(layer, {});
+    changes.insert(changes.end(), std::make_move_iterator(annotations.begin()),
+                   std::make_move_iterator(annotations.end()));
+    return changes;
 }
 
 QUuid uuid(int ordinal) {
@@ -211,6 +231,18 @@ void exerciseUuidV7Hydraulic() {
             saved = hydraulic::saveHydraulicDistributionNetwork(repository, project, "main", baseline, initial, commitMetadata());
             require(saved != initial && repository.head(project, "main") == saved,
                     "UUIDv7 hydraulic save did not publish a fresh revision");
+            // Distribution and presentation are one atomic revision, not two
+            // independently published snapshots. The first native Save must
+            // install a deterministic, initially empty annotation layer.
+            const QUuid annotationLayerId = native::annotations::distributionLayerUuid(baseline.uuid);
+            const std::optional<native::annotations::AnnotationLayerSnapshot> annotationLayer =
+                native::annotations::loadAnnotationLayerAtRevision(
+                    repository, project, saved, annotationLayerId);
+            require(annotationLayer.has_value() &&
+                    annotationLayer->layer.owner_network_uuid == baseline.uuid &&
+                    annotationLayer->layer.uuid == annotationLayerId &&
+                    annotationLayer->annotations.isEmpty(),
+                    "initial network commit did not atomically bootstrap its annotation layer");
             const std::optional<NetworkHydraulicDistribution> loaded =
                 hydraulic::loadHydraulicDistributionNetworkAtRevision(repository, project, saved, baseline.uuid);
             require(loaded.has_value(), "UUIDv7 hydraulic distribution network missing after save");
@@ -1028,9 +1060,10 @@ void exerciseUuidV7HydraulicMerges() {
                     "main", "feature", unused, commitMetadata());
             }), "unused UUIDv7 hydraulic object choice was silently accepted");
 
-            // A generic model record can be valid for the native model index
-            // but invalid as a hydraulic-distribution-network member. Fast-forward must
-            // run the whole-network validator before moving the target HEAD.
+            // The native publication guard prevents an orphan hydraulic
+            // member revision from being created at all. Previously this
+            // fixture intentionally committed an invalid source branch and
+            // depended on merge validation to reject it later.
             require(repository.createBranchAtRevision(project,
                 "invalid-left", "main", base) == base, "cannot create invalid merge target");
             require(repository.createBranchAtRevision(project,
@@ -1039,17 +1072,17 @@ void exerciseUuidV7HydraulicMerges() {
             const std::optional<native::ModelRecord> member = repository.getModelAtRevision(
                 project, base, existingKey);
             require(member.has_value(), "missing hydraulic member fixture");
-            const native::RevisionId badTip = repository.commitModel(
-                project, "invalid-right", {{hydraulic::keyFromUuid(uuid(9701)), *member}}, commitMetadata(), base);
             const std::uint64_t sizeBefore = repository.packSize();
-            const native::MergeResult invalid = hydraulic::mergeHydraulicBranches(
-                repository, project, "invalid-left", "invalid-right",
-                hydraulic::HydraulicMergeSelections{base, badTip, {}, {}}, commitMetadata());
-            require(invalid.status == native::MergeStatus::Conflicts &&
-                    repository.head(project, "invalid-left") == base &&
-                    repository.head(project, "invalid-right") == badTip &&
+            require(throwsStorageError(native::StorageErrorKind::InvalidInput, [&] {
+                (void)repository.commitModel(
+                    project, "invalid-right", {{hydraulic::keyFromUuid(uuid(9701)), *member}},
+                    commitMetadata(), base, false, std::nullopt,
+                    native::annotations::validateAnnotationSnapshot);
+            }), "invalid orphan hydraulic commit was accepted");
+            require(repository.head(project, "invalid-left") == base &&
+                    repository.head(project, "invalid-right") == base &&
                     repository.packSize() == sizeBefore,
-                    "invalid UUIDv7 hydraulic fast-forward published a corrupt network");
+                    "rejected invalid engineering commit modified immutable history");
             (void)repository.verifyRepository();
             (void)repository.compact();
         }
@@ -1800,8 +1833,8 @@ void exerciseInt00IncompleteNetworkRoundTrip() {
             native::Repository repository(folder);
             const native::RevisionId root =
                 repository.createRootBranch(project, "main", commitMetadata());
-            committed = repository.commitModel(project, "main", draftChanges,
-                                               commitMetadata(), root);
+            committed = hydraulic::saveHydraulicDistributionNetwork(
+                repository, project, "main", incomplete, root, commitMetadata());
             require(repository.createBranchAtRevision(project, "explore-fix", "main", committed) ==
                     committed, "INT-00 could not branch from incomplete network");
             require(repository.head(project, "main") == committed &&
@@ -1912,10 +1945,12 @@ void exerciseAtomicRootMetadataEdit() {
             native::Repository repository(rootPath);
             const native::RevisionId emptyHead =
                 repository.createRootBranch(project, "main", commitMetadata());
-            const native::RevisionId originalRevision = repository.commitModel(
-                project, "main", records, commitMetadata(), emptyHead);
+            const native::RevisionId originalRevision =
+                hydraulic::saveHydraulicDistributionNetwork(
+                    repository, project, "main", before, emptyHead, commitMetadata());
             updatedRevision = repository.commitModel(
-                project, "main", {materialized}, commitMetadata(), originalRevision);
+                project, "main", {materialized}, commitMetadata(), originalRevision,
+                false, std::nullopt, native::annotations::validateAnnotationSnapshot);
             const std::optional<NetworkHydraulicDistribution> committed =
                 hydraulic::loadHydraulicDistributionNetworkAtRevision(
                     repository, project, updatedRevision, changed.uuid);
@@ -2323,7 +2358,7 @@ void exerciseVerifiedHydraulicActionBoundary() {
 // HIST-03c3b: the indexed native witness alone is not enough. Exercise a
 // real local Commit with a single MODEL action touching two independent
 // hydraulic distribution networks, including a native-owned root/chunk membership update.
-// An unrelated native write must remain ineligible for history navigation.
+// An unjournaled but semantically valid edit must remain ineligible for history navigation.
 void exerciseVerifiedRevisionHydraulicCoverage() {
     const std::filesystem::path folder = tempDir();
     try {
@@ -2342,12 +2377,13 @@ void exerciseVerifiedRevisionHydraulicCoverage() {
         b.id = QStringLiteral("Network B");
         b.nodes_junctions.append(item<HydraulicNodeJunction>(940001));
         std::vector<native::ModelChange> initial =
-            hydraulic::fullDraftHydraulicDistributionNetworkChanges(a);
+            initialEngineeringSnapshot(a);
         const std::vector<native::ModelChange> other =
-            hydraulic::fullDraftHydraulicDistributionNetworkChanges(b);
+            initialEngineeringSnapshot(b);
         initial.insert(initial.end(), other.begin(), other.end());
         const native::RevisionId baseline = service->commitModelAtExpectedHead(
-            projectId, "main", initial, commitMetadata(), std::nullopt);
+            projectId, "main", initial, commitMetadata(), std::nullopt,
+            native::annotations::validateAnnotationSnapshot);
 
         const std::string draft = service->createWorkingCopy(
             projectId, "main", baseline, session).id;
@@ -2382,7 +2418,7 @@ void exerciseVerifiedRevisionHydraulicCoverage() {
             };
         hydraulic::materializeDraftMembership(readBase,
             {hydraulic::DraftMembershipIntent{
-                hydraulic::keyFromUuid(a.uuid), hydraulic::keyFromUuid(added.uuid), 1, 9, true}},
+                hydraulic::keyFromUuid(a.uuid), hydraulic::keyFromUuid(added.uuid), 201, 9, true}},
             changes);
         changes.push_back(hydraulic::materializeDraftRootEdit(readBase,
             action.edits.last()));
@@ -2391,7 +2427,8 @@ void exerciseVerifiedRevisionHydraulicCoverage() {
                 "HIST-03c3b could not Save a mixed two-network action");
         const native::LocalCommitInfo committed = service->commitWorkingCopy(
             native::UuidV7::generate().toString(), draft, session, token, 1,
-            baseline, commitMetadata());
+            baseline, commitMetadata(),
+            native::annotations::validateAnnotationSnapshot);
         require(committed.state == native::LocalCommitState::Succeeded,
                 "HIST-03c3b local Commit did not succeed");
         const native::RevisionId revision =
@@ -2543,18 +2580,21 @@ void exerciseVerifiedRevisionHydraulicCoverage() {
             native::ModelCodec<HydraulicNodeJunction>::encode(nextA)});
         const QByteArray nextFrame = aowis::model::ModelEditTransactionCodec::encode(nextAction);
         require(!nextFrame.isEmpty(), "HIST-03c3b unjournaled fixture action failed to encode");
-        native::ModelRecord foreign;
-        foreign.kind = 55;
-        foreign.payload = {42};
-        const native::ModelChange foreignChange{hydraulic::keyFromUuid(uuid(950000)), foreign};
+        // An arbitrary kind-55 record is now correctly rejected by the
+        // engineering semantic validator. Keep this history-coverage test
+        // meaningful by adding an UNJOURNALED but otherwise valid update to
+        // an existing member of the second network.
+        HydraulicNodeJunction unjournaledB = changedB;
+        unjournaledB.elevation_m = 47;
         require(service->saveWorkingCopyTransactions(
                     unrelatedDraft, session, unrelatedToken, 0,
-                    {hydraulic::changeFor(nextA), foreignChange},
+                    {hydraulic::changeFor(nextA), hydraulic::changeFor(unjournaledB)},
                     {hydraulic::bytesFromQByteArray(nextFrame)}).generation == 1,
                 "HIST-03c3b unjournaled native Save failed");
         const native::LocalCommitInfo unrelatedCommit = service->commitWorkingCopy(
             native::UuidV7::generate().toString(), unrelatedDraft, session,
-            unrelatedToken, 1, revision, commitMetadata());
+            unrelatedToken, 1, revision, commitMetadata(),
+            native::annotations::validateAnnotationSnapshot);
         require(unrelatedCommit.state == native::LocalCommitState::Succeeded,
                 "HIST-03c3b unjournaled native Commit failed");
         const native::RevisionId later =
@@ -2594,7 +2634,8 @@ void exerciseVerifiedRevisionHydraulicCoverage() {
                 "HIST-03c3b missing hydraulic action fixture Save failed");
         const native::LocalCommitInfo missingCommit = service->commitWorkingCopy(
             native::UuidV7::generate().toString(), missingDraft, session,
-            missingToken, 1, later, commitMetadata());
+            missingToken, 1, later, commitMetadata(),
+            native::annotations::validateAnnotationSnapshot);
         require(missingCommit.state == native::LocalCommitState::Succeeded,
                 "HIST-03c3b missing hydraulic action fixture Commit failed");
         require(!hydraulic::verifyHydraulicRevisionActionCoverage(
@@ -2649,8 +2690,9 @@ void exerciseVerifiedActiveDraftActionNavigation() {
         const std::string session = native::UuidV7::generate().toString();
         const NetworkHydraulicDistribution base = completeNetwork();
         const native::RevisionId head = service->commitModelAtExpectedHead(
-            projectId, "main", hydraulic::fullDraftHydraulicDistributionNetworkChanges(base),
-            commitMetadata(), std::nullopt);
+            projectId, "main", initialEngineeringSnapshot(base),
+            commitMetadata(), std::nullopt,
+            native::annotations::validateAnnotationSnapshot);
         const std::string draftId = service->createWorkingCopy(
             projectId, "main", head, session).id;
         const std::string token = service->acquireWorkingCopyLease(
@@ -2698,7 +2740,7 @@ void exerciseVerifiedActiveDraftActionNavigation() {
         native::ModelChange labelChange;
         labelChange.key = hydraulic::keyFromUuid(stepOne.curves_generic[0].uuid);
         labelChange.record = readBase(labelChange.key);
-        require(labelChange.record.has_value() && labelChange.record->kind == 15,
+        require(labelChange.record.has_value() && labelChange.record->kind == 215,
                 "HDB-03b missing canonical generic-curve native record");
         labelChange.record->payload = hydraulic::bytesFromQByteArray(
             native::ModelCodec<HydraulicCurveGeneric>::encode(stepOne.curves_generic[0]));
@@ -2720,7 +2762,7 @@ void exerciseVerifiedActiveDraftActionNavigation() {
         hydraulic::materializeDraftMembership(readBase,
             {hydraulic::DraftMembershipIntent{
                 hydraulic::keyFromUuid(base.uuid), hydraulic::keyFromUuid(added.uuid),
-                1, 9, true}}, secondChanges);
+                201, 9, true}}, secondChanges);
         require(!secondBytes.isEmpty() &&
                 service->saveWorkingCopyTransactions(draftId, session, token, 1,
                     secondChanges, {hydraulic::bytesFromQByteArray(secondBytes)}).generation == 2,
@@ -2888,7 +2930,7 @@ void exerciseUnbornFirstTankHistory() {
         // pipes only. Build the tank's canonical native record with its
         // declared kind and outbound reference index explicitly.
         native::ModelRecord tankRecord;
-        tankRecord.kind = 3;
+        tankRecord.kind = 203;
         tankRecord.payload = hydraulic::bytesFromQByteArray(
             native::ModelCodec<HydraulicNodeTank>::encode(tank));
         require(!tankRecord.payload.empty(),
@@ -2906,7 +2948,7 @@ void exerciseUnbornFirstTankHistory() {
         hydraulic::materializeDraftMembership(initial,
             {hydraulic::DraftMembershipIntent{
                 hydraulic::keyFromUuid(networkId), hydraulic::keyFromUuid(tank.uuid),
-                3, 10, true}}, additions);
+                203, 10, true}}, additions);
         require(service->saveWorkingCopyTransactions(draftId, session, token, 1,
                     additions, {hydraulic::bytesFromQByteArray(frame)}).generation == 2,
                 "Unborn History could not save tank creation");
@@ -2986,8 +3028,9 @@ void exerciseArchivedHistoryForkedHydraulicEdit() {
         const NetworkHydraulicDistribution original = completeNetwork();
         require(!original.curves_generic.isEmpty(), "History fork fixture needs a generic curve");
         const native::RevisionId baseline = service->commitModelAtExpectedHead(
-            projectId, "main", hydraulic::fullDraftHydraulicDistributionNetworkChanges(original),
-            commitMetadata(), std::nullopt);
+            projectId, "main", initialEngineeringSnapshot(original),
+            commitMetadata(), std::nullopt,
+            native::annotations::validateAnnotationSnapshot);
 
         const std::function<aowis::model::ModelEditTransaction(
             const HydraulicCurveGeneric&, const HydraulicCurveGeneric&)> encodeEdit =
@@ -3010,7 +3053,7 @@ void exerciseArchivedHistoryForkedHydraulicEdit() {
                 native::ModelChange change;
                 change.key = hydraulic::keyFromUuid(label.uuid);
                 change.record = service->getModelAtRevision(projectId, source, change.key);
-                require(change.record && change.record->kind == 15,
+                require(change.record && change.record->kind == 215,
                         "History fork fixture has no stored generic-curve record");
                 change.record->payload = hydraulic::bytesFromQByteArray(
                     native::ModelCodec<HydraulicCurveGeneric>::encode(label));
@@ -3035,7 +3078,8 @@ void exerciseArchivedHistoryForkedHydraulicEdit() {
         const std::string firstOperation = native::UuidV7::generate().toString();
         const native::LocalCommitInfo firstCommit = service->commitWorkingCopy(
             firstOperation, firstDraft, session, firstToken, 1, baseline,
-            commitMetadata());
+            commitMetadata(),
+            native::annotations::validateAnnotationSnapshot);
         require(firstCommit.state == native::LocalCommitState::Succeeded,
                 "Cannot Commit first MODEL action");
         const std::optional<native::RevisionId> firstRevision =
@@ -3059,7 +3103,8 @@ void exerciseArchivedHistoryForkedHydraulicEdit() {
                 "Cannot Save second MODEL generic-curve action");
         const native::LocalCommitInfo secondCommit = service->commitWorkingCopy(
             native::UuidV7::generate().toString(), secondDraft, session,
-            secondToken, 1, *firstRevision, commitMetadata());
+            secondToken, 1, *firstRevision, commitMetadata(),
+            native::annotations::validateAnnotationSnapshot);
         require(secondCommit.state == native::LocalCommitState::Succeeded,
                 "Cannot Commit second MODEL action");
         const std::optional<native::RevisionId> secondRevision =
@@ -3117,7 +3162,8 @@ void exerciseArchivedHistoryForkedHydraulicEdit() {
                 ("Cannot Redo newly forked MODEL action: " + error.toStdString()).c_str());
         const native::LocalCommitInfo forkCommit = service->commitWorkingCopy(
             native::UuidV7::generate().toString(), forkDraft, session,
-            forkToken, 4, *secondRevision, commitMetadata());
+            forkToken, 4, *secondRevision, commitMetadata(),
+            native::annotations::validateAnnotationSnapshot);
         require(forkCommit.state == native::LocalCommitState::Succeeded,
                 "Cannot Commit MODEL edit made after archived Undo");
         const std::optional<native::RevisionId> forkRevision =

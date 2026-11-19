@@ -219,7 +219,7 @@ void testBadEdits() {
                                                              {badBytes}); },
                "invalid canonical payload was accepted");
     db::ModelRecord foreign;
-    foreign.kind = 12;
+    foreign.kind = 212;
     records.emplace(db::record::keyFromUuid(second.uuid), foreign);
     mustReject([&]() { ann::materializeDraftAnnotationEdits(read(records), makeLayer().uuid,
                                                              {create(second)}); },

@@ -2991,6 +2991,14 @@ MergeResult Repository::mergeBranches(const ProjectId& project,
     refreshIndex();
     const RevisionRecord targetHead = branchRevisionLocked(project, target);
     const RevisionRecord sourceHead = branchRevisionLocked(project, source);
+    // A merge can publish an existing source snapshot by fast forward, not
+    // just generate a new revision. Both paths need the same semantic gate;
+    // validate() additionally checks the final selected candidate.
+    const bool engineeringMerge = (targetHead.modelIndexed &&
+        containsEngineeringInTreeLocked(targetHead.root)) ||
+        (sourceHead.modelIndexed && containsEngineeringInTreeLocked(sourceHead.root));
+    require(Err::InvalidInput, !engineeringMerge || static_cast<bool>(options.validate),
+            std::string(missingEngineeringCommitValidator));
     require(Err::Conflict, !expectedTarget || *expectedTarget == targetHead.id,
             "target HEAD advanced before merge");
     require(Err::Conflict, !expectedSource || *expectedSource == sourceHead.id,
@@ -4166,34 +4174,34 @@ std::vector<Key> Repository::readReferrers(const Hash& root, const Key& target) 
     return decodeReferrers(load(*indexValue));
 }
 
-bool Repository::containsAnnotationInTreeLocked(const Hash& root) {
+bool Repository::containsEngineeringInTreeLocked(const Hash& root) {
     if (isZero(root)) return false;
     const std::map<Hash, bool>::const_iterator cached =
-        this->annotationTrieCache_.find(root);
-    if (cached != this->annotationTrieCache_.end()) return cached->second;
+        this->engineeringTrieCache_.find(root);
+    if (cached != this->engineeringTrieCache_.end()) return cached->second;
 
     // A tree hash is immutable and authenticated by load()/readNode(). Only
     // previously unseen branches and leaves are visited on subsequent commits.
     const TreeNode node = readNode(root);
-    bool containsAnnotation = false;
+    bool containsEngineering = false;
     if (node.leaf) {
         const Bytes encoded = load(node.value);
         require(Err::Corruption, !encoded.empty() && encoded.front() == 'V',
                 "invalid native MODEL object during annotation classification");
         const ModelRecord record = decodeModelRecord(
             Bytes(encoded.begin() + 1, encoded.end()));
-        containsAnnotation = record.kind >= 110 && record.kind <= 112;
+        containsEngineering = isEngineeringRecordKind(record.kind);
     } else {
         for (const Hash& child : node.children) {
             if (isZero(child)) continue;
-            const bool childContainsAnnotation = containsAnnotationInTreeLocked(child);
-            containsAnnotation = containsAnnotation || childContainsAnnotation;
+            const bool childContainsEngineering = containsEngineeringInTreeLocked(child);
+            containsEngineering = containsEngineering || childContainsEngineering;
         }
     }
-    if (this->annotationTrieCache_.size() >= 262144U)
-        this->annotationTrieCache_.clear();
-    this->annotationTrieCache_.emplace(root, containsAnnotation);
-    return containsAnnotation;
+    if (this->engineeringTrieCache_.size() >= 262144U)
+        this->engineeringTrieCache_.clear();
+    this->engineeringTrieCache_.emplace(root, containsEngineering);
+    return containsEngineering;
 }
 
 RevisionId Repository::commitModel(const ProjectId& project, std::string_view branch,
@@ -4230,20 +4238,19 @@ RevisionId Repository::commitModel(const ProjectId& project, std::string_view br
     require(Err::InvalidInput, !previous || previous->modelIndexed || isZero(previous->root),
             "cannot enable model indexing on a populated raw branch");
 
-    // Annotation presence is an immutable trie property. Previously this
+    // Engineering presence is an immutable trie property. Previously this
     // preflight decoded EVERY prior MODEL record on EVERY Commit, even for a
     // generic one-record edit. SHA-256 subtree classification retains the
     // fail-closed rule without turning generic writes into O(repository size).
-    bool annotationPresent = previous && !isZero(previous->root) &&
-        containsAnnotationInTreeLocked(previous->root);
+    bool engineeringPresent = previous && !isZero(previous->root) &&
+        containsEngineeringInTreeLocked(previous->root);
     for (const ModelChange& change : changes) {
-        if (change.record && change.record->kind >= 110 &&
-            change.record->kind <= 112)
-            annotationPresent = true;
+        if (change.record && isEngineeringRecordKind(change.record->kind))
+            engineeringPresent = true;
     }
-    if (annotationPresent && !validate)
+    if (engineeringPresent && !validate)
         throw StorageError(Err::InvalidInput,
-                           std::string(missingAnnotationCommitValidator));
+                           std::string(missingEngineeringCommitValidator));
 
     // An explicit validator is authoritative for the complete proposed
     // candidate. Preserve its invocation for generic MODEL callers too.
@@ -5513,7 +5520,7 @@ RevisionBundleImport Repository::importRevisionBundle(const ProjectId& expectedP
                 continue;
             const std::uint16_t kind = static_cast<std::uint16_t>(
                 (static_cast<unsigned>(prefix[6]) << 8U) | prefix[7]);
-            if (kind == 100 || kind == 101 || (kind >= 110 && kind <= 112)) {
+            if (isEngineeringRecordKind(kind)) {
                 selfContainedGeneric = false;
                 break;
             }
@@ -5566,8 +5573,7 @@ RevisionBundleImport Repository::importRevisionBundle(const ProjectId& expectedP
                     "invalid imported MODEL value");
             const ModelRecord record = decodeModelRecord(
                 Bytes(value.begin() + 1, value.end()));
-            engineering = record.kind == 100 || record.kind == 101 ||
-                (record.kind >= 110 && record.kind <= 112);
+            engineering = isEngineeringRecordKind(record.kind);
         } else {
             throw StorageError(Err::InvalidInput, "invalid imported MODEL trie tag");
         }

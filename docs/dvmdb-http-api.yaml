@@ -345,8 +345,9 @@ paths:
         immutable local hydraulic or annotation-only Commit; the draft must be clean, an archived checkpoint, or an active journal
         verified at position zero; in the latter case V9 retains Redo frames. Without revisionId, select
         an active draft boundary (0..journalCount) for one EXISTING hydraulic
-        network. Mixed hydraulic/annotation Commit archives remain checkpoint-only pending
-        a combined replay verifier. Multiple NetworkHydraulicDistribution roots remain supported in storage,
+        network. Verified mixed hydraulic/annotation archives can be navigated
+        through the combined replay verifier. Unsupported or ambiguous archives
+        remain checkpoints. Multiple NetworkHydraulicDistribution roots remain supported in storage,
         but multi-network active draft navigation and unborn base replay are
         deferred. Eligible position-zero active journals can cross into the
         archived HEAD and return without losing Redo. Immutable HEAD never moves.
@@ -1260,12 +1261,16 @@ paths:
       operationId: commitModel
       description: >-
         Atomically create a UUIDv7 model-indexed revision on an exact expected
-        branch HEAD. The model record payload is opaque binary data encoded
-        as Base64; hydraulic clients must encode it with the existing
-        ModelCodec. This generic native-record operation enforces reference
-        integrity, not hydraulic field-level semantic validation. Rejects
-        duplicate keys, invalid references, stale heads and batches
-        exceeding 128 changes. This is the canonical model-commit route.
+        branch HEAD for GENERIC, non-engineering MODEL records only.
+        Hydraulic network and annotation records use reserved native kinds
+        and MUST be edited through a fenced working-copy save-events request
+        followed by a local Commit; raw model-commits is not their write path.
+        The endpoint checks the immutable expected HEAD as well as submitted
+        changes, so deleting/overwriting a hydraulic root cannot bypass the
+        canonical MODEL event journal. Generic record payloads are opaque
+        Base64, and reference integrity and expected HEAD are enforced.
+        Rejects duplicate keys, invalid references, stale heads, engineering
+        kinds and batches exceeding 128 changes.
       requestBody:
         required: true
         content:

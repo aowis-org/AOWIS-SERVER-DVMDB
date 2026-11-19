@@ -1,4 +1,6 @@
 #include "aowis/dvmdb/model_codec_adapter.h"
+#include "aowis/dvmdb/hydraulic_distribution_network_persistence.h"
+#include "commit_metadata_fixture.h"
 #include "project_repository.h"
 
 #include <QCoreApplication>
@@ -77,9 +79,18 @@ void testCanonicalCodecAndRepository() {
                "UUID key transform inconsistent");
         {
             ProjectRepository store(path);
-            store.createBranch("main");
-            const std::vector<ModelChange> changes{hydraulic::changeFor(a), hydraulic::changeFor(b), hydraulic::changeFor(pipe)};
-            store.commitModel("main", changes);
+            // The first hydraulic snapshot requires an actual committed base;
+            // an unborn branch has no revision to pin during native Save.
+            const RevisionId emptyHead = store.native().createRootBranch(
+                store.project(), "main", aowis::dvmdb::test::commitMetadata());
+            NetworkHydraulicDistribution network;
+            network.uuid = fixedUuid(3, 1);
+            network.id = QStringLiteral("Codec network");
+            network.nodes_junctions = {a, b};
+            network.links_pipes = {pipe};
+            (void)hydraulic::saveHydraulicDistributionNetwork(
+                store.native(), store.project(), "main", network,
+                emptyHead, aowis::dvmdb::test::commitMetadata());
             const std::optional<aowis::dvmdb::ModelRecord> stored = store.getModel("main", hydraulic::keyFromUuid(idA));
             expect(stored.has_value() && stored->kind == hydraulic::junctionKind &&
                    stored->payload == expectedA, "native store modified canonical native model bytes");
@@ -98,7 +109,10 @@ void testCanonicalCodecAndRepository() {
             const RevisionId mainRevision = store.head("main");
             store.createBranch("other", "main");
             pipe.diameter_mm = 112.75;
-            store.commitModel("other", {hydraulic::changeFor(pipe)});
+            (void)hydraulic::editHydraulicDistributionNetwork(
+                store.native(), store.project(), "other", network.uuid,
+                {{pipe.uuid, hydraulic::HydraulicEntity{pipe}}},
+                store.head("other"), aowis::dvmdb::test::commitMetadata());
             expect(hydraulic::readPipe(store.native(), store.project(), store.head("main"), hydraulic::keyFromUuid(pipe.uuid))->diameter_mm == 90.625,
                    "branch isolation failed");
             expect(hydraulic::readPipe(store.native(), store.project(), store.head("other"), hydraulic::keyFromUuid(pipe.uuid))->diameter_mm == 112.75,
@@ -110,7 +124,10 @@ void testCanonicalCodecAndRepository() {
                    "codec-level branch diff failed");
             bool rejected = false;
             try {
-                store.commitModel("other", {{hydraulic::keyFromUuid(idA), std::nullopt}});
+                (void)hydraulic::editHydraulicDistributionNetwork(
+                    store.native(), store.project(), "other", network.uuid,
+                    {{idA, std::nullopt}}, store.head("other"),
+                    aowis::dvmdb::test::commitMetadata());
             } catch (const std::exception&) { rejected = true; }
             expect(rejected, "referenced junction deletion was accepted");
         }

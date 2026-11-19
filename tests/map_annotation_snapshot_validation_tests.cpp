@@ -172,7 +172,7 @@ void testOrphanRecords() {
     require(orphanHydraulic.emplace(key(uuid(501)), rogue).second, "bad test key");
     invalid(orphanHydraulic, "unowned hydraulic membership chunk must be rejected");
     Records wrongKind = initial;
-    wrongKind.at(key(annotation(1).uuid)).kind = 17;
+    wrongKind.at(key(annotation(1).uuid)).kind = 217;
     invalid(wrongKind, "annotation membership with wrong record kind must be rejected");
     Records unknown = initial;
     db::ModelRecord unsupported;

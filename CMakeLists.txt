@@ -435,6 +435,12 @@ if(BUILD_TESTING)
     target_link_libraries(aowis-dvmdb-scratch-tests PRIVATE aowis-dvmdb-store-fault-tests)
     add_test(NAME aowis-dvmdb-scratch-tests COMMAND aowis-dvmdb-scratch-tests)
     set_tests_properties(aowis-dvmdb-scratch-tests PROPERTIES LABELS "aowis")
+    add_executable(aowis-dvmdb-engineering-publication-guard-tests
+        tests/native_engineering_publication_guard_tests.cpp)
+    target_link_libraries(aowis-dvmdb-engineering-publication-guard-tests PRIVATE aowis-dvmdb-store)
+    add_test(NAME aowis-dvmdb-engineering-publication-guard-tests
+        COMMAND aowis-dvmdb-engineering-publication-guard-tests)
+    set_tests_properties(aowis-dvmdb-engineering-publication-guard-tests PROPERTIES LABELS "aowis;annotation;security")
     add_executable(aowis-dvmdb-error-kind-tests tests/native_error_kind_tests.cpp)
     target_link_libraries(aowis-dvmdb-error-kind-tests PRIVATE aowis-dvmdb-store-fault-tests)
     add_test(NAME aowis-dvmdb-error-kind-tests COMMAND aowis-dvmdb-error-kind-tests)
@@ -512,7 +518,7 @@ if(BUILD_TESTING)
     target_link_libraries(aowis-dvmdb-store-tests PRIVATE aowis-dvmdb-store)
     add_test(NAME aowis-dvmdb-store-tests COMMAND aowis-dvmdb-store-tests)
     set_tests_properties(aowis-dvmdb-store-tests PROPERTIES LABELS "aowis")
-    add_custom_target(aowis-dvmdb-tests DEPENDS aowis-dvmdb-local-commit-tests aowis-dvmdb-working-copy-tests aowis-dvmdb-canonical-project-service-tests aowis-dvmdb-revision-bundle-large-tests aowis-dvmdb-revision-bundle-tests aowis-dvmdb-revision-graph-tests aowis-dvmdb-merge-tests aowis-dvmdb-project-model-tests aowis-dvmdb-packed-revision-tests aowis-dvmdb-revision-resolver-tests aowis-dvmdb-revision-record-tests aowis-dvmdb-branch-id-tests aowis-dvmdb-object-id-tests aowis-dvmdb-vm-powercut-worker aowis-dvmdb-sigkill-restart-tests aowis-dvmdb-physical-enospc-tests aowis-dvmdb-offline-backup-tests aowis-dvmdb-transfer-staging-budget-tests aowis-dvmdb-index-scaling-benchmark aowis-dvmdb-pack-operational-stress-tests aowis-dvmdb-bundle-import-profile-tests aowis-dvmdb-replication-scaling-benchmark aowis-dvmdb-bundle-revision-marks-tests aowis-dvmdb-bundle-disk-index-tests aowis-dvmdb-merge-ancestry-tests aowis-dvmdb-bundle-limit-tests aowis-dvmdb-project-service-tests aowis-dvmdb-project-concurrency-tests aowis-dvmdb-recovery-tests aowis-dvmdb-scratch-tests aowis-dvmdb-error-kind-tests aowis-dvmdb-repository-verify-tests aowis-dvmdb-model-import-integrity-tests aowis-dvmdb-merkle-integrity-tests aowis-dvmdb-store-tests aowis-dvmdb-diff-scope-tests aowis-dvmdb-incremental-sync-tests aowis-dvmdb-sync-tests aowis-dvmdb-sync-cli-tests aowis-dvmdb-access-tests)
+    add_custom_target(aowis-dvmdb-tests DEPENDS aowis-dvmdb-engineering-publication-guard-tests aowis-dvmdb-local-commit-tests aowis-dvmdb-working-copy-tests aowis-dvmdb-canonical-project-service-tests aowis-dvmdb-revision-bundle-large-tests aowis-dvmdb-revision-bundle-tests aowis-dvmdb-revision-graph-tests aowis-dvmdb-merge-tests aowis-dvmdb-project-model-tests aowis-dvmdb-packed-revision-tests aowis-dvmdb-revision-resolver-tests aowis-dvmdb-revision-record-tests aowis-dvmdb-branch-id-tests aowis-dvmdb-object-id-tests aowis-dvmdb-vm-powercut-worker aowis-dvmdb-sigkill-restart-tests aowis-dvmdb-physical-enospc-tests aowis-dvmdb-offline-backup-tests aowis-dvmdb-transfer-staging-budget-tests aowis-dvmdb-index-scaling-benchmark aowis-dvmdb-pack-operational-stress-tests aowis-dvmdb-bundle-import-profile-tests aowis-dvmdb-replication-scaling-benchmark aowis-dvmdb-bundle-revision-marks-tests aowis-dvmdb-bundle-disk-index-tests aowis-dvmdb-merge-ancestry-tests aowis-dvmdb-bundle-limit-tests aowis-dvmdb-project-service-tests aowis-dvmdb-project-concurrency-tests aowis-dvmdb-recovery-tests aowis-dvmdb-scratch-tests aowis-dvmdb-error-kind-tests aowis-dvmdb-repository-verify-tests aowis-dvmdb-model-import-integrity-tests aowis-dvmdb-merkle-integrity-tests aowis-dvmdb-store-tests aowis-dvmdb-diff-scope-tests aowis-dvmdb-incremental-sync-tests aowis-dvmdb-sync-tests aowis-dvmdb-sync-cli-tests aowis-dvmdb-access-tests)
 endif()
 
 # Canonical AOWIS model serialization lives in AOWIS-SERVER-MODEL.
@@ -586,9 +592,14 @@ if(AOWIS_DVMDB_WITH_MODEL_CODEC)
             "${CMAKE_CURRENT_BINARY_DIR}/model-fingerprint")
         # Canonical serialization, value checks and field-aware merges are
         # compiled exactly once in AOWIS::Model, regardless of host target.
+        # The hydraulic native convenience writers call the complete engineering
+        # candidate validator. Keep its implementation in the same static archive
+        # as those callers: splitting them creates a circular static-library link
+        # dependency that direct hydraulic consumers cannot resolve reliably.
         add_library(aowis-dvmdb-hydraulic STATIC
             src/model_codec_adapter.cpp
-            src/hydraulic_distribution_network_persistence.cpp)
+            src/hydraulic_distribution_network_persistence.cpp
+            src/map_annotation_snapshot_validation.cpp)
         add_library(AOWIS::DvmdbHydraulic ALIAS aowis-dvmdb-hydraulic)
         target_compile_features(aowis-dvmdb-hydraulic PUBLIC cxx_std_20)
         target_include_directories(aowis-dvmdb-hydraulic PUBLIC
@@ -608,17 +619,19 @@ if(AOWIS_DVMDB_WITH_MODEL_CODEC)
             "${CMAKE_CURRENT_SOURCE_DIR}/include")
         target_link_libraries(aowis-dvmdb-annotations PUBLIC
             aowis-dvmdb-store AOWIS::Model)
-        # Cross-layer semantic checks need both the independent annotation
-        # adapter and the canonical hydraulic aggregate loader. Keep this as
-        # a separate target so annotation record I/O stays hydraulics-free.
-        add_library(aowis-dvmdb-annotation-integrity STATIC
-            src/map_annotation_snapshot_validation.cpp)
+        # Native annotation record I/O is a separate library. Hydraulic's
+        # aggregate writers now also validate annotation ownership, so export
+        # the annotation record dependency from the hydraulic target itself.
+        # This fixes every direct hydraulic test/benchmark without weakening
+        # semantic publication guards or adding target-level link cycles.
+        target_link_libraries(aowis-dvmdb-hydraulic PUBLIC aowis-dvmdb-annotations)
+        # Preserve the semantic validation target name for existing consumers.
+        # Its implementation is compiled once into the hydraulic archive; this
+        # interface target carries the complete dependency closure to clients.
+        add_library(aowis-dvmdb-annotation-integrity INTERFACE)
         add_library(AOWIS::DvmdbAnnotationIntegrity ALIAS aowis-dvmdb-annotation-integrity)
-        target_compile_features(aowis-dvmdb-annotation-integrity PUBLIC cxx_std_20)
-        target_include_directories(aowis-dvmdb-annotation-integrity PUBLIC
-            "${CMAKE_CURRENT_SOURCE_DIR}/include")
-        target_link_libraries(aowis-dvmdb-annotation-integrity PUBLIC
-            aowis-dvmdb-annotations aowis-dvmdb-hydraulic)
+        target_link_libraries(aowis-dvmdb-annotation-integrity INTERFACE
+            aowis-dvmdb-hydraulic)
         # The standard sync CLI must validate imported engineering history,
         # not silently become a second unvalidated publication route. Native
         # Qt-free builds keep the generic-only CLI, which fails closed on

@@ -45,8 +45,7 @@ def main() -> None:
     ):
         require(routes, re.escape(symbol), f"annotation edit integration missing: {symbol}")
     require(routes, r"std::optional<std::string>\s+validateEngineeringCandidateIfNeeded\("
-            r".*?hydraulic::hydraulicDistributionNetworkKind"
-            r".*?isAnnotationNativeKind\(record\.kind\)"
+            r".*?isEngineeringRecordKind\(record\.kind\)"
             r".*?annotations::validateAnnotationSnapshot\(candidate\)",
             "conditional engineering candidate validation was lost")
     require(routes, r"repository\.importRevisionBundle\(\*project, spool\.fd\(\), branch, limits,"
@@ -82,6 +81,10 @@ def main() -> None:
             "mixed HTTP History publication regression was removed")
     require(tests, r"annotation archived Redo to tip did not recover clean committed HEAD",
             "annotation archived History publication regression was removed")
+    require(routes, r"server\.Post\(routeWorkingCopySave.*?requireGenericChangesOnly\(before, changes\)",
+            "plain draft Save must reject unjournaled engineering writes")
+    require(routes, r"server\.Post\(routeModelCommits.*?requireGenericChangesOnly\(before, changes\)",
+            "generic HTTP Commit must reject engineering snapshot and deltas")
     require(routes, r"server\.Post\(routeModelCommits.*?service\.commitModel\(.*?"
             r"validateEngineeringCandidateIfNeeded\(candidate\)",
             "direct MODEL HTTP Commit lost semantic candidate validation")

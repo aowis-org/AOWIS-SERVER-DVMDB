@@ -15,9 +15,12 @@ DVMDB requires a MODEL submodule that defines `NetworkHydraulicDistribution`,
 edit helpers. Update the pinned submodule in this repository to the committed
 MODEL rename; old submodule checkouts fail configuration.
 
-The native distribution-root record kind remains **100**, the membership chunk
-kind remains **101**, and existing `/networks` HTTP URL paths and record formats
-are unchanged by this source rename. However, archived MODEL root-edit events
+The native distribution-root record kind is **100**, the membership chunk
+kind is **101**, and the 17 member kinds occupy the reserved **201–217** range.
+Each distribution network also requires a separate annotation-layer root (kind
+110), deterministic from the network UUID, even when its annotation list is
+empty. Old pre-release record-kind mappings are not supported.
+Archived MODEL root-edit events
 using the old `NetworkHydraulicRoot` entity type are not transparently
 converted to `NetworkHydraulicDistributionRoot`. Pre-release repositories
 containing these events must be recreated or handled by an explicit conversion
@@ -53,8 +56,8 @@ changes its kind.
 
 | Operation | C++ | HTTP (`/dvmdb/v1/projects/{id}/branches/{branch}`) |
 |---|---|---|
-| Save a whole network | `saveHydraulicDistributionNetwork(repository, project, branch, network, expectedHead, metadata)` | `POST …/networks` |
-| Edit up to 128 entities | `editHydraulicDistributionNetwork(repository, project, branch, networkId, changes, expectedHead, metadata)` | `POST …/networks/{networkId}/edits` |
+| Save a whole network (native snapshot helper) | `saveHydraulicDistributionNetwork(repository, project, branch, network, expectedHead, metadata)` | Legacy `POST …/networks` retired (HTTP 410); use working-copy import or initialize |
+| Edit up to 128 entities (native snapshot helper) | `editHydraulicDistributionNetwork(repository, project, branch, networkId, changes, expectedHead, metadata)` | Legacy `POST …/networks/{networkId}/edits` retired (HTTP 410); use `save-events` |
 | Load a network | `loadHydraulicDistributionNetworkAtRevision(repository, project, revision, networkId)` | `GET …/networks/{networkId}?revision=` |
 | List one collection | `listHydraulicEntityIdsAtRevisionLimited(…, type, limit)` | `GET …/networks/{networkId}/entities?type=&revision=` (≤ 10,000) |
 | Load one entity | `loadHydraulicEntityAtRevision(…, networkId, entityId)` | `GET …/networks/{networkId}/entities/{entityId}?revision=` |
@@ -74,9 +77,21 @@ check that the entity belongs to the network.
 
 ## Committed writes
 
-Saves and edits take an exact expected HEAD and publish one new revision with
-compare-and-swap; a stale HEAD is a conflict and nothing is written. An
-identical edit batch creates no revision and returns the current one.
+Native convenience saves and edits take an exact expected HEAD and publish
+one new revision with compare-and-swap; a stale HEAD is a conflict and nothing
+is written. An identical edit batch creates no revision and returns the current
+one. When the first distribution root is published, its empty annotation layer
+is published in **the same revision**. Every native engineering Commit and
+merge receives the candidate-wide annotation/hydraulic ownership validator;
+missing annotation layers, orphan members and dangling anchors fail closed.
+
+These C++ convenience functions are snapshot-oriented native helpers (useful
+for imports, qualification and benchmarks). They **do not** create the
+reversible MODEL action archive. Interactive editor changes must continue to
+use fenced working-copy `save-events` and local Commit. The plain generic HTTP
+model writer is not an alternative editing entry point. Candidate-wide
+validation currently traverses the complete engineering snapshot even for
+indexed member updates; any fast-path performance claims must be remeasured.
 
 `editHydraulicDistributionNetwork` uses bounded indexed paths for scalar, physical and
 operating values, catalogue records, eligible pipe endpoint rewiring,

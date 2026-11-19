@@ -2352,17 +2352,27 @@ void exerciseUnbornNetworkInitializationHttp() {
         check(!frame.isEmpty(), "failed to encode first unborn junction event");
         const QJsonObject save{{"sessionId", session}, {"fencingToken", token},
             {"expectedGeneration", QStringLiteral("1")},
-            {"changes", QJsonArray{QJsonObject{{"uuid", junctionId}, {"kind", 1},
+            {"changes", QJsonArray{QJsonObject{{"uuid", junctionId}, {"kind", 201},
                 {"references", QJsonArray{}},
                 {"payloadBase64", QString::fromLatin1(bytes.toBase64())}}}},
             {"membership", QJsonArray{QJsonObject{{"networkId", networkId},
-                {"entityId", junctionId}, {"kind", 1}, {"collectionIndex", 9},
+                {"entityId", junctionId}, {"kind", 201}, {"collectionIndex", 9},
                 {"inserted", true}}}},
             {"events", QJsonArray{QString::fromLatin1(frame.toBase64())}}};
         const Response saved = client.call("POST", path + "/save-events", save);
         check(saved.status == 200 && saved.json.value("generation") == QStringLiteral("2") &&
               !service.optionalHead(project.id, "main").has_value(),
               "first hydraulic member could not be saved into unborn draft");
+        // Existing, canonically encoded hydraulic entities must not be edited
+        // through plain Save without an authenticated MODEL event journal.
+        const QJsonObject unjournaledHydraulic{{"sessionId", session},
+            {"fencingToken", token}, {"expectedGeneration", "2"},
+            {"changes", QJsonArray{QJsonObject{{"uuid", junctionId}, {"kind", 201},
+                {"references", QJsonArray{}},
+                {"payloadBase64", QString::fromLatin1(bytes.toBase64())}}}}};
+        check(client.call("POST", path + "/save", unjournaledHydraulic).status == 400 &&
+              client.call("GET", path).json.value("generation") == "2",
+              "plain Save accepted an unjournaled hydraulic edit");
         const Response populatedSummary = client.call("GET", path + "/networks/summary");
         check(populatedSummary.status == 200 && populatedSummary.json.value("generation") == "2" &&
               populatedSummary.json.value("networkCount") == 1 &&
@@ -2458,11 +2468,11 @@ void exerciseUnbornNetworkInitializationHttp() {
         check(!mixedFrame.isEmpty(), "failed to encode mixed hydraulic transaction");
         const QJsonObject mixedSave{{"sessionId", session}, {"fencingToken", token},
             {"expectedGeneration", QStringLiteral("3")},
-            {"changes", QJsonArray{QJsonObject{{"uuid", additionalId}, {"kind", 1},
+            {"changes", QJsonArray{QJsonObject{{"uuid", additionalId}, {"kind", 201},
                 {"references", QJsonArray{}},
                 {"payloadBase64", QString::fromLatin1(additionalBytes.toBase64())}}}},
             {"membership", QJsonArray{QJsonObject{{"networkId", networkId},
-                {"entityId", additionalId}, {"kind", 1}, {"collectionIndex", 9},
+                {"entityId", additionalId}, {"kind", 201}, {"collectionIndex", 9},
                 {"inserted", true}}}},
             {"events", QJsonArray{QString::fromLatin1(mixedFrame.toBase64())}}};
         const QUuid unrelatedUuid(QString::fromStdString(native::UuidV7::generate().toString()));
@@ -2473,7 +2483,7 @@ void exerciseUnbornNetworkInitializationHttp() {
         QJsonObject unjournaled = mixedSave;
         QJsonArray unjournaledChanges = mixedSave.value("changes").toArray();
         unjournaledChanges.append(QJsonObject{
-            {"uuid", unrelatedUuid.toString(QUuid::WithoutBraces)}, {"kind", 1},
+            {"uuid", unrelatedUuid.toString(QUuid::WithoutBraces)}, {"kind", 201},
             {"references", QJsonArray{}},
             {"payloadBase64", QString::fromLatin1(unrelatedBytes.toBase64())}});
         unjournaled.insert("changes", unjournaledChanges);
@@ -2531,12 +2541,12 @@ void exerciseUnbornNetworkInitializationHttp() {
         QJsonObject staleMixedSave = mixedSave;
         staleMixedSave.insert("expectedGeneration", QStringLiteral("4"));
         staleMixedSave.insert("changes", QJsonArray{QJsonObject{
-            {"uuid", rejectedUuid.toString(QUuid::WithoutBraces)}, {"kind", 1},
+            {"uuid", rejectedUuid.toString(QUuid::WithoutBraces)}, {"kind", 201},
             {"references", QJsonArray{}},
             {"payloadBase64", QString::fromLatin1(rejectedBytes.toBase64())}}});
         staleMixedSave.insert("membership", QJsonArray{QJsonObject{
             {"networkId", networkId}, {"entityId", rejectedUuid.toString(QUuid::WithoutBraces)},
-            {"kind", 1}, {"collectionIndex", 9}, {"inserted", true}}});
+            {"kind", 201}, {"collectionIndex", 9}, {"inserted", true}}});
         staleMixedSave.insert("events", QJsonArray{QString::fromLatin1(
             aowis::model::ModelEditTransactionCodec::encode(staleMixed).toBase64())});
         check(client.call("POST", path + "/save-events", staleMixedSave).status == 409 &&
@@ -2714,6 +2724,20 @@ void exerciseAnnotationDraftHttp() {
     check(committed.status == 200 && !committedRevision.isEmpty() &&
           client.call("POST", commitPath, normalCommit).json.value("revision") == committedRevision,
           "valid annotation Commit or idempotent replay was rejected");
+
+    // Generic direct MODEL Commit must reject any engineering snapshot,
+    // even when the submitted delta itself uses an ordinary generic kind.
+    const QJsonObject directModelCommit{{"expectedHead", committedRevision},
+        {"author", Client::testAuthor()}, {"message", "Unjournaled generic delta"},
+        {"changes", QJsonArray{QJsonObject{{"uuid", annotationId},
+            {"kind", 31}, {"references", QJsonArray{}},
+            {"payloadBase64", QString::fromLatin1(initial.toBase64())}}}}};
+    check(client.call("POST", QStringLiteral("/dvmdb/v1/projects/") +
+              QString::fromStdString(project.id) + "/branches/main/model-commits",
+              directModelCommit).status == 400 &&
+          service.optionalHead(project.id, "main") ==
+              native::RevisionId::parse(committedRevision.toStdString()),
+          "generic direct MODEL Commit bypassed annotation action journal");
 
     // The first Commit is a checkpoint: it has no immutable parent to replay.
     // A subsequent real local Commit with two annotation actions must provide
@@ -3507,17 +3531,19 @@ void exerciseHydraulicDraftMembershipHttp() {
           "first hydraulic fixture commit did not establish the HEAD");
     native::RevisionId base = head;
     service.withRepository(project.id, [&](native::Repository& repository) {
-        base = native::hydraulic::saveHydraulicDistributionNetwork(repository, projectUuid,
-                                                         "main", network, head, commitMetadata());
-        // The pre-release B2 ownership contract requires a Distribution
-        // annotation layer even for fixtures created by the native API.
+        // A Distribution root and its mandatory annotation layer must be
+        // published in ONE semantically validated native candidate.
         MapAnnotationLayer layer;
         layer.uuid = native::annotations::distributionLayerUuid(networkUuid);
         layer.domain = MapAnnotationDomain::Distribution;
         layer.owner_network_uuid = networkUuid;
+        std::vector<native::ModelChange> changes =
+            native::hydraulic::fullDraftHydraulicDistributionNetworkChanges(network);
+        std::vector<native::ModelChange> layerChanges =
+            native::annotations::fullDraftAnnotationLayerChanges(layer, {});
+        changes.insert(changes.end(), layerChanges.begin(), layerChanges.end());
         base = repository.commitModel(projectUuid, "main",
-            native::annotations::fullDraftAnnotationLayerChanges(layer, {}),
-            commitMetadata(), base, true, std::nullopt,
+            std::move(changes), commitMetadata(), head, true, std::nullopt,
             native::annotations::validateAnnotationSnapshot);
     });
     service.configureRepositoryRole(native::RepositoryRole::Private);
@@ -3549,10 +3575,10 @@ void exerciseHydraulicDraftMembershipHttp() {
     added.id = QStringLiteral("J2");
     added.elevation_m = 55;
     const QByteArray encoded = native::ModelCodec<HydraulicNodeJunction>::encode(added);
-    const QJsonObject addition{{"uuid", newId}, {"kind", 1}, {"references", QJsonArray{}},
+    const QJsonObject addition{{"uuid", newId}, {"kind", 201}, {"references", QJsonArray{}},
                                {"payloadBase64", QString::fromLatin1(encoded.toBase64())}};
     const QJsonObject insertion{{"networkId", networkId}, {"entityId", newId},
-                                {"kind", 1}, {"collectionIndex", 9}, {"inserted", true}};
+                                {"kind", 201}, {"collectionIndex", 9}, {"inserted", true}};
     const std::function<QString(const QUuid&, const QString&,
                                 std::optional<QByteArray>, std::optional<QByteArray>)> eventFrame =
         [](const QUuid& member, const QString& action,
@@ -3595,7 +3621,7 @@ void exerciseHydraulicDraftMembershipHttp() {
           "mismatched membership kind was accepted");
     invalid = first;
     invalid.insert("membership", QJsonArray{QJsonObject{
-        {"networkId", networkId}, {"entityId", newId}, {"kind", 1},
+        {"networkId", networkId}, {"entityId", newId}, {"kind", 201},
         {"collectionIndex", 9}, {"inserted", false}}});
     check(client.call("POST", path + "/save-events", invalid).status == 400,
           "membership deletion without model tombstone accepted");
@@ -3641,7 +3667,7 @@ void exerciseHydraulicDraftMembershipHttp() {
           "hydraulic membership chunk not included in durable candidate overlay");
     const QJsonObject deletion{{"uuid", oldId}, {"delete", true}};
     const QJsonObject removal{{"networkId", networkId}, {"entityId", oldId},
-                              {"kind", 1}, {"collectionIndex", 9}, {"inserted", false}};
+                              {"kind", 201}, {"collectionIndex", 9}, {"inserted", false}};
     const QString secondEvent = eventFrame(oldUuid, QStringLiteral("hydraulic.junction.delete"),
                                            native::ModelCodec<HydraulicNodeJunction>::encode(initial),
                                            std::nullopt);
@@ -3830,7 +3856,7 @@ void exerciseHydraulicDraftMembershipHttp() {
     const QByteArray revisedBytes = native::ModelCodec<HydraulicNodeJunction>::encode(revised);
     const QString newEvent = eventFrame(newUuid, QStringLiteral("hydraulic.junction.update"),
                                         encoded, revisedBytes);
-    const QJsonObject modified{{"uuid", newId}, {"kind", 1},
+    const QJsonObject modified{{"uuid", newId}, {"kind", 201},
                                {"references", QJsonArray{}},
                                {"payloadBase64", QString::fromLatin1(revisedBytes.toBase64())}};
     const Response branched = client.call("POST", path + "/save-events",
@@ -4044,7 +4070,7 @@ void exerciseHydraulicDraftMembershipHttp() {
     const QByteArray finalBytes = native::ModelCodec<HydraulicNodeJunction>::encode(finalJunction);
     const QString secondCommitEvent = eventFrame(newUuid,
         QStringLiteral("hydraulic.junction.update"), revisedBytes, finalBytes);
-    const QJsonObject finalMember{{"uuid", newId}, {"kind", 1},
+    const QJsonObject finalMember{{"uuid", newId}, {"kind", 201},
                                   {"references", QJsonArray{}},
                                   {"payloadBase64", QString::fromLatin1(finalBytes.toBase64())}};
     const Response savedAgain = archiveClient.call("POST", path + "/save-events",
@@ -4152,7 +4178,7 @@ void exerciseHydraulicDraftMembershipHttp() {
     const QByteArray liveBytes = native::ModelCodec<HydraulicNodeJunction>::encode(liveJunction);
     const QString liveEvent = eventFrame(newUuid,
         QStringLiteral("hydraulic.junction.update"), finalBytes, liveBytes);
-    const QJsonObject liveMember{{"uuid", newId}, {"kind", 1},
+    const QJsonObject liveMember{{"uuid", newId}, {"kind", 201},
                                  {"references", QJsonArray{}},
                                  {"payloadBase64", QString::fromLatin1(liveBytes.toBase64())}};
     const Response liveSaved = archiveClient.call("POST", path + "/save-events",
@@ -4249,7 +4275,7 @@ void exerciseHydraulicDraftMembershipHttp() {
     HydraulicNodeJunction forkJunction = revised;
     forkJunction.elevation_m = 91;
     const QByteArray forkBytes = native::ModelCodec<HydraulicNodeJunction>::encode(forkJunction);
-    const QJsonObject forkMember{{"uuid", newId}, {"kind", 1},
+    const QJsonObject forkMember{{"uuid", newId}, {"kind", 201},
                                  {"references", QJsonArray{}},
                                  {"payloadBase64", QString::fromLatin1(forkBytes.toBase64())}};
     // This deliberately stale before-image belongs to the abandoned 77-metre

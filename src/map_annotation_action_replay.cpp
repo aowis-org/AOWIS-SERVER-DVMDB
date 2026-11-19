@@ -182,10 +182,10 @@ HydraulicOwnership knownHydraulicOwners(const Records& parent, const Records& co
                     candidate.get, record::uuidFromKey(root));
             require(network.has_value(), "unreadable hydraulic network in history checkpoint");
             std::uint16_t collection = 0;
-#define REGISTER_HISTORY_MEMBER(name, type, memberKind) \
+#define REGISTER_HISTORY_MEMBER(name, type) \
             for (const type& item : network->name) { \
                 const Key key = record::keyFromUuid(item.uuid); \
-                const HydraulicOwner owner{root, collection, static_cast<std::uint16_t>(memberKind)}; \
+                const HydraulicOwner owner{root, collection, hydraulic::hydraulicMemberKindForCollection(collection)}; \
                 const std::map<Key, HydraulicOwner>::const_iterator existing = result.members.find(key); \
                 require(existing == result.members.end() || \
                         (existing->second.network == owner.network && \
@@ -195,23 +195,23 @@ HydraulicOwnership knownHydraulicOwners(const Records& parent, const Records& co
                 result.members[key] = owner; \
             } \
             ++collection;
-            REGISTER_HISTORY_MEMBER(pipe_materials, HydraulicPipeMaterial, 8)
-            REGISTER_HISTORY_MEMBER(patterns_time, HydraulicPatternTime, 9)
-            REGISTER_HISTORY_MEMBER(curves_tank_volume, HydraulicCurveTankVolume, 10)
-            REGISTER_HISTORY_MEMBER(curves_pump_head, HydraulicCurvePumpHead, 11)
-            REGISTER_HISTORY_MEMBER(curves_pump_efficiency, HydraulicCurvePumpEfficiency, 12)
-            REGISTER_HISTORY_MEMBER(curves_valve_headloss, HydraulicCurveValveHeadloss, 13)
-            REGISTER_HISTORY_MEMBER(curves_valve_characteristic, HydraulicCurveValveCharacteristic, 14)
-            REGISTER_HISTORY_MEMBER(curves_generic, HydraulicCurveGeneric, 15)
-            REGISTER_HISTORY_MEMBER(nodes_reservoirs, HydraulicNodeReservoir, 2)
-            REGISTER_HISTORY_MEMBER(nodes_junctions, HydraulicNodeJunction, 1)
-            REGISTER_HISTORY_MEMBER(nodes_tanks, HydraulicNodeTank, 3)
-            REGISTER_HISTORY_MEMBER(demand_points, HydraulicDemandPoint, 7)
-            REGISTER_HISTORY_MEMBER(links_pipes, HydraulicLinkPipe, 4)
-            REGISTER_HISTORY_MEMBER(links_pumps, HydraulicLinkPump, 5)
-            REGISTER_HISTORY_MEMBER(links_valves, HydraulicLinkValve, 6)
-            REGISTER_HISTORY_MEMBER(controls_simple, HydraulicControlSimple, 16)
-            REGISTER_HISTORY_MEMBER(controls_rules, HydraulicControlRule, 17)
+            REGISTER_HISTORY_MEMBER(pipe_materials, HydraulicPipeMaterial)
+            REGISTER_HISTORY_MEMBER(patterns_time, HydraulicPatternTime)
+            REGISTER_HISTORY_MEMBER(curves_tank_volume, HydraulicCurveTankVolume)
+            REGISTER_HISTORY_MEMBER(curves_pump_head, HydraulicCurvePumpHead)
+            REGISTER_HISTORY_MEMBER(curves_pump_efficiency, HydraulicCurvePumpEfficiency)
+            REGISTER_HISTORY_MEMBER(curves_valve_headloss, HydraulicCurveValveHeadloss)
+            REGISTER_HISTORY_MEMBER(curves_valve_characteristic, HydraulicCurveValveCharacteristic)
+            REGISTER_HISTORY_MEMBER(curves_generic, HydraulicCurveGeneric)
+            REGISTER_HISTORY_MEMBER(nodes_reservoirs, HydraulicNodeReservoir)
+            REGISTER_HISTORY_MEMBER(nodes_junctions, HydraulicNodeJunction)
+            REGISTER_HISTORY_MEMBER(nodes_tanks, HydraulicNodeTank)
+            REGISTER_HISTORY_MEMBER(demand_points, HydraulicDemandPoint)
+            REGISTER_HISTORY_MEMBER(links_pipes, HydraulicLinkPipe)
+            REGISTER_HISTORY_MEMBER(links_pumps, HydraulicLinkPump)
+            REGISTER_HISTORY_MEMBER(links_valves, HydraulicLinkValve)
+            REGISTER_HISTORY_MEMBER(controls_simple, HydraulicControlSimple)
+            REGISTER_HISTORY_MEMBER(controls_rules, HydraulicControlRule)
 #undef REGISTER_HISTORY_MEMBER
         }
     };

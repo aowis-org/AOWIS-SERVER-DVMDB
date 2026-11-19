@@ -47,6 +47,20 @@ struct Change {
 
 // Typed model envelope: payload bytes come from AOWIS ModelCodec, never from
 // the native store. References describe required live UUID dependencies.
+// Reserved native MODEL record-kind namespace. Hydraulic members previously used
+// 1..17, which overlapped generic caller-defined kinds and made orphan members
+// indistinguishable. The old pre-release encoding is deliberately unsupported.
+inline constexpr std::uint16_t hydraulicMemberKindBase = 200;
+inline constexpr std::uint16_t hydraulicMemberKindFirst = 201;
+inline constexpr std::uint16_t hydraulicMemberKindLast = 217;
+inline constexpr bool isHydraulicMemberKind(std::uint16_t kind) {
+    return kind >= hydraulicMemberKindFirst && kind <= hydraulicMemberKindLast;
+}
+inline constexpr bool isEngineeringRecordKind(std::uint16_t kind) {
+    return kind == 100 || kind == 101 || (kind >= 110 && kind <= 112) ||
+           isHydraulicMemberKind(kind);
+}
+
 struct ModelRecord {
     std::uint16_t kind = 0;
     std::vector<Key> references;
@@ -61,8 +75,8 @@ struct ModelChange {
 // Explicit failure reason for a missing domain validator. Pending local Commit
 // recovery must preserve its durable intent instead of permanently rejecting
 // an otherwise valid operation when retrying without this dependency.
-inline constexpr std::string_view missingAnnotationCommitValidator =
-    "native annotation Commit requires a semantic candidate validator";
+inline constexpr std::string_view missingEngineeringCommitValidator =
+    "native engineering Commit requires a semantic candidate validator";
 
 // Who made a revision and why; every revision records it, together with the
 // time the repository published it. There is no authentication: the author
@@ -597,11 +611,8 @@ private:
     // changed subtrees instead of scanning unchanged local model records.
     // Cached booleans never replace the source objects or semantic validator.
     std::map<Hash, bool> engineeringTrieCache_;
-    // Separate volatile SHA-256 subtree classification for local MODEL Commit.
-    // A cached false is proved by inspecting every descendant leaf. Unlike
-    // engineeringTrieCache_, this detects only native annotation kinds:
-    // legacy root-only hydraulic writers do not acquire a new requirement.
-    std::map<Hash, bool> annotationTrieCache_;
+    // The same kind classifier is used for imported and local committed tries.
+    // Every cached false was proved by inspecting the authenticated subtree.
     std::uint32_t indexFingerprint(const Hash& hash) const noexcept;
     void reserveIndexEntries(std::uint64_t entries);
     void indexEntry(const Hash& hash, std::uint64_t position);
@@ -659,7 +670,7 @@ private:
     void listHashes(const Hash& root, std::vector<std::pair<Key, Hash>>& output);
     // Call only under mutex_ and the repository file lock. Immutable trie
     // subtrees retain their classification across successive MODEL Commits.
-    bool containsAnnotationInTreeLocked(const Hash& root);
+    bool containsEngineeringInTreeLocked(const Hash& root);
     void diffHashes(const Hash& from, const Hash& to, std::vector<Difference>& output,
                     std::size_t limit = std::numeric_limits<std::size_t>::max());
     void diffWholeSubtree(const Hash& root, bool added, std::vector<Difference>& output,

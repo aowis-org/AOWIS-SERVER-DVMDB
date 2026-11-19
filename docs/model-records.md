@@ -14,7 +14,7 @@ it is in [hydraulic persistence](native-hydraulic-distribution-network.md).
 | Bridge from typed hydraulic distribution networks to records (`aowis/dvmdb/hydraulic_distribution_network_persistence.h`) | DVMDB, using MODEL's codec |
 
 DVMDB never builds a second serializer: its adapter aliases point at the MODEL
-implementation. The MODEL target checks its 70-structure field manifest and
+implementation. The MODEL target checks its 73-structure field manifest and
 its enum and value rules at configure time. The encoding is deterministic
 binary with strict enumerator and value checks; the REST API carries the same
 bytes as base64 inside JSON. Qt Core is needed only for this typed layer; with
@@ -35,6 +35,25 @@ every required reference exists in the resulting snapshot (including entities
 created in the same batch) and that no deleted entity is still referenced, and
 it updates the primary trie and the reverse-reference trie together. A failed
 check publishes nothing.
+
+## Reserved engineering record kinds and publication boundary
+
+Native MODEL record kinds **100** (Distribution root), **101** (hydraulic
+membership chunks), **110–112** (annotation layer/chunks/members), and
+**201–217** (17 hydraulic entity collections) are reserved engineering kinds.
+The former 1–17 hydraulic member values overlapped generic records and have
+been retired without migration. Generic clients may continue using their own
+non-reserved kinds, including 1–17; this does not make those records hydraulic.
+
+Generic HTTP `model-commits` and plain working-copy `save` reject any write
+when the pinned candidate already contains reserved engineering records, or
+when proposed records introduce reserved engineering kinds. Engineering edits
+must use canonical MODEL `save-events` and the fenced local-Commit workflow.
+The low-level native `Repository::commitModel` and merge API require an explicit
+candidate-wide semantic validator whenever an engineering record is present.
+An ordinary collection member without its owning network root cannot be
+laundered through generic native publication. Bulk-import and initial
+bootstrap operations use separately validated engineering-aware paths.
 
 ## Reads
 

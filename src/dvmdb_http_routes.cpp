@@ -964,8 +964,7 @@ std::optional<std::string> validateEngineeringCandidateIfNeeded(
         const MergeCandidate& candidate) {
     bool engineering = false;
     candidate.forEach([&engineering](const Key&, const ModelRecord& record) {
-        if (record.kind == hydraulic::hydraulicDistributionNetworkKind ||
-            isAnnotationNativeKind(record.kind))
+        if (isEngineeringRecordKind(record.kind))
             engineering = true;
     });
     if (!engineering) return std::nullopt;
@@ -1018,6 +1017,20 @@ void validateDraftAnnotationCandidate(const CandidateRecords& records) {
     };
     const std::optional<std::string> error = validateEngineeringCandidateIfNeeded(candidate);
     requireInput(!error.has_value(), "invalid model candidate annotation ownership or references");
+}
+
+// A raw Save or direct Model Commit must not publish engineering MODEL
+// records: they would have no corresponding reversible action journal.
+// Check BOTH existing and proposed records so deleting all roots/annotations
+// cannot disguise a domain write as a generic empty snapshot.
+void requireGenericChangesOnly(const CandidateRecords& before,
+                               const std::vector<ModelChange>& changes) {
+    for (const std::pair<const Key, ModelRecord>& entry : before)
+        requireInput(!isEngineeringRecordKind(entry.second.kind),
+                     "engineering data requires canonical working-copy MODEL events");
+    for (const ModelChange& change : changes)
+        requireInput(!change.record || !isEngineeringRecordKind(change.record->kind),
+                     "engineering data requires canonical working-copy MODEL events");
 }
 
 void checkNoClientAnnotationChanges(
@@ -2433,7 +2446,7 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                                    "archived history edits require atomic MODEL event saves");
             if (draft.generation == strictUint64(body, "expectedGeneration")) {
                 const CandidateRecords before = completeDraftCandidate(service, draft, {});
-                checkNoClientAnnotationChanges(before, changes);
+                requireGenericChangesOnly(before, changes);
                 validateDraftAnnotationCandidate(completeDraftCandidate(service, draft, changes));
             }
 #endif
@@ -3377,6 +3390,22 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             const RevisionId expected = parseRevisionId(requiredString(object, "expectedHead"));
             const CommitMetadata metadata = parseCommitMetadata(object);
             std::vector<ModelChange> changes = parseModelChanges(object, true);
+#ifdef AOWIS_DVMDB_HTTP_WITH_HYDRAULIC
+            const std::string projectText = pathParam(request, "id");
+            const std::optional<ProjectId> project = ProjectId::parse(projectText);
+            requireInput(project.has_value(), "project ID must be UUIDv7");
+            // The exact expected revision is independently pinned again by
+            // ProjectService's native commit CAS. A newer HEAD can only yield
+            // Conflict, never turn this inspected generic snapshot into an
+            // unchecked engineering write.
+            CandidateRecords before;
+            service.withRepository(projectText, [&](Repository& repository) {
+                for (const std::pair<Key, Bytes>& item :
+                     repository.scanAtRevision(*project, expected))
+                    before.emplace(item.first, decodeModelRecord(item.second));
+            });
+            requireGenericChangesOnly(before, changes);
+#endif
             const RevisionId saved = service.commitModel(pathParam(request, "id"),
                                            pathParam(request, "branch"), std::move(changes),
                                            metadata, expected
@@ -3418,8 +3447,7 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                         repository.scanAtRevision(*project, tip);
                     for (const std::pair<Key, Bytes>& entry : records) {
                         const ModelRecord record = decodeModelRecord(entry.second);
-                        if (record.kind == hydraulic::hydraulicDistributionNetworkKind ||
-                            record.kind == annotations::annotationLayerKind) {
+                        if (isEngineeringRecordKind(record.kind)) {
                             annotationProject = true;
                             break;
                         }

@@ -2901,20 +2901,18 @@ LocalCommitInfo ProjectService::commitWorkingCopy(
             // model candidate while both the project and draft are pinned,
             // before publishing even the first immutable operation record.
             // Generic models remain Qt-free and do not require a validator.
-            // New Distribution root writes and all annotation-bearing snapshots
-            // must be validated by their domain adapter (B2).
+            // The reserved engineering kind namespace includes Distribution
+            // roots, membership chunks, annotations, and all hydraulic member
+            // records. Checking both before and after prevents root deletion or
+            // a last-member deletion from removing the validation requirement.
             std::map<Key, ModelRecord> candidate;
             bool needsDomainValidation = false;
-            const std::function<bool(std::uint16_t)> isAnnotationKind =
-                [](std::uint16_t kind) {
-                    return kind >= 110 && kind <= 112;
-                };
             if (draft.baseRevision) {
                 for (const std::pair<Key, Bytes>& entry :
                      repository.scanAtRevision(*project, *draft.baseRevision)) {
                     const ModelRecord record = decodeModelRecord(entry.second);
                     needsDomainValidation = needsDomainValidation ||
-                        isAnnotationKind(record.kind);
+                        isEngineeringRecordKind(record.kind);
                     candidate.emplace(entry.first, record);
                 }
             }
@@ -2922,11 +2920,10 @@ LocalCommitInfo ProjectService::commitWorkingCopy(
                 const std::map<Key, ModelRecord>::iterator existing = candidate.find(change.key);
                 if (existing != candidate.end())
                     needsDomainValidation = needsDomainValidation ||
-                        isAnnotationKind(existing->second.kind);
+                        isEngineeringRecordKind(existing->second.kind);
                 if (change.record) {
                     needsDomainValidation = needsDomainValidation ||
-                        isAnnotationKind(change.record->kind) ||
-                        (change.record->kind == 100 && existing == candidate.end());
+                        isEngineeringRecordKind(change.record->kind);
                     candidate[change.key] = *change.record;
                 } else {
                     candidate.erase(change.key);
@@ -2935,7 +2932,7 @@ LocalCommitInfo ProjectService::commitWorkingCopy(
             if (needsDomainValidation) {
                 if (!validate)
                     throw ProjectError(ProjectErrorKind::InvalidInput,
-                        "engineering Commit requires annotation semantic candidate validation");
+                        "engineering Commit requires semantic candidate validation");
                 MergeCandidate proposed;
                 proposed.get = [&candidate](const Key& key) -> std::optional<ModelRecord> {
                     const std::map<Key, ModelRecord>::const_iterator found = candidate.find(key);
@@ -3010,7 +3007,7 @@ LocalCommitInfo ProjectService::commitWorkingCopy(
             // candidate is invalid: keep it Pending until a proper caller
             // supplies that validator (or HEAD moves and resolves the CAS).
             if (!validate && error.kind() == StorageErrorKind::InvalidInput &&
-                std::string_view(error.what()) == missingAnnotationCommitValidator)
+                std::string_view(error.what()) == missingEngineeringCommitValidator)
                 throw ProjectError(ProjectErrorKind::InvalidInput, error.what());
             if (error.kind() == StorageErrorKind::Conflict ||
                 error.kind() == StorageErrorKind::InvalidInput ||

@@ -148,6 +148,7 @@ void testCodecRejectsNonFiniteNumbers() {
         expect(encoded(pattern).isEmpty(), "non-finite list element encoded");
         NetworkHydraulicDistribution network;
         network.uuid = QUuid::createUuid();
+        network.id = QStringLiteral("Validated network");
         network.options_hydraulic.accuracy = bad;
         expect(encoded(network).isEmpty(), "non-finite network option encoded");
     }
@@ -476,6 +477,7 @@ void testPersistencePaths() {
         const native::RevisionId unbornHead = repository.createRootBranch(project, "main", commitMetadata());
         NetworkHydraulicDistribution network;
         network.uuid = QUuid::createUuid();
+        network.id = QStringLiteral("Validated network");
         HydraulicNodeReservoir reservoir; reservoir.uuid = QUuid::createUuid(); reservoir.hydraulic_head_m = 120;
         HydraulicNodeJunction first; first.uuid = QUuid::createUuid(); first.elevation_m = 50;
         HydraulicNodeJunction second; second.uuid = QUuid::createUuid(); second.elevation_m = 40;

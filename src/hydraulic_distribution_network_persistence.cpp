@@ -1,4 +1,6 @@
 #include "aowis/dvmdb/hydraulic_distribution_network_persistence.h"
+#include "aowis/dvmdb/map_annotation_persistence.h"
+#include "aowis/dvmdb/map_annotation_snapshot_validation.h"
 #include "aowis/dvmdb/revision_record.h"
 #include "aowis/dvmdb/storage_error.h"
 #include <aowis/model/edit/hydraulic_distribution_root_edit.h>
@@ -18,6 +20,7 @@
 #include <functional>
 #include <limits>
 #include <initializer_list>
+#include <iterator>
 #include <set>
 #include <map>
 #include <type_traits>
@@ -29,25 +32,25 @@ namespace {
 
 // Persist all 17 canonical hydraulic entity types using native numeric
 // kind IDs for the native engine. The original junction/pipe
-// values remain unchanged. These are NOT public stable wire type tags.
+// kinds are now in the reserved 201..217 range. These are NOT public stable wire type tags.
 #define AOWIS_DVMDB_HYDRAULIC_COLLECTIONS(X) \
-    X(pipe_materials, HydraulicPipeMaterial, 8) \
-    X(patterns_time, HydraulicPatternTime, 9) \
-    X(curves_tank_volume, HydraulicCurveTankVolume, 10) \
-    X(curves_pump_head, HydraulicCurvePumpHead, 11) \
-    X(curves_pump_efficiency, HydraulicCurvePumpEfficiency, 12) \
-    X(curves_valve_headloss, HydraulicCurveValveHeadloss, 13) \
-    X(curves_valve_characteristic, HydraulicCurveValveCharacteristic, 14) \
-    X(curves_generic, HydraulicCurveGeneric, 15) \
-    X(nodes_reservoirs, HydraulicNodeReservoir, 2) \
+    X(pipe_materials, HydraulicPipeMaterial, 208) \
+    X(patterns_time, HydraulicPatternTime, 209) \
+    X(curves_tank_volume, HydraulicCurveTankVolume, 210) \
+    X(curves_pump_head, HydraulicCurvePumpHead, 211) \
+    X(curves_pump_efficiency, HydraulicCurvePumpEfficiency, 212) \
+    X(curves_valve_headloss, HydraulicCurveValveHeadloss, 213) \
+    X(curves_valve_characteristic, HydraulicCurveValveCharacteristic, 214) \
+    X(curves_generic, HydraulicCurveGeneric, 215) \
+    X(nodes_reservoirs, HydraulicNodeReservoir, 202) \
     X(nodes_junctions, HydraulicNodeJunction, junctionKind) \
-    X(nodes_tanks, HydraulicNodeTank, 3) \
-    X(demand_points, HydraulicDemandPoint, 7) \
+    X(nodes_tanks, HydraulicNodeTank, 203) \
+    X(demand_points, HydraulicDemandPoint, 207) \
     X(links_pipes, HydraulicLinkPipe, pipeKind) \
-    X(links_pumps, HydraulicLinkPump, 5) \
-    X(links_valves, HydraulicLinkValve, 6) \
-    X(controls_simple, HydraulicControlSimple, 16) \
-    X(controls_rules, HydraulicControlRule, 17)
+    X(links_pumps, HydraulicLinkPump, 205) \
+    X(links_valves, HydraulicLinkValve, 206) \
+    X(controls_simple, HydraulicControlSimple, 216) \
+    X(controls_rules, HydraulicControlRule, 217)
 
 constexpr quint32 manifestMagic = 0x414E5835U;
 constexpr quint32 manifestVersion = 3; // pre-release format: chunk references, not flat lists
@@ -488,7 +491,7 @@ std::vector<Key> scalarReferences(const HydraulicEntity& entity) {
 // validation; incoming references are unchanged by an in-place update.
 // Decode the old record before trusting this invariant on the indexed path.
 bool validCatalogueRecord(const ModelRecord& record, const QUuid& uuid) {
-    if (record.kind < 8 || record.kind > 15 || !record.references.empty()) return false;
+    if (record.kind < 208 || record.kind > 215 || !record.references.empty()) return false;
     const QByteArray bytes = qByteArrayFromBytes(record.payload);
     switch (record.kind) {
 #define CHECK_CATALOG(name, type, kind) \
@@ -496,14 +499,14 @@ bool validCatalogueRecord(const ModelRecord& record, const QUuid& uuid) {
             const std::optional<type> decoded = ModelCodec<type>::decode(bytes); \
             return decoded && decoded->uuid == uuid; \
         }
-        CHECK_CATALOG(pipe_materials, HydraulicPipeMaterial, 8)
-        CHECK_CATALOG(patterns_time, HydraulicPatternTime, 9)
-        CHECK_CATALOG(curves_tank_volume, HydraulicCurveTankVolume, 10)
-        CHECK_CATALOG(curves_pump_head, HydraulicCurvePumpHead, 11)
-        CHECK_CATALOG(curves_pump_efficiency, HydraulicCurvePumpEfficiency, 12)
-        CHECK_CATALOG(curves_valve_headloss, HydraulicCurveValveHeadloss, 13)
-        CHECK_CATALOG(curves_valve_characteristic, HydraulicCurveValveCharacteristic, 14)
-        CHECK_CATALOG(curves_generic, HydraulicCurveGeneric, 15)
+        CHECK_CATALOG(pipe_materials, HydraulicPipeMaterial, 208)
+        CHECK_CATALOG(patterns_time, HydraulicPatternTime, 209)
+        CHECK_CATALOG(curves_tank_volume, HydraulicCurveTankVolume, 210)
+        CHECK_CATALOG(curves_pump_head, HydraulicCurvePumpHead, 211)
+        CHECK_CATALOG(curves_pump_efficiency, HydraulicCurvePumpEfficiency, 212)
+        CHECK_CATALOG(curves_valve_headloss, HydraulicCurveValveHeadloss, 213)
+        CHECK_CATALOG(curves_valve_characteristic, HydraulicCurveValveCharacteristic, 214)
+        CHECK_CATALOG(curves_generic, HydraulicCurveGeneric, 215)
 #undef CHECK_CATALOG
         default: return false;
     }
@@ -519,7 +522,7 @@ bool validCatalogueRecord(const ModelRecord& record, const QUuid& uuid) {
 bool physicalOnlyChange(const HydraulicEntity& proposed, const ModelRecord& old,
                         const QUuid& uuid) {
     if (const HydraulicNodeReservoir* changed = std::get_if<HydraulicNodeReservoir>(&proposed)) {
-        if (old.kind != 2) return false;
+        if (old.kind != 202) return false;
         const std::optional<HydraulicNodeReservoir> prior = ModelCodec<HydraulicNodeReservoir>::decode(
             qByteArrayFromBytes(old.payload));
         if (!prior || prior->uuid != uuid) return false;
@@ -533,7 +536,7 @@ bool physicalOnlyChange(const HydraulicEntity& proposed, const ModelRecord& old,
                ModelCodec<HydraulicNodeReservoir>::encode(*changed);
     }
     if (const HydraulicNodeTank* changed = std::get_if<HydraulicNodeTank>(&proposed)) {
-        if (old.kind != 3) return false;
+        if (old.kind != 203) return false;
         const std::optional<HydraulicNodeTank> prior = ModelCodec<HydraulicNodeTank>::decode(
             qByteArrayFromBytes(old.payload));
         if (!prior || prior->uuid != uuid) return false;
@@ -553,7 +556,7 @@ bool physicalOnlyChange(const HydraulicEntity& proposed, const ModelRecord& old,
                ModelCodec<HydraulicNodeTank>::encode(*changed);
     }
     if (const HydraulicLinkPump* changed = std::get_if<HydraulicLinkPump>(&proposed)) {
-        if (old.kind != 5) return false;
+        if (old.kind != 205) return false;
         const std::optional<HydraulicLinkPump> prior = ModelCodec<HydraulicLinkPump>::decode(
             qByteArrayFromBytes(old.payload));
         if (!prior || prior->uuid != uuid) return false;
@@ -566,7 +569,7 @@ bool physicalOnlyChange(const HydraulicEntity& proposed, const ModelRecord& old,
                ModelCodec<HydraulicLinkPump>::encode(*changed);
     }
     if (const HydraulicLinkValve* changed = std::get_if<HydraulicLinkValve>(&proposed)) {
-        if (old.kind != 6) return false;
+        if (old.kind != 206) return false;
         const std::optional<HydraulicLinkValve> prior = ModelCodec<HydraulicLinkValve>::decode(
             qByteArrayFromBytes(old.payload));
         if (!prior || prior->uuid != uuid) return false;
@@ -759,11 +762,11 @@ std::optional<RevisionType> tryIndexedMembershipEditsUsing(
             std::size_t collection = 0;
             std::optional<HydraulicEntity> decoded;
             QString error;
-            if (old->kind >= 8 && old->kind <= 15) {
-                collection = old->kind - 8;
+            if (old->kind >= 208 && old->kind <= 215) {
+                collection = old->kind - 208;
                 if (!validCatalogueRecord(*old, change.uuid)) return std::nullopt;
-            } else if (old->kind == 2 || old->kind == 3 ||
-                       old->kind == 5 || old->kind == 6) {
+            } else if (old->kind == 202 || old->kind == 203 ||
+                       old->kind == 205 || old->kind == 206) {
                 // Decode the previous record before trusting its outgoing
                 // reference index. A corrupt index must never authorize a
                 // deletion based on incomplete incoming dependencies.
@@ -777,10 +780,10 @@ std::optional<RevisionType> tryIndexedMembershipEditsUsing(
                         decoded = HydraulicEntity{*value}; \
                         break; \
                     }
-                    DECODE_PHYSICAL(HydraulicNodeReservoir, 2, HydraulicEntityType::Reservoir)
-                    DECODE_PHYSICAL(HydraulicNodeTank, 3, HydraulicEntityType::Tank)
-                    DECODE_PHYSICAL(HydraulicLinkPump, 5, HydraulicEntityType::Pump)
-                    DECODE_PHYSICAL(HydraulicLinkValve, 6, HydraulicEntityType::Valve)
+                    DECODE_PHYSICAL(HydraulicNodeReservoir, 202, HydraulicEntityType::Reservoir)
+                    DECODE_PHYSICAL(HydraulicNodeTank, 203, HydraulicEntityType::Tank)
+                    DECODE_PHYSICAL(HydraulicLinkPump, 205, HydraulicEntityType::Pump)
+                    DECODE_PHYSICAL(HydraulicLinkValve, 206, HydraulicEntityType::Valve)
 #undef DECODE_PHYSICAL
                     default: return std::nullopt;
                 }
@@ -796,7 +799,7 @@ std::optional<RevisionType> tryIndexedMembershipEditsUsing(
                     ModelCodec<HydraulicLinkPipe>::decode(qByteArrayFromBytes(old->payload), &error);
                 if (!value || value->uuid != change.uuid) return std::nullopt;
                 decoded = HydraulicEntity{*value};
-            } else if (old->kind == 7 || old->kind == 16 || old->kind == 17) {
+            } else if (old->kind == 207 || old->kind == 216 || old->kind == 217) {
                 switch (old->kind) {
 #define DECODE_DEPENDENT(type, expectedKind, ordinal) \
                     case expectedKind: { \
@@ -807,9 +810,9 @@ std::optional<RevisionType> tryIndexedMembershipEditsUsing(
                         decoded = HydraulicEntity{*value}; \
                         break; \
                     }
-                    DECODE_DEPENDENT(HydraulicDemandPoint, 7, HydraulicEntityType::DemandPoint)
-                    DECODE_DEPENDENT(HydraulicControlSimple, 16, HydraulicEntityType::SimpleControl)
-                    DECODE_DEPENDENT(HydraulicControlRule, 17, HydraulicEntityType::RuleControl)
+                    DECODE_DEPENDENT(HydraulicDemandPoint, 207, HydraulicEntityType::DemandPoint)
+                    DECODE_DEPENDENT(HydraulicControlSimple, 216, HydraulicEntityType::SimpleControl)
+                    DECODE_DEPENDENT(HydraulicControlRule, 217, HydraulicEntityType::RuleControl)
 #undef DECODE_DEPENDENT
                     default: return std::nullopt;
                 }
@@ -863,10 +866,10 @@ std::optional<RevisionType> tryIndexedMembershipEditsUsing(
         return findOwner(key).has_value();
     };
     const std::function<bool(const QUuid&)> nodeTarget = [&](const QUuid& id) {
-        return validTarget(id, {junctionKind, 2, 3});
+        return validTarget(id, {junctionKind, 202, 203});
     };
     const std::function<bool(const QUuid&)> patternTarget = [&](const QUuid& id) {
-        return validTarget(id, {9});
+        return validTarget(id, {209});
     };
     for (const std::pair<const Key, const HydraulicEntityChange*>& entry : insertions) {
         const HydraulicEntityChange& change = *entry.second;
@@ -879,21 +882,21 @@ std::optional<RevisionType> tryIndexedMembershipEditsUsing(
             if (!patternTarget(reservoir->head_pattern_uuid) ||
                 !patternTarget(reservoir->quality_source.pattern_uuid)) return std::nullopt;
         } else if (const HydraulicNodeTank* tank = std::get_if<HydraulicNodeTank>(&*change.value)) {
-            if (!validTarget(tank->volume_curve_uuid, {10}) ||
+            if (!validTarget(tank->volume_curve_uuid, {210}) ||
                 !patternTarget(tank->quality_source.pattern_uuid)) return std::nullopt;
         } else if (const HydraulicLinkPipe* pipe = std::get_if<HydraulicLinkPipe>(&*change.value)) {
             if (!nodeTarget(pipe->node_uuid_from) || !nodeTarget(pipe->node_uuid_to) ||
-                !validTarget(pipe->material_uuid, {8})) return std::nullopt;
+                !validTarget(pipe->material_uuid, {208})) return std::nullopt;
         } else if (const HydraulicLinkPump* pump = std::get_if<HydraulicLinkPump>(&*change.value)) {
             if (!nodeTarget(pump->node_uuid_from) || !nodeTarget(pump->node_uuid_to) ||
-                !validTarget(pump->head_curve_uuid, {11}) ||
+                !validTarget(pump->head_curve_uuid, {211}) ||
                 !patternTarget(pump->speed_pattern_uuid) ||
-                !validTarget(pump->efficiency_curve_uuid, {12}) ||
+                !validTarget(pump->efficiency_curve_uuid, {212}) ||
                 !patternTarget(pump->price_pattern_uuid)) return std::nullopt;
         } else if (const HydraulicLinkValve* valve = std::get_if<HydraulicLinkValve>(&*change.value)) {
             if (!nodeTarget(valve->node_uuid_from) || !nodeTarget(valve->node_uuid_to) ||
-                !validTarget(valve->head_loss_curve_uuid, {13}) ||
-                !validTarget(valve->characteristic_curve_uuid, {14})) return std::nullopt;
+                !validTarget(valve->head_loss_curve_uuid, {213}) ||
+                !validTarget(valve->characteristic_curve_uuid, {214})) return std::nullopt;
         } else if (const HydraulicDemandPoint* point = std::get_if<HydraulicDemandPoint>(&*change.value)) {
             for (const HydraulicDemand& demand : point->demands)
                 if (!patternTarget(demand.pattern_uuid)) return std::nullopt;
@@ -938,7 +941,7 @@ std::optional<RevisionType> tryIndexedMembershipEditsUsing(
             }
         } else if (const HydraulicControlSimple* control =
                    std::get_if<HydraulicControlSimple>(&*change.value)) {
-            if (!validTarget(control->link_uuid, {pipeKind, 5, 6}) ||
+            if (!validTarget(control->link_uuid, {pipeKind, 205, 206}) ||
                 !nodeTarget(control->trigger_node_uuid)) return std::nullopt;
         } else if (const HydraulicControlRule* rule =
                    std::get_if<HydraulicControlRule>(&*change.value)) {
@@ -946,12 +949,12 @@ std::optional<RevisionType> tryIndexedMembershipEditsUsing(
                 if (premise.object == HydraulicControlRuleObject::Node &&
                     !nodeTarget(premise.object_uuid)) return std::nullopt;
                 if (premise.object == HydraulicControlRuleObject::Link &&
-                    !validTarget(premise.object_uuid, {pipeKind, 5, 6})) return std::nullopt;
+                    !validTarget(premise.object_uuid, {pipeKind, 205, 206})) return std::nullopt;
             }
             for (const HydraulicControlRuleAction& action : rule->actions_then)
-                if (!validTarget(action.link_uuid, {pipeKind, 5, 6})) return std::nullopt;
+                if (!validTarget(action.link_uuid, {pipeKind, 205, 206})) return std::nullopt;
             for (const HydraulicControlRuleAction& action : rule->actions_else)
-                if (!validTarget(action.link_uuid, {pipeKind, 5, 6})) return std::nullopt;
+                if (!validTarget(action.link_uuid, {pipeKind, 205, 206})) return std::nullopt;
         } else if (change.value->index() >= 8) return std::nullopt;
         // Catalogue entries have no outgoing refs.
     }
@@ -1046,7 +1049,8 @@ std::optional<RevisionId> tryIndexedUuidMembershipEdits(
             return ownerChunkAtRevision(repository, project, expectedHead, networkUuid, key);
         },
         [&repository, &project, branch, &expectedHead, &metadata](std::vector<ModelChange> pending) {
-            return repository.commitModel(project, branch, std::move(pending), metadata, expectedHead);
+            return repository.commitModel(project, branch, std::move(pending), metadata, expectedHead,
+                false, std::nullopt, annotations::validateAnnotationSnapshot);
         }, networkUuid, changes, diagnostics);
 }
 
@@ -1115,7 +1119,8 @@ std::optional<RevisionId> tryIndexedUuidPhysicalEdits(
             throw StorageError(StorageErrorKind::Conflict,
                                "branch head changed during UUIDv7 hydraulic physical edit");
     } else {
-        result = repository.commitModel(project, branch, std::move(pending), metadata, expectedHead);
+        result = repository.commitModel(project, branch, std::move(pending), metadata, expectedHead,
+                false, std::nullopt, annotations::validateAnnotationSnapshot);
     }
     if (diagnostics) {
         diagnostics->indexedPhysicalFastPath = true;
@@ -1146,7 +1151,7 @@ std::optional<RevisionId> tryIndexedUuidCatalogueEdits(
             return std::nullopt;
         const std::optional<ModelRecord> old =
             repository.getModelAtRevision(project, expectedHead, key);
-        if (!old || old->kind != 8 + change.value->index() ||
+        if (!old || old->kind != 208 + change.value->index() ||
             !validCatalogueRecord(*old, change.uuid))
             return std::nullopt;
         const aowis::dvmdb::ModelValidationReport values =
@@ -1166,7 +1171,8 @@ std::optional<RevisionId> tryIndexedUuidCatalogueEdits(
             throw StorageError(StorageErrorKind::Conflict,
                                "branch head changed during UUIDv7 hydraulic catalogue edit");
     } else {
-        result = repository.commitModel(project, branch, std::move(pending), metadata, expectedHead);
+        result = repository.commitModel(project, branch, std::move(pending), metadata, expectedHead,
+                false, std::nullopt, annotations::validateAnnotationSnapshot);
     }
     if (diagnostics) {
         diagnostics->indexedCatalogueFastPath = true;
@@ -1194,8 +1200,8 @@ std::optional<RevisionId> tryIndexedUuidPipeRewires(
             repository.getModelAtRevision(project, expectedHead, key);
         if (!record) return false;
         if (material) {
-            if (record->kind != 8) return false;
-        } else if (record->kind != junctionKind && record->kind != 2 && record->kind != 3) {
+            if (record->kind != 208) return false;
+        } else if (record->kind != junctionKind && record->kind != 202 && record->kind != 203) {
             return false;
         }
         return ownerChunkAtRevision(repository, project, expectedHead, networkUuid, key).has_value();
@@ -1242,7 +1248,8 @@ std::optional<RevisionId> tryIndexedUuidPipeRewires(
             throw StorageError(StorageErrorKind::Conflict,
                                "branch head changed during UUIDv7 hydraulic topology edit");
     } else {
-        result = repository.commitModel(project, branch, std::move(pending), metadata, expectedHead);
+        result = repository.commitModel(project, branch, std::move(pending), metadata, expectedHead,
+                false, std::nullopt, annotations::validateAnnotationSnapshot);
     }
     if (diagnostics) {
         diagnostics->indexedTopologyFastPath = true;
@@ -1274,7 +1281,7 @@ std::optional<RevisionId> tryIndexedUuidDependentUpdates(
         return ownerChunkAtRevision(repository, project, expectedHead, networkUuid, key).has_value();
     };
     const std::function<bool(const QUuid&)> nodeTarget = [&](const QUuid& id) -> bool {
-        return validTarget(id, {junctionKind, 2, 3});
+        return validTarget(id, {junctionKind, 202, 203});
     };
     for (const HydraulicEntityChange& change : changes) {
         if (change.uuid.isNull() || change.uuid == networkUuid || !change.value ||
@@ -1293,20 +1300,20 @@ std::optional<RevisionId> tryIndexedUuidDependentUpdates(
         if (!old) return std::nullopt;
         std::optional<HydraulicEntity> previous;
         const QByteArray oldBytes = qByteArrayFromBytes(old->payload);
-        if (std::holds_alternative<HydraulicDemandPoint>(*change.value) && old->kind == 7) {
+        if (std::holds_alternative<HydraulicDemandPoint>(*change.value) && old->kind == 207) {
             const std::optional<HydraulicDemandPoint> decoded = ModelCodec<HydraulicDemandPoint>::decode(oldBytes);
             if (decoded && decoded->uuid == change.uuid) previous = HydraulicEntity{*decoded};
-        } else if (std::holds_alternative<HydraulicControlSimple>(*change.value) && old->kind == 16) {
+        } else if (std::holds_alternative<HydraulicControlSimple>(*change.value) && old->kind == 216) {
             const std::optional<HydraulicControlSimple> decoded = ModelCodec<HydraulicControlSimple>::decode(oldBytes);
             if (decoded && decoded->uuid == change.uuid) previous = HydraulicEntity{*decoded};
-        } else if (std::holds_alternative<HydraulicControlRule>(*change.value) && old->kind == 17) {
+        } else if (std::holds_alternative<HydraulicControlRule>(*change.value) && old->kind == 217) {
             const std::optional<HydraulicControlRule> decoded = ModelCodec<HydraulicControlRule>::decode(oldBytes);
             if (decoded && decoded->uuid == change.uuid) previous = HydraulicEntity{*decoded};
         }
         if (!previous || old->references != dependentReferences(*previous)) return std::nullopt;
         if (const HydraulicDemandPoint* point = std::get_if<HydraulicDemandPoint>(&*change.value)) {
             for (const HydraulicDemand& demand : point->demands)
-                if (!validTarget(demand.pattern_uuid, {9})) return std::nullopt;
+                if (!validTarget(demand.pattern_uuid, {209})) return std::nullopt;
             if (point->attachment.type == HydraulicDemandPointAttachmentType::Pipe) {
                 const QUuid pipeUuid = point->attachment.pipe_uuid;
                 if (!validTarget(pipeUuid, {pipeKind}) ||
@@ -1336,7 +1343,7 @@ std::optional<RevisionId> tryIndexedUuidDependentUpdates(
             }
         } else if (const HydraulicControlSimple* control =
                    std::get_if<HydraulicControlSimple>(&*change.value)) {
-            if (!validTarget(control->link_uuid, {pipeKind, 5, 6}) ||
+            if (!validTarget(control->link_uuid, {pipeKind, 205, 206}) ||
                 !nodeTarget(control->trigger_node_uuid)) return std::nullopt;
         } else if (const HydraulicControlRule* rule =
                    std::get_if<HydraulicControlRule>(&*change.value)) {
@@ -1344,12 +1351,12 @@ std::optional<RevisionId> tryIndexedUuidDependentUpdates(
                 if (premise.object == HydraulicControlRuleObject::Node &&
                     !nodeTarget(premise.object_uuid)) return std::nullopt;
                 if (premise.object == HydraulicControlRuleObject::Link &&
-                    !validTarget(premise.object_uuid, {pipeKind, 5, 6})) return std::nullopt;
+                    !validTarget(premise.object_uuid, {pipeKind, 205, 206})) return std::nullopt;
             }
             for (const HydraulicControlRuleAction& action : rule->actions_then)
-                if (!validTarget(action.link_uuid, {pipeKind, 5, 6})) return std::nullopt;
+                if (!validTarget(action.link_uuid, {pipeKind, 205, 206})) return std::nullopt;
             for (const HydraulicControlRuleAction& action : rule->actions_else)
-                if (!validTarget(action.link_uuid, {pipeKind, 5, 6})) return std::nullopt;
+                if (!validTarget(action.link_uuid, {pipeKind, 205, 206})) return std::nullopt;
         }
         const aowis::dvmdb::ModelValidationReport values =
             std::visit(ValidateIndexedEntity{}, *change.value);
@@ -1369,7 +1376,8 @@ std::optional<RevisionId> tryIndexedUuidDependentUpdates(
             throw StorageError(StorageErrorKind::Conflict,
                                "branch head changed during UUIDv7 hydraulic dependent edit");
     } else {
-        result = repository.commitModel(project, branch, std::move(pending), metadata, expectedHead);
+        result = repository.commitModel(project, branch, std::move(pending), metadata, expectedHead,
+                false, std::nullopt, annotations::validateAnnotationSnapshot);
     }
     if (diagnostics) {
         diagnostics->indexedDependentUpdateFastPath = true;
@@ -1432,7 +1440,8 @@ std::optional<RevisionId> tryIndexedUuidScalarEdits(
             throw StorageError(StorageErrorKind::Conflict,
                                "branch head changed during UUIDv7 hydraulic scalar edit");
     } else {
-        result = repository.commitModel(project, branch, std::move(pending), metadata, expectedHead);
+        result = repository.commitModel(project, branch, std::move(pending), metadata, expectedHead,
+                false, std::nullopt, annotations::validateAnnotationSnapshot);
     }
     if (diagnostics) {
         diagnostics->indexedScalarFastPath = true;
@@ -1442,6 +1451,18 @@ std::optional<RevisionId> tryIndexedUuidScalarEdits(
 }
 
 } // namespace
+
+std::uint16_t hydraulicMemberKindForCollection(std::size_t collection) {
+    static constexpr std::array<std::uint16_t, collectionCount> kinds = {
+#define MEMBER_KIND(name, type, kind) static_cast<std::uint16_t>(kind),
+        AOWIS_DVMDB_HYDRAULIC_COLLECTIONS(MEMBER_KIND)
+#undef MEMBER_KIND
+    };
+    if (collection >= kinds.size())
+        throw StorageError(StorageErrorKind::InvalidInput,
+                           "unknown hydraulic membership collection");
+    return kinds[collection];
+}
 
 CanonicalHydraulicMemberImage canonicalHydraulicMemberImage(
         const aowis::model::ModelEntityEdit& edit, const QByteArray& image) {
@@ -1682,7 +1703,7 @@ std::optional<VerifiedHydraulicRevisionCoverage> verifyHydraulicRevisionActionCo
                     own(chunkKey, index, state.chunkKeys);
                     for (const Key& memberKey : chunk->references) {
                         const std::optional<ModelRecord> member = read(memberKey);
-                        if (!member || member->kind == 100 || member->kind == 101)
+                        if (!member || !isHydraulicMemberKind(member->kind))
                             throw std::runtime_error("historical membership references a non-entity");
                         own(memberKey, index, state.memberKeys);
                         const QUuid id = uuidFromKey(memberKey);
@@ -2800,98 +2821,6 @@ void materializeDraftMembership(
 
 using CandidateReader = std::function<std::optional<ModelRecord>(const Key&)>;
 
-void candidateMembers(const CandidateReader& read, Manifest& manifest) {
-    std::set<Key> seen;
-    for (std::size_t collection = 0; collection < collectionCount; ++collection) {
-        for (const QUuid& id : manifest.chunks[collection]) {
-            const std::optional<ModelRecord> record = read(keyFromUuid(id));
-            if (!record) throw StorageError(StorageErrorKind::Corruption, "merged network is missing a membership chunk");
-            const MemberChunk chunk = decodeChunk(*record, manifest.metadata.uuid, collection);
-            for (const QUuid& member : chunk.members) {
-                if (!seen.insert(keyFromUuid(member)).second)
-                    throw StorageError(StorageErrorKind::Corruption, "merged network has duplicate members");
-                manifest.members[collection].append(member);
-            }
-        }
-    }
-}
-
-template<typename T>
-void candidateEntities(const CandidateReader& read, const QList<QUuid>& ids,
-                       std::uint16_t kind, QList<T>& output, DependencyIndex& recorded) {
-    for (const QUuid& id : ids) {
-        const std::optional<ModelRecord> record = read(keyFromUuid(id));
-        if (!record || record->kind != kind)
-            throw StorageError(StorageErrorKind::Corruption, "merged network contains a missing/wrong-kind entity");
-        const QByteArray bytes = qByteArrayFromBytes(record->payload);
-        const std::optional<T> decoded = aowis::dvmdb::ModelCodec<T>::decode(bytes);
-        if (!decoded || decoded->uuid != id ||
-            aowis::dvmdb::ModelCodec<T>::encode(*decoded) != bytes)
-            throw StorageError(StorageErrorKind::Corruption, "merged network contains noncanonical entity bytes");
-        for (const Key& ref : record->references)
-            recorded.emplace_back(keyFromUuid(id), ref);
-        output.append(*decoded);
-    }
-}
-
-std::optional<std::string> validateMergedHydraulicSnapshot(const MergeCandidate& candidate) {
-    try {
-        std::vector<Key> roots;
-        std::set<Key> existing;
-        candidate.forEach([&roots, &existing](const Key& key, const ModelRecord& record) {
-            if (!existing.insert(key).second)
-                throw StorageError(StorageErrorKind::Corruption, "duplicate object UUID in merged snapshot");
-            if (record.kind == hydraulicDistributionNetworkKind) roots.push_back(key);
-        });
-        if (roots.empty()) return std::string("hydraulic merge has no network root");
-        std::set<Key> globallyOwned;
-        for (const Key& rootKey : roots) {
-            const std::optional<ModelRecord> record = candidate.get(rootKey);
-            if (!record) throw StorageError(StorageErrorKind::Corruption, "missing merged hydraulic root");
-            Manifest manifest = decodeManifest(qByteArrayFromBytes(record->payload));
-            if (keyFromUuid(manifest.metadata.uuid) != rootKey)
-                throw StorageError(StorageErrorKind::Corruption, "merged root UUID and payload mismatch");
-            checkRoot(manifest, *record);
-            candidateMembers(candidate.get, manifest);
-            const std::set<Key> members = memberKeys(manifest);
-            if (!globallyOwned.insert(rootKey).second)
-                throw StorageError(StorageErrorKind::Corruption, "duplicate network root");
-            for (const Key& chunk : chunkKeys(manifest)) {
-                if (!globallyOwned.insert(chunk).second)
-                    throw StorageError(StorageErrorKind::Corruption, "membership chunk belongs to multiple networks");
-            }
-            for (const Key& member : members) {
-                if (!globallyOwned.insert(member).second)
-                    throw StorageError(StorageErrorKind::Corruption, "hydraulic entity belongs to multiple networks");
-            }
-            NetworkHydraulicDistribution network = std::move(manifest.metadata);
-            DependencyIndex stored;
-            std::size_t ordinal = 0;
-#define RESTORE_MERGED(name, type, kind) \
-            candidateEntities(candidate.get, manifest.members[ordinal], \
-                              static_cast<std::uint16_t>(kind), network.name, stored); \
-            ++ordinal;
-            AOWIS_DVMDB_HYDRAULIC_COLLECTIONS(RESTORE_MERGED)
-#undef RESTORE_MERGED
-            const aowis::dvmdb::HydraulicDependencyValidation validated =
-                aowis::dvmdb::validateHydraulicDistributionNetworkWithDependencies(network);
-            if (!validated.report.valid())
-                throw StorageError(StorageErrorKind::Corruption, "invalid combined hydraulic model: " +
-                                         validated.report.summary().toStdString());
-            DependencyIndex canonical = indexedDependencies(validated.dependencies, members);
-            std::sort(stored.begin(), stored.end());
-            stored.erase(std::unique(stored.begin(), stored.end()), stored.end());
-            if (stored != canonical)
-                throw StorageError(StorageErrorKind::Corruption, "merged model references disagree with canonical model payloads");
-        }
-        if (existing != globallyOwned)
-            throw StorageError(StorageErrorKind::Corruption, "merged hydraulic snapshot contains unowned or orphaned objects");
-        return std::nullopt;
-    } catch (const std::exception& error) {
-        return std::string(error.what());
-    }
-}
-
 // Reconcile independent membership edits using the common-ancestor membership
 // order. Removals made on either branch are retained; independent additions
 // from both branches survive. Existing members retain their original order.
@@ -3306,7 +3235,7 @@ std::invoke_result_t<Callback, const MergeOptions&> mergeHydraulicWithChoices(
         return reconcileExplicitHydraulicMembership(candidate, set, targetReader,
                                                     sourceReader, objectChoices);
     };
-    options.validate = validateMergedHydraulicSnapshot;
+    options.validate = annotations::validateAnnotationSnapshot;
     if (configure) configure(options);
     return invoke(options);
 }
@@ -3472,7 +3401,21 @@ RevisionId saveHydraulicDistributionNetwork(Repository& repository, const Projec
     root.payload = bytesFromQByteArray(encodeManifest(next));
     root.references = chunkKeys(next);
     changes.push_back(ModelChange{networkKey, std::move(root)});
-    return repository.commitModel(project, branch, std::move(changes), metadata, expectedHead);
+    // A distribution network and its deterministic annotation layer must first
+    // become visible in the SAME immutable revision. An orphan network root is
+    // never a valid engineering candidate under the native publication guard.
+    if (!currentRoot) {
+        MapAnnotationLayer layer;
+        layer.uuid = annotations::distributionLayerUuid(network.uuid);
+        layer.domain = MapAnnotationDomain::Distribution;
+        layer.owner_network_uuid = network.uuid;
+        std::vector<ModelChange> annotationRecords =
+            annotations::fullDraftAnnotationLayerChanges(layer, {});
+        changes.insert(changes.end(), std::make_move_iterator(annotationRecords.begin()),
+                       std::make_move_iterator(annotationRecords.end()));
+    }
+    return repository.commitModel(project, branch, std::move(changes), metadata, expectedHead,
+                                  false, std::nullopt, annotations::validateAnnotationSnapshot);
 }
 
 RevisionId editHydraulicDistributionNetwork(Repository& repository, const ProjectId& project,

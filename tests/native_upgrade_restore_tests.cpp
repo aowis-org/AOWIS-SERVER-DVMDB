@@ -164,9 +164,9 @@ void exercise(const std::string& python, const std::string& script,
             const RevisionId initial = service.head(info.id, "main");
             const RevisionId fork = service.createBranchAtRevision(info.id, "feature", "main", initial);
             require(fork == initial, "fork invented a revision");
-            const ModelRecord first = model(100, 16, static_cast<std::uint8_t>(index));
+            const ModelRecord first = model(120, 16, static_cast<std::uint8_t>(index));
             historical.push_back(service.commitModel(info.id, "main", {{key(0x21), first}}, commitMetadata(), initial));
-            const ModelRecord feature = model(101, 19, static_cast<std::uint8_t>(index + 1));
+            const ModelRecord feature = model(121, 19, static_cast<std::uint8_t>(index + 1));
             (void)service.commitModel(info.id, "feature", {{key(0x31), feature}}, commitMetadata(), initial);
             const std::size_t length = index == 3 ? 2 * 1024 * 1024 : 32 + static_cast<std::size_t>(index);
             const ModelRecord latest = model(102, length, static_cast<std::uint8_t>(index + 2));
