@@ -1,3 +1,4 @@
 [submodule "external/AOWIS-SERVER-MODEL"]
 	path = external/AOWIS-SERVER-MODEL
 	url = https://github.com/aowis-org/AOWIS-SERVER-MODEL.git
+	branch = main
