@@ -2719,6 +2719,16 @@ void exerciseUnbornFirstTankHistory() {
                 *service, draftId, std::nullopt, 0, 2, &error);
         require(plan && !(*plan).empty(),
                 "Unborn History could not verify the first Undo");
+        // Both cursor neighbours from one replay; an out-of-range position
+        // refuses the whole request.
+        require(native::annotations::canNavigateVerifiedActiveDraftActions(
+                    *service, draftId, std::nullopt, {0, 1}, 2, &error) ==
+                    std::vector<bool>({true, true}),
+                "Unborn History did not prove both neighbours in one replay");
+        require(native::annotations::canNavigateVerifiedActiveDraftActions(
+                    *service, draftId, std::nullopt, {0, 2}, 2, &error) ==
+                    std::vector<bool>({false, false}) && !error.isEmpty(),
+                "Unborn History accepted an out-of-range neighbour");
         const std::optional<native::WorkingCopyInfo> undo =
             native::annotations::navigateVerifiedActiveDraftAction(
                 *service, native::UuidV7::generate().toString(), draftId,

@@ -71,7 +71,7 @@ def main() -> None:
             "unborn annotation redo invalidation regression was removed")
     require(tests, r"unborn annotation boundary zero did not preserve initialization seed",
             "unborn annotation active History regression was removed")
-    require(routes, r"canNavigateVerifiedActiveAnnotationDraftAction\(",
+    require(routes, r"canNavigateVerifiedActiveDraftActions\(",
             "unborn History cursor must check annotation replay eligibility")
     require(tests, r"active fork Undo did not restore the verified archive boundary",
             "archived-fork active annotation Undo regression was removed")

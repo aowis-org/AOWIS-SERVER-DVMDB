@@ -149,6 +149,13 @@ std::optional<std::vector<ModelChange>> planVerifiedArchivedAction(
     ProjectService& service, std::string_view draftId, const RevisionId& expectedHead,
     const RevisionId& revision, std::size_t actionPosition,
     std::uint64_t expectedGeneration, QString* error = nullptr);
+// The same eligibility for several positions with ONE replay of the journal
+// (e.g. both neighbours of the History cursor). One flag per position; all
+// false when the journal itself is not proven (`error` says why).
+std::vector<bool> canNavigateVerifiedActiveDraftActions(
+    ProjectService& service, std::string_view draftId,
+    std::optional<RevisionId> expectedHead, const std::vector<std::size_t>& actionPositions,
+    std::uint64_t expectedGeneration, QString* error = nullptr);
 bool canNavigateVerifiedActiveAnnotationDraftAction(
     ProjectService& service, std::string_view draftId,
     std::optional<RevisionId> expectedHead, std::size_t actionPosition,

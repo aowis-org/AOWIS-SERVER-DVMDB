@@ -1764,6 +1764,24 @@ QList<QUuid> hydraulicCollectionMembers(
     return manifest.members[collection];
 }
 
+HydraulicNetworkSummary hydraulicNetworkSummary(
+    const std::function<std::optional<ModelRecord>(const Key&)>& read, const QUuid& networkId) {
+    const std::optional<ModelRecord> root = read(keyFromUuid(networkId));
+    if (!root || root->kind != hydraulicDistributionNetworkKind)
+        throw StorageError(StorageErrorKind::NotFound, "hydraulic distribution network not found");
+    Manifest manifest = decodeManifest(qByteArrayFromBytes(root->payload));
+    if (manifest.metadata.uuid != networkId)
+        throw StorageError(StorageErrorKind::Corruption, "network root UUID mismatch");
+    checkRoot(manifest, *root);
+    loadMembersUsing(read, manifest);
+    HydraulicNetworkSummary summary;
+    summary.uuid = networkId;
+    summary.title = manifest.metadata.title_line_1;
+    for (const QList<QUuid>& members : manifest.members)
+        summary.counts.push_back(static_cast<std::size_t>(members.size()));
+    return summary;
+}
+
 std::optional<std::size_t> hydraulicCollectionForKind(std::uint16_t kind) {
     return collectionOfKind(kind);
 }

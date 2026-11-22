@@ -533,22 +533,33 @@ static Records reconstructUnbornJournalSeed(const Records& saved,
 // record. Only the selected boundary is returned; it is checked with the
 // Save delta validator against the (validated) parent unless it is position
 // 0 or the proven position, which equal validated states.
-static std::optional<VerifiedAnnotationActionBoundary> replayActionBoundary(
+// One requested boundary of a replay: the verified boundary, or why that
+// boundary (not the archive) is refused.
+struct BoundaryOutcome final {
+    std::optional<VerifiedAnnotationActionBoundary> boundary;
+    QString error;
+};
+
+// Replays once and returns every requested boundary. nullopt (with `error`)
+// when the archive itself is not proven; otherwise one outcome per position.
+static std::optional<std::vector<BoundaryOutcome>> replayActionBoundaries(
         const ReplayInput& input,
         const std::vector<WorkingCopyEvent>& actions,
         const Hash& authenticatedActionChain,
-        std::size_t actionPosition, bool combined, QString* error,
+        const std::vector<std::size_t>& actionPositions, bool combined, QString* error,
         std::optional<std::size_t> persistedBoundary = std::nullopt) {
     if (error) error->clear();
-    const std::function<std::optional<VerifiedAnnotationActionBoundary>(const QString&)> fail =
-        [error](const QString& reason) -> std::optional<VerifiedAnnotationActionBoundary> {
+    const std::function<std::optional<std::vector<BoundaryOutcome>>(const QString&)> fail =
+        [error](const QString& reason) -> std::optional<std::vector<BoundaryOutcome>> {
             if (error) *error = reason;
             return std::nullopt;
         };
     try {
-        require(actions.size() <= maximumArchiveActions && actionPosition <= actions.size() &&
+        require(actions.size() <= maximumArchiveActions &&
                 (!persistedBoundary || *persistedBoundary <= actions.size()),
                 "annotation archive action boundary is out of range");
+        for (const std::size_t position : actionPositions)
+            require(position <= actions.size(), "annotation archive action boundary is out of range");
         // Check the authenticated action order before accepting any boundary.
         // Transaction identities are not sequence numbers, even for UUIDv7.
         std::size_t chainedBytes = 0;
@@ -579,7 +590,8 @@ static std::optional<VerifiedAnnotationActionBoundary> replayActionBoundary(
                                 input.roots, {}, {}};
 
         State current(input.parent);
-        State selected = current;
+        std::map<std::size_t, State> selectedAt;
+        for (const std::size_t position : actionPositions) selectedAt.emplace(position, current);
         State persisted = current;
         std::set<Key> changedLayers;
         bool annotationSeen = false;
@@ -599,7 +611,8 @@ static std::optional<VerifiedAnnotationActionBoundary> replayActionBoundary(
             require(!transaction->edits.empty(), "empty archived annotation transaction");
             applyVerifiedActionEdits(current, transaction->edits, combined, attribution,
                                      changedLayers, annotationSeen, hydraulicSeen);
-            if (index + 1 == actionPosition) selected = current;
+            const std::map<std::size_t, State>::iterator wanted = selectedAt.find(index + 1);
+            if (wanted != selectedAt.end()) wanted->second = current;
             if (persistedBoundary && index + 1 == *persistedBoundary) persisted = current;
         }
         // Multi-domain mode covers hydraulic-only, annotation-only and mixed
@@ -616,32 +629,60 @@ static std::optional<VerifiedAnnotationActionBoundary> replayActionBoundary(
             require(reproduced[index].key == expected[index].key &&
                     sameRecord(reproduced[index].record, expected[index].record),
                     "History MODEL archive differs from the committed native records (unjournaled native change)");
-        const std::vector<ModelChange> selectedChanges = selected.changes();
         const std::size_t provenPosition = persistedBoundary ? *persistedBoundary : actions.size();
-        if (actionPosition != 0 && actionPosition != provenPosition) {
-            const View after = layeredView(input.parent, selectedChanges);
-            const std::function<std::optional<std::string>()> complete =
-                [&input, &selectedChanges]() -> std::optional<std::string> {
-                    if (!input.completeValidation)
-                        return std::string("History boundary needs a complete project check, "
-                                           "which History does not run");
-                    return input.completeValidation(selectedChanges);
-                };
-            const std::optional<std::string> problem =
-                validateAnnotationSnapshotDelta(input.parent, after, selectedChanges, complete);
-            if (problem)
-                throw std::runtime_error("invalid annotation replay snapshot: " + *problem);
+        std::vector<BoundaryOutcome> outcomes;
+        for (const std::size_t position : actionPositions) {
+            BoundaryOutcome outcome;
+            try {
+                const std::vector<ModelChange> selectedChanges = selectedAt.at(position).changes();
+                if (position != 0 && position != provenPosition) {
+                    const View after = layeredView(input.parent, selectedChanges);
+                    const std::function<std::optional<std::string>()> complete =
+                        [&input, &selectedChanges]() -> std::optional<std::string> {
+                            if (!input.completeValidation)
+                                return std::string("History boundary needs a complete project check, "
+                                                   "which History does not run");
+                            return input.completeValidation(selectedChanges);
+                        };
+                    const std::optional<std::string> problem =
+                        validateAnnotationSnapshotDelta(input.parent, after, selectedChanges, complete);
+                    if (problem)
+                        throw std::runtime_error("invalid annotation replay snapshot: " + *problem);
+                }
+                VerifiedAnnotationActionBoundary result;
+                result.actionCount = actions.size();
+                result.changesFromParent = selectedChanges;
+                for (const Key& key : changedLayers)
+                    result.changedLayerIds.push_back(record::uuidFromKey(key));
+                outcome.boundary = std::move(result);
+            } catch (const std::exception& failure) {
+                rethrowIfNotVerificationFailure(); // A3: environment errors keep their status
+                outcome.error = QString::fromUtf8(failure.what());
+            }
+            outcomes.push_back(std::move(outcome));
         }
-        VerifiedAnnotationActionBoundary result;
-        result.actionCount = actions.size();
-        result.changesFromParent = selectedChanges;
-        for (const Key& key : changedLayers)
-            result.changedLayerIds.push_back(record::uuidFromKey(key));
-        return result;
+        return outcomes;
     } catch (const std::exception& failure) {
         rethrowIfNotVerificationFailure(); // A3: environment errors keep their status
         return fail(QString::fromUtf8(failure.what()));
     }
+}
+
+static std::optional<VerifiedAnnotationActionBoundary> replayActionBoundary(
+        const ReplayInput& input,
+        const std::vector<WorkingCopyEvent>& actions,
+        const Hash& authenticatedActionChain,
+        std::size_t actionPosition, bool combined, QString* error,
+        std::optional<std::size_t> persistedBoundary = std::nullopt) {
+    std::optional<std::vector<BoundaryOutcome>> outcomes = replayActionBoundaries(
+        input, actions, authenticatedActionChain, {actionPosition}, combined, error,
+        persistedBoundary);
+    if (!outcomes) return std::nullopt;
+    if (!outcomes->front().boundary) {
+        if (error) *error = outcomes->front().error;
+        return std::nullopt;
+    }
+    return std::move(outcomes->front().boundary);
 }
 
 // Complete caller-supplied candidates: both are validated completely and the
@@ -984,16 +1025,21 @@ std::optional<WorkingCopyInfo> navigateVerifiedCombinedAction(
 // journal tip after Undo. Check that cursor before offering another boundary.
 // The native publisher supplies the actual lease, HEAD, generation and
 // operation-ID fences; no native deltas are accepted from HTTP clients.
-static std::optional<std::vector<ModelChange>> planVerifiedActiveAnnotationDraftAction(
+// Plans several boundaries of one active journal with ONE replay. nullopt
+// (with `error`) when the journal itself is not proven; otherwise one entry
+// per position: the HEAD-relative overlay, or nullopt for a refused boundary.
+static std::optional<std::vector<std::optional<std::vector<ModelChange>>>>
+planVerifiedActiveDraftActions(
         ProjectService& service, std::string_view draftId,
-        std::optional<RevisionId> expectedHead, std::size_t actionPosition,
+        std::optional<RevisionId> expectedHead, const std::vector<std::size_t>& actionPositions,
         std::uint64_t expectedGeneration, QString* error) {
     if (error) error->clear();
     try {
         const WorkingCopyInfo draft = service.workingCopy(draftId, true);
         require(draft.journal.size() == draft.journalCount &&
                 draft.journalCount <= maximumArchiveActions &&
-                actionPosition <= draft.journalCount,
+                std::all_of(actionPositions.cbegin(), actionPositions.cend(),
+                            [&draft](std::size_t position) { return position <= draft.journalCount; }),
                 "active annotation journal is incomplete or boundary is invalid");
         bool hasHydraulic = false;
         for (const WorkingCopyEvent& event : draft.journal) {
@@ -1128,19 +1174,34 @@ static std::optional<std::vector<ModelChange>> planVerifiedActiveAnnotationDraft
             };
         }
         QString replayError;
-        const std::optional<VerifiedAnnotationActionBoundary> selected =
-            replayActionBoundary(input, draft.journal, archiveActionChain(draft.journal),
-                actionPosition, hasHydraulic, &replayError, currentPosition);
-        if (!selected)
+        const std::optional<std::vector<BoundaryOutcome>> outcomes =
+            replayActionBoundaries(input, draft.journal, archiveActionChain(draft.journal),
+                actionPositions, hasHydraulic, &replayError, currentPosition);
+        if (!outcomes)
             throw std::runtime_error(
-                (QStringLiteral("Active annotation History failed MODEL verification: ") +
+                (QStringLiteral("Active History failed MODEL verification: ") +
                  replayError).toStdString());
         // Publish an overlay relative to physical HEAD, not the logical
         // archived fork parent or the current Undo boundary. Otherwise
         // undoing the first fork action would resurrect abandoned Redo.
-        const std::vector<ModelChange> changes = relativeToHead(selected->changesFromParent);
-        require(changes.size() <= maximumHistoryChanges,
-                "active annotation History candidate exceeds draft change limit");
+        std::vector<std::optional<std::vector<ModelChange>>> plans;
+        QString firstRefusal;
+        for (const BoundaryOutcome& outcome : *outcomes) {
+            if (!outcome.boundary) {
+                if (firstRefusal.isEmpty()) firstRefusal = outcome.error;
+                plans.push_back(std::nullopt);
+                continue;
+            }
+            std::vector<ModelChange> changes = relativeToHead(outcome.boundary->changesFromParent);
+            if (changes.size() > maximumHistoryChanges) {
+                if (firstRefusal.isEmpty())
+                    firstRefusal = QStringLiteral("active History candidate exceeds draft change limit");
+                plans.push_back(std::nullopt);
+                continue;
+            }
+            plans.push_back(std::move(changes));
+        }
+        if (error) *error = firstRefusal;
         const WorkingCopyInfo fresh = service.workingCopy(draftId, false);
         const std::optional<RevisionGraphHead> currentBranch =
             service.branchById(draft.projectId, draft.branchId);
@@ -1153,12 +1214,23 @@ static std::optional<std::vector<ModelChange>> planVerifiedActiveAnnotationDraft
                 fresh.historyForkArchiveCommitOperationId == draft.historyForkArchiveCommitOperationId &&
                 currentBranch && currentBranch->revision == draft.baseRevision,
                 "active annotation draft changed during History verification");
-        return changes;
+        return plans;
     } catch (const std::exception& exception) {
         rethrowIfNotVerificationFailure(); // A3: environment errors keep their status
         if (error) *error = QString::fromUtf8(exception.what());
         return std::nullopt;
     }
+}
+
+static std::optional<std::vector<ModelChange>> planVerifiedActiveAnnotationDraftAction(
+        ProjectService& service, std::string_view draftId,
+        std::optional<RevisionId> expectedHead, std::size_t actionPosition,
+        std::uint64_t expectedGeneration, QString* error) {
+    std::optional<std::vector<std::optional<std::vector<ModelChange>>>> plans =
+        planVerifiedActiveDraftActions(service, draftId, expectedHead, {actionPosition},
+                                       expectedGeneration, error);
+    if (!plans || !plans->front()) return std::nullopt;
+    return std::move(*plans->front());
 }
 
 std::optional<std::vector<ModelChange>> planVerifiedActiveDraftAction(
@@ -1167,6 +1239,20 @@ std::optional<std::vector<ModelChange>> planVerifiedActiveDraftAction(
         std::uint64_t expectedGeneration, QString* error) {
     return planVerifiedActiveAnnotationDraftAction(service, draftId, expectedHead,
                actionPosition, expectedGeneration, error);
+}
+
+std::vector<bool> canNavigateVerifiedActiveDraftActions(
+        ProjectService& service, std::string_view draftId,
+        std::optional<RevisionId> expectedHead, const std::vector<std::size_t>& actionPositions,
+        std::uint64_t expectedGeneration, QString* error) {
+    std::vector<bool> result(actionPositions.size(), false);
+    const std::optional<std::vector<std::optional<std::vector<ModelChange>>>> plans =
+        planVerifiedActiveDraftActions(service, draftId, expectedHead, actionPositions,
+                                       expectedGeneration, error);
+    if (!plans) return result;
+    for (std::size_t index = 0; index < plans->size(); ++index)
+        result[index] = (*plans)[index].has_value();
+    return result;
 }
 
 bool canNavigateVerifiedActiveAnnotationDraftAction(

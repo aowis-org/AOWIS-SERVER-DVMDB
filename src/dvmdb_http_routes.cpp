@@ -1494,32 +1494,24 @@ void registerBundleRoutes(httplib::Server& server, ProjectService& service, Bund
 // Both immutable-revision and private-draft summaries use the same entity
 // inventory. Keep the counts derived from the hydrated canonical MODEL object,
 // not from native membership records (which are implementation details).
-QJsonObject hydraulicDistributionNetworkSummaryJson(const NetworkHydraulicDistribution& network) {
-    const QJsonObject counts{
-        {"junctions", network.nodes_junctions.size()},
-        {"pipes", network.links_pipes.size()},
-        {"reservoirs", network.nodes_reservoirs.size()},
-        {"tanks", network.nodes_tanks.size()},
-        {"pumps", network.links_pumps.size()},
-        {"valves", network.links_valves.size()},
-        {"demandPoints", network.demand_points.size()},
-        {"controls", network.controls_simple.size()},
-        {"rules", network.controls_rules.size()},
-        {"pipeMaterials", network.pipe_materials.size()},
-        {"timePatterns", network.patterns_time.size()},
-        {"tankVolumeCurves", network.curves_tank_volume.size()},
-        {"pumpHeadCurves", network.curves_pump_head.size()},
-        {"pumpEfficiencyCurves", network.curves_pump_efficiency.size()},
-        {"valveHeadlossCurves", network.curves_valve_headloss.size()},
-        {"valveCharacteristicCurves", network.curves_valve_characteristic.size()},
-        {"genericCurves", network.curves_generic.size()}
-    };
-    int total = 0;
-    for (QJsonObject::const_iterator it = counts.constBegin();
-         it != counts.constEnd(); ++it) total += it.value().toInt();
+// Counts come from the root manifest and membership chunks; no member is
+// decoded. Names in canonical collection order.
+QJsonObject hydraulicDistributionNetworkSummaryJson(const hydraulic::HydraulicNetworkSummary& network) {
+    static const std::array<const char*, 17> names = {
+        "pipeMaterials", "timePatterns", "tankVolumeCurves", "pumpHeadCurves",
+        "pumpEfficiencyCurves", "valveHeadlossCurves", "valveCharacteristicCurves",
+        "genericCurves", "reservoirs", "junctions", "tanks", "demandPoints", "pipes",
+        "pumps", "valves", "controls", "rules"};
+    requireInput(network.counts.size() == names.size(), "unexpected hydraulic collection count");
+    QJsonObject counts;
+    std::size_t total = 0;
+    for (std::size_t index = 0; index < names.size(); ++index) {
+        counts.insert(QLatin1String(names[index]), static_cast<qint64>(network.counts[index]));
+        total += network.counts[index];
+    }
     return QJsonObject{{"id", uuidString(network.uuid)},
-                       {"title", network.title_line_1},
-                       {"counts", counts}, {"entityCount", total}};
+                       {"title", network.title},
+                       {"counts", counts}, {"entityCount", static_cast<qint64>(total)}};
 }
 
 void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
@@ -1679,6 +1671,7 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
         guarded(response, [&]() {
             const ProjectId project = requestProject(request);
             QJsonObject result;
+            std::optional<RevisionId> selected;
             service.withRepository(pathParam(request, "id"), [&](Repository& repository) {
                 const std::string branch = pathParam(request, "branch");
                 requireBranch(repository, branch);
@@ -1694,27 +1687,25 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
                 }
                 const RevisionId revision = revisionForRead(repository, project, branch, request);
                 requireModelIndexed(repository, project, revision, "hydraulic distribution network not found");
+                selected = revision;
+            });
+            if (selected) {
+                // Network roots from the cached root lookup (no revision
+                // scan); counts from manifests and membership chunks only.
+                const std::string projectId = pathParam(request, "id");
+                const std::shared_ptr<const PinnedModelReader> pinned =
+                    std::make_shared<const PinnedModelReader>(service.pinModelRevision(projectId, *selected));
+                const std::function<std::optional<ModelRecord>(const Key&)> read =
+                    [pinned](const Key& key) { return pinned->get(key); };
                 QJsonArray networks;
-                // Only canonical network roots (kind 100), never membership
-                // chunks or standalone hydraulic entities, contribute entries.
-                const std::vector<std::pair<Key, Bytes>> records =
-                    repository.scanAtRevision(project, revision);
-                for (const std::pair<Key, Bytes>& item : records) {
-                    const ModelRecord record = decodeModelRecord(item.second);
-                    if (record.kind != hydraulic::hydraulicDistributionNetworkKind) continue;
-                    const QUuid id = hydraulic::uuidFromKey(item.first);
-                    const std::optional<NetworkHydraulicDistribution> network =
-                        hydraulic::loadHydraulicDistributionNetworkAtRevision(repository, project, revision, id);
-                    if (!network)
-                        throw ProjectError(ProjectErrorKind::Unavailable,
-                                           "hydraulic distribution network root could not be loaded");
-                    networks.append(hydraulicDistributionNetworkSummaryJson(*network));
-                }
+                for (const Key& root : service.hydraulicDistributionRootKeysAtRevision(projectId, *selected))
+                    networks.append(hydraulicDistributionNetworkSummaryJson(
+                        hydraulic::hydraulicNetworkSummary(read, hydraulic::uuidFromKey(root))));
                 result = QJsonObject{{"scope", "committed"},
-                                     {"revision", revisionIdString(revision)},
+                                     {"revision", revisionIdString(*selected)},
                                      {"networkCount", static_cast<int>(networks.size())},
                                      {"networks", networks}};
-            });
+            }
             return Reply{200, result};
         });
     });
@@ -2265,22 +2256,31 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             // planner can actually verify its destination. A failed proof
             // must disable the button rather than offer a misleading Undo.
             if (!draft.baseRevision && !draft.historyCheckpointRevisionId) {
-                const std::function<bool(const QJsonValue&)> eligible =
-                    [&service, &draft](const QJsonValue& coordinate) -> bool {
-                        if (!coordinate.isObject()) return false;
-                        const QJsonObject object = coordinate.toObject();
+                // Both neighbours are proven with ONE replay of the journal.
+                const std::function<std::optional<std::size_t>(const QJsonValue&)> positionOf =
+                    [](const QJsonValue& coordinate) -> std::optional<std::size_t> {
+                        if (!coordinate.isObject()) return std::nullopt;
                         bool valid = false;
                         const std::size_t wanted = static_cast<std::size_t>(
-                            object.value("actionPosition").toString().toULongLong(&valid));
-                        if (!valid) return false;
-                        QString reason;
-                        return annotations::canNavigateVerifiedActiveAnnotationDraftAction(
-                            service, draft.id, draft.baseRevision, wanted,
-                            draft.generation, &reason);
+                            coordinate.toObject().value("actionPosition").toString().toULongLong(&valid));
+                        if (!valid) return std::nullopt;
+                        return wanted;
                     };
-                if (!previous.isNull() && !eligible(previous))
+                const std::optional<std::size_t> previousPosition = positionOf(previous);
+                const std::optional<std::size_t> nextPosition = positionOf(next);
+                std::vector<std::size_t> positions;
+                if (previousPosition) positions.push_back(*previousPosition);
+                if (nextPosition) positions.push_back(*nextPosition);
+                std::vector<bool> eligible;
+                if (!positions.empty()) {
+                    QString reason;
+                    eligible = annotations::canNavigateVerifiedActiveDraftActions(
+                        service, draft.id, draft.baseRevision, positions, draft.generation, &reason);
+                }
+                std::size_t slot = 0;
+                if (!previous.isNull() && !(previousPosition && eligible[slot++]))
                     previous = QJsonValue(QJsonValue::Null);
-                if (!next.isNull() && !eligible(next))
+                if (!next.isNull() && !(nextPosition && eligible[slot++]))
                     next = QJsonValue(QJsonValue::Null);
             }
             // An intervening Save/Commit invalidates even a freshly read
@@ -2464,17 +2464,14 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             for (const ModelChange& change : draft.candidateChanges)
                 requireInput(overlay.emplace(change.key, change.record).second,
                              "duplicate draft candidate model record");
+            // Network roots: the base's cached root lookup (no revision scan)
+            // adjusted by the draft overlay. Counts come from manifests and
+            // membership chunks only.
             std::set<Key> roots;
             if (draft.baseRevision) {
-                const std::optional<ProjectId> project = ProjectId::parse(draft.projectId);
-                requireInput(project.has_value(), "invalid private draft project UUIDv7");
-                service.withRepository(draft.projectId, [&](Repository& repository) {
-                    const std::vector<std::pair<Key, Bytes>> records =
-                        repository.scanAtRevision(*project, *draft.baseRevision);
-                    for (const std::pair<Key, Bytes>& item : records)
-                        if (decodeModelRecord(item.second).kind == hydraulic::hydraulicDistributionNetworkKind)
-                            roots.insert(item.first);
-                });
+                const std::vector<Key> committed =
+                    service.hydraulicDistributionRootKeysAtRevision(draft.projectId, *draft.baseRevision);
+                roots.insert(committed.begin(), committed.end());
             }
             for (const std::pair<const Key, std::optional<ModelRecord>>& item : overlay) {
                 if (item.second && item.second->kind == hydraulic::hydraulicDistributionNetworkKind)
@@ -2482,23 +2479,21 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 else
                     roots.erase(item.first);
             }
+            std::shared_ptr<const PinnedModelReader> pinned;
+            if (draft.baseRevision)
+                pinned = std::make_shared<const PinnedModelReader>(
+                    service.pinModelRevision(draft.projectId, *draft.baseRevision));
             const std::function<std::optional<ModelRecord>(const Key&)> reader =
-                [&service, &draft, &overlay](const Key& key) -> std::optional<ModelRecord> {
+                [&overlay, pinned](const Key& key) -> std::optional<ModelRecord> {
                 const std::map<Key, std::optional<ModelRecord>>::const_iterator found = overlay.find(key);
                 if (found != overlay.end()) return found->second;
-                if (!draft.baseRevision) return std::nullopt;
-                return service.getModelAtRevision(draft.projectId, *draft.baseRevision, key);
+                if (!pinned) return std::nullopt;
+                return pinned->get(key);
             };
             QJsonArray networks;
-            for (const Key& key : roots) {
-                const QUuid id = hydraulic::uuidFromKey(key);
-                const std::optional<NetworkHydraulicDistribution> network =
-                    hydraulic::loadDraftHydraulicDistributionNetwork(reader, id);
-                if (!network)
-                    throw ProjectError(ProjectErrorKind::Unavailable,
-                                       "saved draft hydraulic distribution network could not be loaded");
-                networks.append(hydraulicDistributionNetworkSummaryJson(*network));
-            }
+            for (const Key& key : roots)
+                networks.append(hydraulicDistributionNetworkSummaryJson(
+                    hydraulic::hydraulicNetworkSummary(reader, hydraulic::uuidFromKey(key))));
             return Reply{200, QJsonObject{
                 {"scope", "working-copy"},
                 {"draftId", QString::fromStdString(draft.id)},

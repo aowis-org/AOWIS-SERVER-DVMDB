@@ -18,6 +18,7 @@
 #include <aowis/model/edit/model_edit_transaction.h>
 
 #include <optional>
+#include <vector>
 #include <string_view>
 #include <variant>
 #include <utility>
@@ -78,6 +79,16 @@ bool checkDraftHydraulicNetworkDelta(const EngineeringCandidateView& before,
 //   MODEL type name of a collection (e.g. "HydraulicLinkPipe");
 // - network and collection of a membership chunk record.
 QByteArray hydraulicRootImageOfRecord(const ModelRecord& root);
+// Identity, first title line and member count per collection (canonical
+// collection order) of one network, from its root manifest and membership
+// chunks only. NotFound when no network root exists.
+struct HydraulicNetworkSummary final {
+    QUuid uuid;
+    QString title;
+    std::vector<std::size_t> counts;
+};
+HydraulicNetworkSummary hydraulicNetworkSummary(
+    const std::function<std::optional<ModelRecord>(const Key&)>& read, const QUuid& networkId);
 QList<QUuid> hydraulicCollectionMembers(
     const std::function<std::optional<ModelRecord>(const Key&)>& read,
     const QUuid& networkId, std::size_t collection);
