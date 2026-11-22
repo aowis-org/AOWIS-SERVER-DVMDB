@@ -30,6 +30,15 @@ inline constexpr std::uint16_t engineeringLayerKind = 110;
 inline constexpr std::uint16_t engineeringLayerChunkKind = 111;
 inline constexpr std::uint16_t engineeringAnnotationKind = 112;
 
+// UUID version 8 is reserved for server-derived records: network membership
+// chunks, Distribution annotation layer roots and annotation membership
+// chunks are SHA-256 derivations with version 8. Client-identified records
+// (network roots, hydraulic members, annotations) must use another version,
+// so no client UUID can pre-claim a future derived ID and block a network or
+// layer from growing (A7).
+bool isServerDerivedUuidKey(const Key& key);
+bool isClientIdentifiedEngineeringKind(std::uint16_t kind);
+
 // One complete candidate, read by point lookups. `referrers` returns the
 // sorted, unique keys of records IN THIS CANDIDATE whose references contain
 // the key (the exact reverse-reference index of the candidate).

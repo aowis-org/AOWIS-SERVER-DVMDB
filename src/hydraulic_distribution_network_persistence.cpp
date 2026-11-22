@@ -1857,6 +1857,7 @@ std::optional<VerifiedHydraulicRevisionCoverage> verifyHydraulicRevisionActionCo
         }
         return covered;
     } catch (const std::exception& exception) {
+        rethrowIfNotVerificationFailure(); // A3: environment errors keep their status
         return fail(QString::fromUtf8(exception.what()));
     }
 }
@@ -2017,6 +2018,7 @@ std::optional<VerifiedHydraulicActionNavigationPlan> planVerifiedHydraulicAction
             plan.candidateChanges.push_back(ModelChange{item.first, item.second});
         return plan;
     } catch (const std::exception& exception) {
+        rethrowIfNotVerificationFailure(); // A3: environment errors keep their status
         return fail(QString::fromUtf8(exception.what()));
     }
 }
@@ -2059,6 +2061,7 @@ std::optional<WorkingCopyInfo> navigateVerifiedHydraulicAction(
             expectedGeneration, expectedHead, revision,
             plan->commitOperationId, actionPosition, plan->candidateChanges);
     } catch (const std::exception& exception) {
+        rethrowIfNotVerificationFailure(); // A3: environment errors keep their status
         return fail(QString::fromUtf8(exception.what()));
     }
 }
@@ -2468,6 +2471,7 @@ planVerifiedHydraulicDraftActionNavigation(
             plan.candidateChanges.push_back(ModelChange{entry.first, entry.second});
         return plan;
     } catch (const std::exception& exception) {
+        rethrowIfNotVerificationFailure(); // A3: environment errors keep their status
         return fail(QString::fromUtf8(exception.what()));
     }
 }
@@ -2505,6 +2509,7 @@ std::optional<WorkingCopyInfo> navigateVerifiedHydraulicDraftAction(
             operationId, draftId, sessionId, fencingToken,
             expectedGeneration, expectedHead, actionPosition, plan->candidateChanges);
     } catch (const std::exception& exception) {
+        rethrowIfNotVerificationFailure(); // A3: environment errors keep their status
         return fail(QString::fromUtf8(exception.what()));
     }
 }
@@ -3164,7 +3169,8 @@ template<typename Callback>
 std::invoke_result_t<Callback, const MergeOptions&> mergeHydraulicWithChoices(
         const std::vector<HydraulicFieldChoice>& fields,
         const std::vector<HydraulicObjectChoice>& objects, Callback invoke,
-        const std::function<void(MergeOptions&)>& configure) {
+        const std::function<void(MergeOptions&)>& configure,
+        const DomainMergeResolver& domainResolver) {
     // Build an immutable lookup before entering the Repository's merge lock.
     // A duplicate (UUID, field) is rejected rather than choosing an arbitrary
     // last-write-wins interpretation of the user's instructions.
@@ -3200,12 +3206,20 @@ std::invoke_result_t<Callback, const MergeOptions&> mergeHydraulicWithChoices(
         consumedObjects.insert(conflict.key);
         return choice->second;
     };
-    options.resolve = [&choices, &consumed](const Key& key, const ModelRecord& base,
+    options.resolve = [&choices, &consumed, &domainResolver](const Key& key, const ModelRecord& base,
                                             const ModelRecord& targetRecord,
                                             const ModelRecord& sourceRecord) {
         const std::map<Key, QMap<QString, bool>>::const_iterator match = choices.find(key);
         const QMap<QString, bool> empty;
         const QMap<QString, bool>& fieldChoices = match == choices.end() ? empty : match->second;
+        if (domainResolver) {
+            std::optional<MergeResolution> handled =
+                domainResolver(key, base, targetRecord, sourceRecord, fieldChoices);
+            if (handled) {
+                if (match != choices.end()) consumed.insert(key);
+                return std::move(*handled);
+            }
+        }
         MergeResolution result = resolveHydraulicRecord(key, base, targetRecord,
                                                         sourceRecord, fieldChoices);
         if (match != choices.end()) consumed.insert(key);
@@ -3245,13 +3259,14 @@ MergeResult mergeHydraulicBranches(Repository& repository, const ProjectId& proj
                                        std::string_view target, std::string_view source,
                                        const HydraulicMergeSelections& selections,
                                        const CommitMetadata& metadata,
-                                       const std::function<void(MergeOptions&)>& configure) {
+                                       const std::function<void(MergeOptions&)>& configure,
+                                       const DomainMergeResolver& domainResolver) {
     validateCommitMetadata(metadata);
     return mergeHydraulicWithChoices(selections.fields, selections.objects,
         [&](const MergeOptions& options) {
             return repository.mergeBranches(project, target, source, metadata,
                 selections.expectedTargetHead, selections.expectedSourceHead, options);
-        }, configure);
+        }, configure, domainResolver);
 }
 
 std::optional<QList<QUuid>> listHydraulicEntityIdsAtRevisionLimited(

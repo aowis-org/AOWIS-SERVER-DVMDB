@@ -265,6 +265,17 @@ struct WorkingCopyLease {
     std::uint64_t generation = 0;    // caller must pin for Save
 };
 
+// A3: verify-or-refuse adapters (History planning and navigation, candidate
+// validators) report "not possible here" as a result value. Failures of the
+// environment or of the request target must still reach the caller's error
+// mapping instead of being reported as "not navigable" or "invalid":
+// ProjectError NotFound/Busy/Unavailable and StorageError
+// Unavailable/Busy/ResourceExhausted/Io/Internal. Call ONLY inside a catch
+// handler: rethrows the current exception for those kinds and returns for
+// verification failures (Conflict, InvalidInput, Corruption, LimitExceeded,
+// other std::exception).
+void rethrowIfNotVerificationFailure();
+
 // Revision-pinned point reads (see ProjectService::pinModelRevision). The
 // revision is resolved once; get/referrers then only read immutable tries.
 // Holds no project operation lock and no queue place. Storage errors are

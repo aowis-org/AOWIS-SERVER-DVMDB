@@ -2941,6 +2941,58 @@ void exerciseAnnotationDraftHttp() {
           service.optionalHead(project.id, "main") == secondRevision,
           "active fork Redo resurrected abandoned archived history");
 
+    // A3: History adapters report only verification failures as "not
+    // navigable". A busy project and a missing draft keep their own status,
+    // so the client retries (503 + Retry-After) or gives up (404) correctly.
+    {
+        const std::uint64_t forkGeneration = service.workingCopy(forkDraft.id).generation;
+        const QString forkGenerationText = QString::number(static_cast<qulonglong>(forkGeneration));
+        std::vector<native::ProjectService::Operation> places;
+        for (std::size_t index = 0; index < service.maxPendingOperations(); ++index)
+            places.push_back(service.reserveOperation(project.id));
+        bool busyPropagated = false;
+        try {
+            QString unused;
+            (void)native::annotations::navigateVerifiedActiveDraftAction(service,
+                native::UuidV7::generate().toString(), forkDraft.id, session.toStdString(),
+                forkLease.token, secondRevision, 0, forkGeneration, &unused);
+        } catch (const native::ProjectError& error) {
+            busyPropagated = error.kind() == native::ProjectErrorKind::Busy;
+        }
+        check(busyPropagated, "History navigation reported a busy project as not navigable");
+        const Response busy = client.call("POST", forkPath + "/history/navigate",
+            forkNavigate(QString::fromStdString(native::UuidV7::generate().toString()),
+                         forkGenerationText, "0", false));
+        check(busy.status == 503 && busy.retryAfter == "1" &&
+              busy.json.value("error").toObject().value("code").toString() == "busy",
+              "History navigation on a busy project did not answer 503 busy with Retry-After");
+        places.clear();
+        check(service.workingCopy(forkDraft.id).generation == forkGeneration,
+              "refused busy History navigation changed the draft");
+
+        const std::string missingDraft = native::UuidV7::generate().toString();
+        bool notFound = false;
+        try {
+            QString unused;
+            (void)native::annotations::navigateVerifiedActiveDraftAction(service,
+                native::UuidV7::generate().toString(), missingDraft, session.toStdString(),
+                forkLease.token, secondRevision, 0, 0, &unused);
+        } catch (const native::ProjectError& error) {
+            notFound = error.kind() == native::ProjectErrorKind::NotFound;
+        }
+        check(notFound, "History navigation reported a missing draft as not navigable");
+        check(client.call("POST", QStringLiteral("/dvmdb/v1/working-copies/") +
+                  QString::fromStdString(missingDraft) + "/history/navigate",
+                  forkNavigate(QString::fromStdString(native::UuidV7::generate().toString()),
+                               "0", "0", false)).status == 404,
+              "History navigation of a missing draft did not answer 404");
+        // Verification failures keep their established 409.
+        check(client.call("POST", forkPath + "/history/navigate",
+                  forkNavigate(QString::fromStdString(native::UuidV7::generate().toString()),
+                               forkGenerationText, "99", false)).status == 409,
+              "History navigation beyond the journal is no longer 409");
+    }
+
     // B4.3 combined History: one immutable action changes both the
     // Distribution root's metadata and an annotation. The authoritative
     // MODEL archive (not a client-supplied classification) selects the mixed

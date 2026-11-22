@@ -12,6 +12,8 @@
 #include <iostream>
 #include <map>
 #include <optional>
+#include <random>
+#include <set>
 #include <stdexcept>
 #include <vector>
 
@@ -235,6 +237,245 @@ void testBadEdits() {
     }
 }
 
+// ---- A5: chunk-local membership layout ----
+
+std::vector<db::ModelChange> applyEdits(Records& records, const std::vector<model::ModelEntityEdit>& edits) {
+    const std::vector<db::ModelChange> delta =
+        ann::materializeDraftAnnotationEdits(read(records), makeLayer().uuid, edits);
+    applyChanges(records, delta);
+    return delta;
+}
+
+std::size_t chunkCount(const Records& records) {
+    const std::optional<ann::AnnotationLayerSnapshot> layer =
+        ann::loadAnnotationLayer(read(records), makeLayer().uuid);
+    ensure(layer.has_value(), "annotation layer missing");
+    return static_cast<std::size_t>(layer->chunkIds.size());
+}
+
+bool containsKey(const std::vector<db::ModelChange>& delta, const QUuid& id) {
+    for (const db::ModelChange& change : delta)
+        if (change.key == db::record::keyFromUuid(id)) return true;
+    return false;
+}
+
+// Deleting the FIRST member of a large layer rewrites only its own chunk:
+// the member tombstone and one chunk, no root and no later chunk.
+void testDeleteIsLocal() {
+    QList<MapAnnotation> items;
+    QList<QUuid> order;
+    for (std::uint32_t index = 0; index < 2048; ++index) {
+        items.append(makeAnnotation(index));
+        order.append(items.back().uuid);
+    }
+    Records records = initial(items);
+    ensure(chunkCount(records) == 8, "2048 members must start in 8 full chunks");
+    const std::vector<db::ModelChange> delta = applyEdits(records, {remove(items.first())});
+    ensure(delta.size() == 2 && !containsKey(delta, makeLayer().uuid),
+           "deleting the first of 2048 members must write exactly the member and its chunk");
+    order.removeFirst();
+    checkMemberOrder(records, order);
+    MapAnnotation changed = items.at(1000);
+    changed.text = QStringLiteral("Edited in a large layer");
+    const std::vector<db::ModelChange> edit = applyEdits(records, {update(items.at(1000), changed)});
+    ensure(edit.size() == 1 && edit.front().key == db::record::keyFromUuid(changed.uuid),
+           "a text edit in a large layer must write only the member");
+}
+
+// A chunk below the merge threshold is merged with a neighbour when both fit;
+// order is the concatenation of chunks before and after the merge.
+void testSmallChunksMerge() {
+    QList<MapAnnotation> items;
+    QList<QUuid> order;
+    for (std::uint32_t index = 0; index < 768; ++index) {
+        items.append(makeAnnotation(index));
+        order.append(items.back().uuid);
+    }
+    Records records = initial(items);
+    ensure(chunkCount(records) == 3, "768 members must start in 3 full chunks");
+    // Chunk 0: 256 -> 63 members. Its only neighbour (256) does not fit.
+    for (int index = 0; index < 193; ++index) {
+        const std::vector<db::ModelChange> delta = applyEdits(records, {remove(items.at(index))});
+        ensure(delta.size() <= 2, "a delete without a merge writes at most member and chunk");
+        order.removeOne(items.at(index).uuid);
+    }
+    ensure(chunkCount(records) == 3, "a small chunk must not merge with a full neighbour");
+    // Chunk 1: 256 -> 63 members; now 63 + 63 fit, so chunk 1 merges into 0.
+    std::vector<db::ModelChange> last;
+    for (int index = 256; index < 449; ++index) {
+        last = applyEdits(records, {remove(items.at(index))});
+        order.removeOne(items.at(index).uuid);
+    }
+    ensure(chunkCount(records) == 2, "two small neighbours must merge into one chunk");
+    ensure(last.size() <= 4 && containsKey(last, makeLayer().uuid),
+           "a merging delete writes member, both chunks and the root at most");
+    checkMemberOrder(records, order);
+    // Removing every member drops the chunks one by one.
+    for (int index = 0; index < items.size(); ++index) {
+        if (!order.contains(items.at(index).uuid)) continue;
+        (void)applyEdits(records, {remove(items.at(index))});
+        order.removeOne(items.at(index).uuid);
+    }
+    ensure(chunkCount(records) == 0, "an emptied layer must have no chunks");
+    checkMemberOrder(records, {});
+}
+
+// Unborn History undoes its journal: every insertion is undone by deleting
+// the member it appended. That must restore the previous records exactly,
+// including chunk UUIDs and the root, or the forward replay cannot prove the
+// saved draft.
+bool sameRecords(const Records& left, const Records& right) {
+    if (left.size() != right.size()) return false;
+    for (Records::const_iterator a = left.cbegin(), b = right.cbegin(); a != left.cend(); ++a, ++b) {
+        if (a->first != b->first || a->second.kind != b->second.kind ||
+            a->second.references != b->second.references || a->second.payload != b->second.payload)
+            return false;
+    }
+    return true;
+}
+
+void checkInsertionUndoIsExact(const Records& start, const QList<MapAnnotation>& added,
+                               const char* message, bool alsoPerEdit = true) {
+    Records records = start;
+    std::vector<model::ModelEntityEdit> forward;
+    std::vector<model::ModelEntityEdit> backward;
+    for (const MapAnnotation& annotation : added) forward.push_back(create(annotation));
+    for (qsizetype index = added.size(); index > 0; --index)
+        backward.push_back(remove(added.at(index - 1)));
+    (void)applyEdits(records, forward);
+    (void)applyEdits(records, backward);
+    ensure(sameRecords(records, start), message);
+    if (!alsoPerEdit) return;
+    // The same, one edit per batch.
+    for (const MapAnnotation& annotation : added) (void)applyEdits(records, {create(annotation)});
+    for (qsizetype index = added.size(); index > 0; --index)
+        (void)applyEdits(records, {remove(added.at(index - 1))});
+    ensure(sameRecords(records, start), message);
+}
+
+void testInsertionUndoIsExact() {
+    // Empty layer: the first chunk is created and dropped again.
+    checkInsertionUndoIsExact(initial(), {makeAnnotation(1)}, "undo into an empty layer");
+    // Full last chunk: the insertion opens a new chunk.
+    QList<MapAnnotation> full;
+    for (std::uint32_t index = 0; index < 256; ++index) full.append(makeAnnotation(index));
+    checkInsertionUndoIsExact(initial(full), {makeAnnotation(900)}, "undo of a new chunk");
+    // Re-creating after the only chunk was dropped gives the canonical layout.
+    {
+        const MapAnnotation first = makeAnnotation(1);
+        const MapAnnotation second = makeAnnotation(2);
+        Records records = initial({first});
+        (void)applyEdits(records, {remove(first)});
+        ensure(chunkCount(records) == 0, "removing the only member drops its chunk");
+        (void)applyEdits(records, {create(second)});
+        ensure(sameRecords(records, initial({second})), "a re-created layer must have the canonical layout");
+    }
+    // Small last chunk whose neighbour has room: [200, 50]. Removing the
+    // appended member leaves 50 (< 64), which must NOT merge the two chunks.
+    QList<MapAnnotation> layered;
+    for (std::uint32_t index = 0; index < 306; ++index) layered.append(makeAnnotation(index));
+    Records records = initial(layered);
+    std::vector<model::ModelEntityEdit> shrink;
+    for (qsizetype index = 0; index < 56; ++index) shrink.push_back(remove(layered.at(index)));
+    (void)applyEdits(records, shrink);
+    ensure(chunkCount(records) == 2, "fixture must keep chunks of 200 and 50");
+    QList<MapAnnotation> many;
+    for (std::uint32_t index = 0; index < 300; ++index) many.append(makeAnnotation(2000 + index));
+    checkInsertionUndoIsExact(records, {makeAnnotation(1000)}, "undo next to a small neighbour");
+    checkInsertionUndoIsExact(records, many, "undo of 300 insertions across chunk boundaries");
+    // One batch that drops and re-creates the same chunk UUID twice: one
+    // change per key, and the result equals the canonical layout.
+    {
+        const MapAnnotation a = makeAnnotation(1);
+        const MapAnnotation b = makeAnnotation(2);
+        const MapAnnotation c = makeAnnotation(3);
+        Records twice = initial({a});
+        const std::vector<db::ModelChange> delta =
+            applyEdits(twice, {remove(a), create(b), remove(b), create(c)});
+        std::set<db::Key> keys;
+        for (const db::ModelChange& change : delta)
+            ensure(keys.insert(change.key).second, "a batch emitted two changes for one key");
+        ensure(sameRecords(twice, initial({c})), "drop/re-create batch lost the canonical layout");
+    }
+}
+
+// Random layer states (random deletions make small chunks), each followed by
+// a random insertion batch and its exact undo.
+void testRandomInsertionUndoIsExact() {
+    QList<MapAnnotation> current;
+    std::uint32_t nextOrdinal = 0;
+    for (; nextOrdinal < 700; ++nextOrdinal) current.append(makeAnnotation(nextOrdinal));
+    Records records = initial(current);
+    std::mt19937 random(0x5EEDU);
+    // One-edit-per-batch undo is costly (one materialization per edit), so the
+    // random rounds check it on small batches only; batched undo every round.
+    for (int round = 0; round < 150; ++round) {
+        std::vector<model::ModelEntityEdit> removals;
+        const unsigned removeCount = static_cast<unsigned>(random() % 40U);
+        for (unsigned step = 0; step < removeCount && !current.isEmpty(); ++step) {
+            const qsizetype index =
+                static_cast<qsizetype>(random() % static_cast<unsigned>(current.size()));
+            removals.push_back(remove(current.at(index)));
+            current.removeAt(index);
+        }
+        if (!removals.empty()) (void)applyEdits(records, removals);
+        std::vector<model::ModelEntityEdit> creations;
+        const unsigned createCount = static_cast<unsigned>(random() % 40U);
+        for (unsigned step = 0; step < createCount; ++step) {
+            current.append(makeAnnotation(nextOrdinal++));
+            creations.push_back(create(current.back()));
+        }
+        if (!creations.empty()) (void)applyEdits(records, creations);
+        QList<MapAnnotation> added;
+        const bool perEdit = round % 10 == 0;
+        const unsigned addCount = 1U + static_cast<unsigned>(random() % (perEdit ? 20U : 300U));
+        for (unsigned step = 0; step < addCount; ++step) added.append(makeAnnotation(nextOrdinal++));
+        checkInsertionUndoIsExact(records, added, "random insertion undo is not exact", perEdit);
+    }
+    QList<QUuid> ids;
+    for (const MapAnnotation& annotation : current) ids.append(annotation.uuid);
+    checkMemberOrder(records, ids);
+}
+
+// Random create/update/delete batches against a reference order. Every
+// state is loaded and checked, and a single-edit batch writes at most four
+// records (member, two chunks, root) regardless of the layer size.
+void testRandomEditsKeepOrder() {
+    QList<MapAnnotation> current;
+    std::uint32_t nextOrdinal = 0;
+    for (; nextOrdinal < 600; ++nextOrdinal) current.append(makeAnnotation(nextOrdinal));
+    Records records = initial(current);
+    std::mt19937 random(0xA5A5U);
+    for (int round = 0; round < 4000; ++round) {
+        const unsigned choice = static_cast<unsigned>(random() % 10U);
+        std::vector<model::ModelEntityEdit> edits;
+        if ((choice < 4 || current.isEmpty()) && current.size() < 1500) {
+            const MapAnnotation created = makeAnnotation(nextOrdinal++);
+            edits.push_back(create(created));
+            current.append(created);
+        } else if (choice < 8 && !current.isEmpty()) {
+            const qsizetype index = static_cast<qsizetype>(random() % static_cast<unsigned>(current.size()));
+            edits.push_back(remove(current.at(index)));
+            current.removeAt(index);
+        } else if (!current.isEmpty()) {
+            const qsizetype index = static_cast<qsizetype>(random() % static_cast<unsigned>(current.size()));
+            MapAnnotation changed = current.at(index);
+            changed.text = QStringLiteral("Round %1").arg(round);
+            edits.push_back(update(current.at(index), changed));
+            current[index] = changed;
+        } else {
+            continue;
+        }
+        const std::vector<db::ModelChange> delta = applyEdits(records, edits);
+        ensure(delta.size() <= 4, "a single annotation edit wrote more than four records");
+        if (round % 97 == 0 || round == 3999) {
+            QList<QUuid> ids;
+            for (const MapAnnotation& annotation : current) ids.append(annotation.uuid);
+            checkMemberOrder(records, ids);
+        }
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -243,6 +484,11 @@ int main(int argc, char** argv) {
         testCreateUpdateDelete();
         testSequentialEditsAndBoundary();
         testBadEdits();
+        testDeleteIsLocal();
+        testSmallChunksMerge();
+        testInsertionUndoIsExact();
+        testRandomInsertionUndoIsExact();
+        testRandomEditsKeepOrder();
         std::cout << "B3.1 annotation draft edit materialization tests passed\n";
         return 0;
     } catch (const std::exception& error) {

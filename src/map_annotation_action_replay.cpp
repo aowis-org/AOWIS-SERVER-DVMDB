@@ -520,6 +520,7 @@ static std::optional<VerifiedAnnotationActionBoundary> replayActionBoundary(
             result.changedLayerIds.push_back(record::uuidFromKey(key));
         return result;
     } catch (const std::exception& failure) {
+        rethrowIfNotVerificationFailure(); // A3: environment errors keep their status
         return fail(QString::fromUtf8(failure.what()));
     }
 }
@@ -597,6 +598,7 @@ static std::optional<VerifiedIndexedAnnotationActionBoundary> verifyIndexedActio
         return VerifiedIndexedAnnotationActionBoundary{
             witness.revisionId, witness.commitOperationId, *boundary};
     } catch (const std::exception& exception) {
+        rethrowIfNotVerificationFailure(); // A3: environment errors keep their status
         return fail(QString::fromUtf8(exception.what()));
     }
 }
@@ -738,6 +740,7 @@ static std::optional<WorkingCopyInfo> navigateVerifiedAction(
             operationId, draftId, sessionId, fencingToken, expectedGeneration,
             expectedHead, revision, selected->commitOperationId, actionPosition, changes);
     } catch (const std::exception& exception) {
+        rethrowIfNotVerificationFailure(); // A3: environment errors keep their status
         return fail(QString::fromUtf8(exception.what()));
     }
 }
@@ -917,6 +920,7 @@ static std::optional<std::vector<ModelChange>> planVerifiedActiveAnnotationDraft
                 "active annotation draft changed during History verification");
         return changes;
     } catch (const std::exception& exception) {
+        rethrowIfNotVerificationFailure(); // A3: environment errors keep their status
         if (error) *error = QString::fromUtf8(exception.what());
         return std::nullopt;
     }
@@ -974,6 +978,7 @@ std::optional<WorkingCopyInfo> navigateVerifiedActiveDraftAction(
             operationId, draftId, sessionId, fencingToken, expectedGeneration,
             expectedHead, actionPosition, *changes);
     } catch (const std::exception& exception) {
+        rethrowIfNotVerificationFailure(); // A3: environment errors keep their status
         return fail(QString::fromUtf8(exception.what()));
     }
 }

@@ -22,6 +22,8 @@ namespace aowis::dvmdb::annotations {
 // incoming delta. Strict for MODEL A3 + hydraulic manifest v3: unsupported
 // native record kinds and missing Distribution layers fail closed. An empty
 // project and one optional pre-network Drainage layer are permitted.
+// A candidate that cannot be read (I/O, ENOSPC, busy, unavailable, internal;
+// see rethrowIfNotVerificationFailure) throws instead of being "invalid".
 std::optional<std::string> validateAnnotationSnapshot(const MergeCandidate& candidate);
 
 // Incremental counterpart of validateAnnotationSnapshot for a working-copy
@@ -31,9 +33,9 @@ std::optional<std::string> validateAnnotationSnapshot(const MergeCandidate& cand
 // the reverse-reference index); root creation/deletion, generic records and
 // layer ownership changes run `completeValidation` instead.
 // Same result contract as validateAnnotationSnapshot: nullopt = valid,
-// diagnostic = reject. Storage failures that are not a property of the
-// candidate (I/O, ENOSPC, busy, unavailable, internal, ProjectError) are
-// rethrown so callers can map them to their own status.
+// diagnostic = reject. Failures that are not a property of the candidate
+// (see rethrowIfNotVerificationFailure) are rethrown so callers can map them
+// to their own status; validateAnnotationSnapshot follows the same policy.
 std::optional<std::string> validateAnnotationSnapshotDelta(
     const EngineeringCandidateView& before, const EngineeringCandidateView& after,
     const std::vector<ModelChange>& delta,

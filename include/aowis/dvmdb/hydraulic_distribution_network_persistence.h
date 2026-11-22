@@ -11,6 +11,8 @@
 #include "aowis/dvmdb/project_service.h"
 
 #include <QList>
+#include <QMap>
+#include <QString>
 #include <aowis/model/edit/model_edit_transaction.h>
 
 #include <optional>
@@ -287,12 +289,23 @@ struct HydraulicMergeSelections {
     std::vector<HydraulicFieldChoice> fields;
     std::vector<HydraulicObjectChoice> objects;
 };
+// Optional resolver for same-UUID records of another engineering domain
+// (map annotations). It receives the caller's field choices for that UUID.
+// A value means "handled": the result is used and those field choices count
+// as consumed, exactly like hydraulic field choices. nullopt hands the record
+// to the hydraulic resolver. It runs under the repository merge lock and must
+// be pure; an invalid selection is reported by throwing InvalidInput.
+using DomainMergeResolver = std::function<std::optional<MergeResolution>(
+    const Key& key, const ModelRecord& base, const ModelRecord& target,
+    const ModelRecord& source, const QMap<QString, bool>& fieldChoices)>;
+
 // `metadata` describes the merge revision, if one is created.
 MergeResult mergeHydraulicBranches(Repository& repository, const ProjectId& project,
                                        std::string_view target, std::string_view source,
                                        const HydraulicMergeSelections& selections,
                                        const CommitMetadata& metadata,
-                                       const std::function<void(MergeOptions&)>& configure = {});
+                                       const std::function<void(MergeOptions&)>& configure = {},
+                                       const DomainMergeResolver& domainResolver = {});
 
 // Canonical project-scoped UUIDv7 hydraulic operations. All reads pin an
 // immutable revision; saves/edits compare expected HEAD during atomic commit.

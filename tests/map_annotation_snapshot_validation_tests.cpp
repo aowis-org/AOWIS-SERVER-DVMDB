@@ -1,7 +1,11 @@
 #include "aowis/dvmdb/map_annotation_snapshot_validation.h"
+#include "aowis/dvmdb/project_service.h"
+#include "aowis/dvmdb/storage_error.h"
 #include "aowis/dvmdb/map_annotation_persistence.h"
 #include "aowis/dvmdb/hydraulic_distribution_network_persistence.h"
 #include "aowis/dvmdb/model_record_conversion.h"
+
+#include <aowis/model/serialization/model_codec.h>
 
 #include <QCoreApplication>
 #include <QString>
@@ -348,6 +352,17 @@ void agree(const Records& before, const Records& after, bool expectValid,
             (std::string(message) + ": unexpected complete-validation fallback").c_str());
 }
 
+aowis::model::ModelEntityEdit annotationEdit(const std::optional<MapAnnotation>& before,
+                                             const std::optional<MapAnnotation>& after) {
+    aowis::model::ModelEntityEdit edit;
+    edit.entityId = before ? before->uuid : after->uuid;
+    edit.entityType = QStringLiteral("map.annotation");
+    edit.ownerLayerId = uuid(2);
+    if (before) edit.before = aowis::model::ModelCodec<MapAnnotation>::encode(*before);
+    if (after) edit.after = aowis::model::ModelCodec<MapAnnotation>::encode(*after);
+    return edit;
+}
+
 void testDeltaMatchesCompleteValidation() {
     const Scene base;
     const Records before = build(base);
@@ -402,6 +417,44 @@ void testDeltaMatchesCompleteValidation() {
     // incremental graph check rejects it before any complete fallback.
     agree(before, build(domainChange), false, false, "layer domain change");
 
+    // A5: membership edits produced by the real materializer (chunk-local
+    // layout) are checked through the root and the changed chunks only.
+    const std::function<Records(const std::vector<aowis::model::ModelEntityEdit>&)> edited =
+        [&before](const std::vector<aowis::model::ModelEntityEdit>& edits) {
+            Records after = before;
+            const std::function<std::optional<db::ModelRecord>(const db::Key&)> read =
+                [&before](const db::Key& id) -> std::optional<db::ModelRecord> {
+                const Records::const_iterator found = before.find(id);
+                return found == before.end() ? std::nullopt
+                                             : std::optional<db::ModelRecord>(found->second);
+            };
+            for (const db::ModelChange& change :
+                 ann::materializeDraftAnnotationEdits(read, uuid(2), edits)) {
+                if (change.record) after[change.key] = *change.record;
+                else after.erase(change.key);
+            }
+            return after;
+        };
+    agree(before, edited({annotationEdit(base.notes1[0], std::nullopt)}), true, false,
+          "materialized deletion of an anchored annotation");
+    agree(before, edited({annotationEdit(std::nullopt, anchored(3, 202))}), true, false,
+          "materialized insertion of an anchored annotation");
+    agree(before, edited({annotationEdit(std::nullopt, anchored(3, 201))}), false, false,
+          "materialized insertion anchored to another network");
+    agree(before, edited({annotationEdit(base.notes1[1], std::nullopt),
+                          annotationEdit(std::nullopt, annotation(4)),
+                          annotationEdit(std::nullopt, anchored(7, 200))}), true, false,
+          "materialized mixed membership batch");
+
+    // A7: version-8 UUIDs are reserved for server-derived containers.
+    Scene reserved = base;
+    MapAnnotation derivedLooking = annotation(6);
+    QByteArray rfc = derivedLooking.uuid.toRfc4122();
+    rfc[6] = static_cast<char>((static_cast<unsigned char>(rfc[6]) & 0x0fU) | 0x80U);
+    derivedLooking.uuid = QUuid::fromRfc4122(rfc);
+    reserved.notes1.append(derivedLooking);
+    agree(before, build(reserved), false, false, "annotation with a version-8 UUID");
+
     // Raw record tampering that no Save materializer produces.
     Records noncanonical = before;
     noncanonical.at(key(annotation(2).uuid)).payload.push_back(0);
@@ -427,6 +480,54 @@ void testDeltaMatchesCompleteValidation() {
     agree(before, chunkSteals, false, false, "annotation chunk listing a hydraulic member");
 }
 
+// A3: a candidate that cannot be READ is not an invalid candidate. I/O,
+// ENOSPC and busy failures must reach the caller's status mapping, while
+// decode/verification failures stay a diagnostic.
+template <typename Failure>
+bool completeValidationThrows(const Records& records, const Failure& failure) {
+    db::MergeCandidate candidate;
+    candidate.get = [&failure](const db::Key&) -> std::optional<db::ModelRecord> { throw failure; };
+    candidate.forEach = [&records](const std::function<void(const db::Key&, const db::ModelRecord&)>& visit) {
+        for (const std::pair<const db::Key, db::ModelRecord>& entry : records)
+            visit(entry.first, entry.second);
+    };
+    try {
+        (void)ann::validateAnnotationSnapshot(candidate);
+        return false;
+    } catch (const Failure&) {
+        return true;
+    }
+}
+
+void testUnreadableCandidateIsNotInvalid() {
+    const Records model = build(Scene{});
+    require(completeValidationThrows(model, db::StorageError(db::StorageErrorKind::Io, "read failed")),
+            "complete validator turned an I/O error into an invalid candidate");
+    require(completeValidationThrows(model, db::StorageError(db::StorageErrorKind::ResourceExhausted, "full")),
+            "complete validator turned ENOSPC into an invalid candidate");
+    require(completeValidationThrows(model, db::ProjectError(db::ProjectErrorKind::Busy, "busy")),
+            "complete validator turned a busy project into an invalid candidate");
+    require(!completeValidationThrows(model, db::StorageError(db::StorageErrorKind::Corruption, "bad")),
+            "complete validator must report corrupt candidate data as invalid");
+
+    // The incremental validator follows the same policy.
+    Scene text;
+    text.notes1[1].text = QStringLiteral("Edited while the disk fails");
+    const Records after = build(text);
+    db::EngineeringCandidateView failing = engineeringView(after);
+    failing.get = [](const db::Key&) -> std::optional<db::ModelRecord> {
+        throw db::StorageError(db::StorageErrorKind::Io, "read failed");
+    };
+    bool io = false;
+    try {
+        (void)ann::validateAnnotationSnapshotDelta(engineeringView(model), failing,
+            difference(model, after), []() { return std::optional<std::string>(); });
+    } catch (const db::StorageError& error) {
+        io = error.kind() == db::StorageErrorKind::Io;
+    }
+    require(io, "incremental validator turned an I/O error into an invalid candidate");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -438,6 +539,7 @@ int main(int argc, char** argv) {
         testCrossLayerReferences();
         testTypedAnchors();
         testDeltaMatchesCompleteValidation();
+        testUnreadableCandidateIsNotInvalid();
         std::cout << "DVMDB B2 annotation candidate integrity tests passed\n";
         return 0;
     } catch (const std::exception& error) {

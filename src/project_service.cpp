@@ -4247,6 +4247,39 @@ std::optional<ModelRecord> ProjectService::getModelAtRevision(
     });
 }
 
+void rethrowIfNotVerificationFailure() {
+    try {
+        throw;
+    } catch (const ProjectError& error) {
+        switch (error.kind()) {
+        case ProjectErrorKind::NotFound:
+        case ProjectErrorKind::Busy:
+        case ProjectErrorKind::Unavailable:
+            throw;
+        case ProjectErrorKind::InvalidInput:
+        case ProjectErrorKind::Conflict:
+            break;
+        }
+    } catch (const StorageError& error) {
+        switch (error.kind()) {
+        case StorageErrorKind::Unavailable:
+        case StorageErrorKind::Busy:
+        case StorageErrorKind::ResourceExhausted:
+        case StorageErrorKind::Io:
+        case StorageErrorKind::Internal:
+            throw;
+        case StorageErrorKind::InvalidInput:
+        case StorageErrorKind::NotFound:
+        case StorageErrorKind::Conflict:
+        case StorageErrorKind::LimitExceeded:
+        case StorageErrorKind::Corruption:
+            break;
+        }
+    } catch (...) {
+        // Any other failure is a verification result.
+    }
+}
+
 PinnedModelReader ProjectService::pinModelRevision(std::string_view projectId,
                                                    const RevisionId& revisionId) {
     const std::optional<ProjectId> project = ProjectId::parse(projectId);

@@ -170,6 +170,10 @@ bool childAllowed(std::uint16_t container, std::uint16_t child) {
 bool graphValid(const Records& records) {
     for (const std::pair<const db::Key, db::ModelRecord>& entry : records) {
         if (!db::isEngineeringRecordKind(entry.second.kind)) return false;
+        if ((entry.first[6] & 0xf0U) == 0x80U &&
+            (entry.second.kind == 100 || db::isHydraulicMemberKind(entry.second.kind) ||
+             entry.second.kind == 112))
+            return false;
         for (const db::Key& reference : entry.second.references) {
             const Records::const_iterator target = records.find(reference);
             if (target == records.end()) return false;
@@ -358,6 +362,45 @@ void testRejections() {
     require(internal, "inconsistent views must raise an internal error");
 }
 
+// A7: version-8 UUIDs belong to server derivations (chunks, layer roots).
+db::Key version8(std::uint32_t ordinal) {
+    db::Key value = key(ordinal);
+    value[6] = 0x80;
+    return value;
+}
+
+void testServerDerivedUuidReservation() {
+    const Records base = fixture();
+    require(db::isServerDerivedUuidKey(version8(40)) && !db::isServerDerivedUuidKey(key(40)),
+            "version 8 detection");
+    for (const std::uint16_t kind : {std::uint16_t{100}, junction, pipe, std::uint16_t{112}})
+        require(db::isClientIdentifiedEngineeringKind(kind), "client-identified kind");
+    for (const std::uint16_t kind : {std::uint16_t{101}, std::uint16_t{110}, std::uint16_t{111}})
+        require(!db::isClientIdentifiedEngineeringKind(kind), "server container kind");
+
+    const db::Key node = version8(40);
+    rejected(base, {put(node, record(junction, {})), put(C1, record(101, {J1, J2, P1, node}))},
+             "a hydraulic member with a version-8 UUID must be rejected");
+    const db::Key note = version8(41);
+    rejected(base, {put(note, record(112, {})), put(LC1, record(111, {A1, A2, note}))},
+             "an annotation with a version-8 UUID must be rejected");
+    // Checked before the complete-validation fallback for root creation.
+    rejected(base, {put(version8(42), record(100, {}))},
+             "a network root with a version-8 UUID must be rejected");
+    // Server containers keep their derived version-8 identities.
+    const db::Key chunk = version8(43);
+    const db::EngineeringDeltaScope derived = scopeOf(base, {
+        put(chunk, record(101, {J2})), put(C1, record(101, {J1, P1})),
+        put(N1, record(100, {C1, chunk}))});
+    require(!derived.fullValidationRequired && derived.networks == keys({N1}),
+            "a version-8 network chunk is a valid server-derived container");
+    const db::Key layerChunk = version8(44);
+    const db::EngineeringDeltaScope layerDerived = scopeOf(base, {
+        put(layerChunk, record(111, {A2})), put(LC1, record(111, {A1})),
+        put(L1, record(110, {N1, LC1, layerChunk}))});
+    require(layerDerived.layers == keys({L1}), "a version-8 layer chunk is a valid container");
+}
+
 void testViewErrorsPropagate() {
     const Records base = fixture();
     const Records after = applied(base, {put(J1, record(junction, {}, 8))});
@@ -384,6 +427,7 @@ void testRandomDifferential() {
     universe.push_back(A3);
     universe.push_back(R9);
     universe.push_back(key(32));
+    universe.push_back(version8(45)); // valid only for server container kinds
     const std::vector<std::uint16_t> kinds{101, junction, reservoir, pipe, 111, 112};
     std::mt19937 random(0xA1A2U);
     std::size_t compared = 0;
@@ -540,6 +584,7 @@ int main() {
         testOverlayView();
         testScopes();
         testRejections();
+        testServerDerivedUuidReservation();
         testViewErrorsPropagate();
         testRandomDifferential();
         testPinnedReader();

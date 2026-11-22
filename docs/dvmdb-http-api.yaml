@@ -19,18 +19,23 @@ paths:
         List domain-neutral map annotation layers at one immutable revision.
         Resolve branch HEAD once or select a reachable revision using the
         same revision selector as other branch model reads. Every layer has a
-        domain, optional owning network UUID and member count.
+        domain, optional owning network UUID and member count. Only layer
+        roots and membership chunks are decoded; member payloads are not read.
       responses:
         '200': {description: Pinned revision and array of annotation layer descriptors}
+        '400': {description: More than 10000 annotation layers}
         '404': {description: Project, branch or revision not found}
   /projects/{projectId}/branches/{branch}/annotation-layers/{layer}:
     get:
       operationId: readRevisionAnnotationLayer
       description: |
         Return canonical MODEL MapAnnotation payloadBase64 for each ordered
-        member in a pinned immutable revision, plus layer metadata.
+        member in a pinned immutable revision, plus layer metadata. The
+        member limit is checked from the membership chunks before any member
+        record is read.
       responses:
         '200': {description: Immutable annotation layer snapshot}
+        '400': {description: Layer has more than 10000 members}
         '404': {description: Layer not found at the selected revision}
   /working-copies/{draftId}/annotation-layers/{layer}:
     get:
@@ -39,8 +44,10 @@ paths:
         Return the canonical annotation records visible at one pinned draft
         generation (base plus its candidate overlay). Reading is allowed in
         read-only inspection, but editing uses the fenced save-events route.
+        The member limit is checked before any member record is read.
       responses:
         '200': {description: Draft generation and annotation members}
+        '400': {description: Layer has more than 10000 members}
         '404': {description: Draft or layer not found}
   /health:
     get:
@@ -384,6 +391,9 @@ paths:
         '400': {description: Malformed operation UUID, field type, action position or expected HEAD}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {description: Stale generation/HEAD/lease, conflicting retry, unsupported model shape or incomplete MODEL action proof; no mutation}
+        '500': {$ref: '#/components/responses/ServerError'}
+        '503': {description: 'Project queue full (code busy, Retry-After: 1) or repository unavailable; retry the SAME operationId'}
+        '507': {$ref: '#/components/responses/InsufficientStorage'}
   /working-copies/{draftId}/networks/summary:
     parameters:
       - {name: draftId, in: path, required: true, schema: {type: string, format: uuid}}
@@ -1350,7 +1360,12 @@ paths:
         duplicated, unused or stale choices are rejected. Network-root
         metadata merges field by field and project units per quantity; a
         root field choice uses the network UUID and the reported field name
-        (e.g. presentation_units.units.volumetric_flow_rate).
+        (e.g. presentation_units.units.volumetric_flow_rate). Map annotations
+        merge field by field as well (text, style.*); `anchor` and
+        `position_wgs84` form ONE field named `placement`, so attaching on one
+        branch combines with a text edit on the other, while two different
+        placements conflict as `placement`. An annotation field choice uses
+        the annotation UUID and the reported field name.
       requestBody:
         required: true
         content:

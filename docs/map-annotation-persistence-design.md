@@ -6,8 +6,16 @@ integration are implemented. The B5 hardening closes generic HTTP publication
 bypasses, reserves hydraulic member kinds 201–217 (old 1–17 retired), and
 requires explicit semantic validation for engineering native Commit and merge.
 Qt-backed full integration and physical power-cut qualification must be run
-on the supported development host. This document describes the intended
-native contract; the HTTP API is documented in `dvmdb-http-api.yaml`.
+on the supported development host. This document describes the native
+contract; the HTTP API is documented in `dvmdb-http-api.yaml`.
+
+Not implemented yet: layer metadata edits (`MapAnnotationLayerRoot` edits in
+the MODEL contract). A Distribution layer is created only implicitly when its
+network is initialized or imported; no route creates the pre-network Drainage
+layer, changes a layer's metadata or owner, or deletes a network together
+with its layer. Clients cannot write native layer records, so such edits are
+refused. The validator already enforces the layer rules for layers that
+exist.
 
 ## Storage boundary
 
@@ -24,7 +32,7 @@ remain assigned to the existing adapter. Old hydraulic `MapLabel` member kind
 collection, hidden compatibility type, or dual writer remains. The old
 18-collection manifest version is rejected after the format/schema bump.
 
-## Proposed native record graph
+## Native record graph
 
 Native kinds **110** (`annotation layer root`), **111** (`annotation
 membership chunk`) and **112** (`MapAnnotation` member) are now used by the B1
@@ -63,6 +71,43 @@ outgoing reference only when present; reverse references thus provide quick
 lookup of network-owned layers by network UUID. For the pre-network Drainage
 project-domain layer, discovery uses a revision-pinned scan restricted to kind
 110, never a fabricated network UUID. Empty layers remain proper records.
+
+### Chunk layout (root version 2)
+
+Member order is the concatenation of the layer's chunks, in the order the root
+lists them. Chunks are edited in place, so a user edit writes a bounded number
+of records whatever the layer size:
+
+- a text, position, style or anchor edit writes the member record only;
+- an insertion appends to the last chunk, or, when that chunk holds 256
+  members, starts a new chunk (member, chunk and root);
+- a deletion removes the member from its own chunk (member and chunk). A chunk
+  that becomes empty is dropped from the root. A chunk with fewer than 64
+  members is merged into its previous neighbour, or takes in its next one,
+  when the two fit into 256; otherwise it stays small. A deletion therefore
+  writes at most four records (member, two chunks, root). Exception: removing
+  the last member of the last chunk never merges chunks (it only drops the
+  chunk when it empties).
+
+A chunk's UUID is derived from the layer UUID and a chunk serial
+(`chunkUuid(layer, serial)`, UUID version 8); the root lists the chunk UUIDs
+in order and never lists one twice. A new chunk takes the serial after the
+highest one still listed (0 for an empty layer).
+
+Both rules make an insertion exactly reversible: deleting the member that was
+just appended restores the previous member, chunk and root records byte for
+byte. Unborn-draft History depends on this, because it reconstructs the
+draft's starting state by undoing the journal and then proves the saved draft
+by replaying it forward. A full rebuild (import, initial draft, membership
+reconciliation at merge) writes the canonical layout: chunks of 256 with
+serials 0, 1, 2, ...; a merge deletes the tips' actual old chunk records that
+the rebuild does not reuse.
+
+Root version 1 (chunk serial = chunk position, every deletion rewrote all
+later chunks) is no longer read. Local test repositories that contain
+annotation layers must be recreated (also those written by the first chunk-local
+build of 2026-11-21, whose root carried a serial counter); there is no deployed
+data in either format.
 
 ## Invariants and discovery
 
@@ -129,16 +174,26 @@ Merkle sharing and normal branch ancestry provide version identity.
   annotation to an unanchored last resolved WGS84 position, then removes the
   target, with no inconsistent intermediate persisted state.
 
-## Planned API surface (names indicative, not implemented)
+## API surface
 
-Layer enumeration/loading requires an explicit project + pinned revision or
-working-copy identifier; no implicit latest-HEAD mixing. Native operations
-should include `listAnnotationLayersAtRevision`, `loadAnnotationLayerAtRevision`,
-`loadAnnotationAtRevision`, and a draft layer/events writer integrated with
-`saveWorkingCopyTransactions`. The HTTP analogue should live under the
-project/revision and working-copy API hierarchy, with the same canonical MODEL
-payloads and existing lease/generation/retry semantics. The final endpoint
-names are decided in B3 alongside the actual handlers and OpenAPI spec.
+Every read names a project and a pinned revision or a working copy; nothing
+mixes in an implicit latest HEAD.
+
+- Library: `loadAnnotationLayer` (any candidate reader),
+  `loadAnnotationLayerAtRevision`, `loadAnnotationLayerSummary` (root and
+  chunks only), `loadAnnotationMember`, `loadAnnotationLayerMetadata`;
+  writes go through `materializeDraftAnnotationEdits` inside the
+  `save-events` route and `saveWorkingCopyTransactions`.
+- HTTP (see `dvmdb-http-api.yaml`):
+  - `GET /projects/{projectId}/branches/{branch}/annotation-layers`: layer
+    descriptors of a pinned revision;
+  - `GET /projects/{projectId}/branches/{branch}/annotation-layers/{layer}`:
+    one layer with members;
+  - `GET /working-copies/{draftId}/annotation-layers/{layer}`: one layer of a
+    draft;
+  - edits: `map.annotation` events in
+    `POST /working-copies/{draftId}/save-events`, with the existing lease,
+    generation and retry semantics.
 
 The GUI must not inspect DVMDB's private on-disk structures or create native
 kind-110/111 records. Standard REST/library reads are authoritative.
@@ -176,6 +231,16 @@ explicit full candidate validator for engineering kinds, including orphan
 members and fast-forward merges. Generic records in the old 1–17 space remain
 ordinary opaque records, never inferred to be hydraulic.
 
+## Reserved UUID version
+
+Network membership chunks, Distribution layer roots and annotation membership
+chunks have SHA-256-derived UUIDs with version 8. Version 8 is therefore
+reserved for server-derived records: a network root, hydraulic member or
+annotation with a version-8 UUID is rejected by the Save delta check and by
+the complete validator (Commit, merge, bundle import, verify). Otherwise a
+client could create an entity with the UUID of a future chunk and stop that
+network or layer from ever growing.
+
 ## Validation cost
 
 The complete validator (`validateAnnotationSnapshot`) decodes every network
@@ -193,8 +258,11 @@ checked:
   record (chunk entries, pipe end nodes, annotation anchors), and one layer
   per network for every network whose ownership is touched;
 - semantics of the touched scope only: each network whose root, chunk or
-  member changed is loaded by the canonical network loader; each layer whose
-  root or chunk changed is loaded whole; every other changed annotation, and
+  member changed is loaded by the canonical network loader; for each layer whose
+  root or chunk changed, the root is decoded, the changed and newly listed
+  chunks are decoded and checked, and only
+  members that entered the layer through them have their anchors resolved
+  (unchanged chunks and their members are not read); every other changed annotation, and
   every annotation anchored to a changed or moved hydraulic member, is
   decoded on its own and its anchor is resolved through the reverse-reference
   index (target kind, owning network);
@@ -214,6 +282,23 @@ materializers but runs the complete validator only on the parent, the child
 and the selected boundary; the endpoints are additionally proven equal to
 the immutable revisions. An archive whose intermediate state is invalid can
 therefore be navigated to its valid boundaries, never to the invalid one.
+
+## Failure reporting and reads
+
+Validators and History adapters return "invalid" or "not navigable" only for
+verification failures: conflicts, invalid input, corrupt or noncanonical
+data, limits. Failures of the environment or of the request target are
+rethrown (`rethrowIfNotVerificationFailure`) and keep their HTTP status:
+missing draft or revision 404, busy project 503 with `Retry-After`, full disk
+507, I/O and internal errors 500. A client therefore retries a 503/500 History
+request with the same operation ID instead of treating it as stale.
+
+Annotation read routes check the 10,000-member limit from the root and the
+membership chunks (`loadAnnotationLayerSummary`) before any member record is
+read. The layer listing decodes roots and chunks only. Single-layer reads go
+through a pinned revision and hold the project operation lock only while the
+branch and revision are resolved; the listing still needs one scan under that
+lock, because layer roots have no kind index.
 
 The older native hydraulic convenience writers are not the canonical editing
 entry point and require migration to the event-backed path; use the working

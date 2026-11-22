@@ -10,6 +10,8 @@
 
 #include <cstdint>
 #include <map>
+#include <functional>
+#include <memory>
 #include <set>
 #include <filesystem>
 #include <optional>
@@ -83,6 +85,8 @@ std::vector<db::ModelChange> edit(const MapAnnotation& value) {
     record.payload = db::record::bytesFromQByteArray(
         aowis::model::ModelCodec<MapAnnotation>::encode(value));
     require(!record.payload.empty(), "invalid edited annotation fixture");
+    // The native reference set is exactly the anchor target, if any.
+    if (value.anchor) record.references.push_back(db::record::keyFromUuid(value.anchor->entity_uuid));
     return {{db::record::keyFromUuid(value.uuid), record}};
 }
 
@@ -100,8 +104,9 @@ db::RevisionId commitValidated(db::test::ProjectRepository& store,
 
 db::MergeResult merge(db::test::ProjectRepository& store,
                       const db::RevisionId& mainHead, const db::RevisionId& featureHead,
-                      const std::vector<hydraulic::HydraulicObjectChoice>& objects = {}) {
-    const hydraulic::HydraulicMergeSelections selections{mainHead, featureHead, {}, objects};
+                      const std::vector<hydraulic::HydraulicObjectChoice>& objects = {},
+                      const std::vector<hydraulic::HydraulicFieldChoice>& fields = {}) {
+    const hydraulic::HydraulicMergeSelections selections{mainHead, featureHead, fields, objects};
     return ann::mergeDistributionAnnotationBranches(
         store.native(), store.project(), "main", "feature", selections,
         db::test::commitMetadata("annotation merge"));
@@ -365,6 +370,389 @@ void testSameFieldConflict() {
     std::filesystem::remove_all(root);
 }
 
+// ---- A4/A10: field choices and placement as one merge unit ----
+
+// A Distribution network with two junctions as anchor targets.
+std::vector<db::ModelChange> initialWithJunctions() {
+    NetworkHydraulicDistribution network;
+    network.uuid = uuid(1);
+    network.id = QStringLiteral("N1");
+    for (const std::uint32_t ordinal : {10U, 11U}) {
+        HydraulicNodeJunction junction;
+        junction.uuid = uuid(ordinal);
+        junction.id = QStringLiteral("J%1").arg(static_cast<qulonglong>(ordinal));
+        junction.coordinate_wgs84.longitude_deg = 12.0;
+        junction.coordinate_wgs84.latitude_deg = 43.0;
+        network.nodes_junctions.append(junction);
+    }
+    std::vector<db::ModelChange> changes =
+        hydraulic::fullDraftHydraulicDistributionNetworkChanges(network);
+    const std::vector<db::ModelChange> annotations =
+        ann::fullDraftAnnotationLayerChanges(layer(), {note()});
+    changes.insert(changes.end(), annotations.begin(), annotations.end());
+    return changes;
+}
+
+MapAnnotation attached(MapAnnotation value, std::uint32_t target) {
+    MapAnnotationAnchor anchor;
+    anchor.entity_uuid = uuid(target);
+    anchor.entity_type = QStringLiteral("HydraulicNodeJunction");
+    anchor.offset_east_m = 5.0;
+    anchor.offset_north_m = -2.0;
+    value.anchor = anchor;
+    return value;
+}
+
+hydraulic::HydraulicFieldChoice choose(const QString& field, bool source) {
+    return hydraulic::HydraulicFieldChoice{note().uuid, field,
+        source ? hydraulic::HydraulicMergeSide::Source : hydraulic::HydraulicMergeSide::Target};
+}
+
+bool reasonNames(const db::MergeResult& outcome, const char* field) {
+    for (const db::MergeConflict& conflict : outcome.conflicts)
+        if (conflict.key == db::record::keyFromUuid(note().uuid) &&
+            conflict.reason.find(field) != std::string::npos)
+            return true;
+    return false;
+}
+
+bool rejectedSelection(db::test::ProjectRepository& store, const db::RevisionId& mainHead,
+                       const db::RevisionId& featureHead,
+                       const std::vector<hydraulic::HydraulicFieldChoice>& fields) {
+    try {
+        (void)merge(store, mainHead, featureHead, {}, fields);
+    } catch (const db::StorageError& error) {
+        return error.kind() == db::StorageErrorKind::InvalidInput && store.head("main") == mainHead;
+    }
+    return false;
+}
+
+MapAnnotation mergedNote(db::test::ProjectRepository& store) {
+    const std::optional<ann::AnnotationLayerSnapshot> merged =
+        ann::loadAnnotationLayerAtRevision(store.native(), store.project(),
+                                           store.head("main"), layer().uuid);
+    require(merged && merged->annotations.size() == 1, "merged annotation layer is incomplete");
+    return merged->annotations.first();
+}
+
+template <typename Body>
+void inRepository(Body&& body) {
+    const std::filesystem::path root = tempDirectory();
+    try {
+        db::test::ProjectRepository store(root);
+        body(store);
+    } catch (...) {
+        std::filesystem::remove_all(root);
+        throw;
+    }
+    std::filesystem::remove_all(root);
+}
+
+void testAnnotationFieldChoices() {
+    for (const bool sourceWins : {false, true}) {
+        inRepository([sourceWins](db::test::ProjectRepository& store) {
+            store.createBranch("main");
+            (void)commitValidated(store, "main", initial());
+            store.createBranch("feature", "main");
+            MapAnnotation left = note();
+            left.text = QStringLiteral("A");
+            const db::RevisionId mainHead = commitValidated(store, "main", edit(left));
+            MapAnnotation right = note();
+            right.text = QStringLiteral("B");
+            const db::RevisionId featureHead = commitValidated(store, "feature", edit(right));
+            const db::MergeResult conflict = merge(store, mainHead, featureHead);
+            require(conflict.status == db::MergeStatus::Conflicts && reasonNames(conflict, "text"),
+                    "annotation text conflict must name the field");
+            require(rejectedSelection(store, mainHead, featureHead,
+                        {choose(QStringLiteral("style.visible"), true)}),
+                    "a choice for a non-conflicting annotation field must be rejected");
+            const db::MergeResult resolved = merge(store, mainHead, featureHead, {},
+                {choose(QStringLiteral("text"), sourceWins)});
+            require(resolved.status == db::MergeStatus::Merged,
+                    "an annotation field choice must resolve the text conflict");
+            require(mergedNote(store).text == (sourceWins ? right.text : left.text),
+                    "the annotation field choice selected the wrong side");
+        });
+    }
+}
+
+void testAnchorCombinesWithText() {
+    inRepository([](db::test::ProjectRepository& store) {
+        store.createBranch("main");
+        (void)commitValidated(store, "main", initialWithJunctions());
+        store.createBranch("feature", "main");
+        const MapAnnotation left = attached(note(), 10);
+        const db::RevisionId mainHead = commitValidated(store, "main", edit(left));
+        MapAnnotation right = note();
+        right.text = QStringLiteral("Edited on feature");
+        const db::RevisionId featureHead = commitValidated(store, "feature", edit(right));
+        const db::MergeResult outcome = merge(store, mainHead, featureHead);
+        require(outcome.status == db::MergeStatus::Merged,
+                "attaching on one branch must combine with a text edit on the other");
+        const MapAnnotation merged = mergedNote(store);
+        require(merged.text == right.text && merged.anchor &&
+                merged.anchor->entity_uuid == uuid(10) &&
+                merged.anchor->offset_east_m == 5.0 &&
+                merged.position_wgs84.longitude_deg == note().position_wgs84.longitude_deg,
+                "combined annotation lost the attach or the text edit");
+    });
+    // Mirror: text on the target branch, detach on the source branch.
+    inRepository([](db::test::ProjectRepository& store) {
+        store.createBranch("main");
+        std::vector<db::ModelChange> changes = initialWithJunctions();
+        (void)commitValidated(store, "main", changes);
+        (void)commitValidated(store, "main", edit(attached(note(), 11)));
+        store.createBranch("feature", "main");
+        MapAnnotation left = attached(note(), 11);
+        left.text = QStringLiteral("Edited on main");
+        const db::RevisionId mainHead = commitValidated(store, "main", edit(left));
+        MapAnnotation right = note();
+        right.position_wgs84.longitude_deg = 12.5;
+        const db::RevisionId featureHead = commitValidated(store, "feature", edit(right));
+        const db::MergeResult outcome = merge(store, mainHead, featureHead);
+        require(outcome.status == db::MergeStatus::Merged,
+                "detaching on one branch must combine with a text edit on the other");
+        const MapAnnotation merged = mergedNote(store);
+        require(merged.text == left.text && !merged.anchor &&
+                merged.position_wgs84.longitude_deg == 12.5,
+                "combined annotation lost the detach placement or the text edit");
+    });
+}
+
+void testPlacementIsOneUnit() {
+    for (const bool sourceWins : {false, true}) {
+        inRepository([sourceWins](db::test::ProjectRepository& store) {
+            store.createBranch("main");
+            (void)commitValidated(store, "main", initialWithJunctions());
+            store.createBranch("feature", "main");
+            // Main attaches (keeps the last explicit position), feature drags
+            // the still-free note. Combining both would silently drop the drag.
+            const MapAnnotation left = attached(note(), 10);
+            const db::RevisionId mainHead = commitValidated(store, "main", edit(left));
+            MapAnnotation right = note();
+            right.position_wgs84.longitude_deg = 13.0;
+            right.text = QStringLiteral("Moved and edited");
+            const db::RevisionId featureHead = commitValidated(store, "feature", edit(right));
+            const db::MergeResult conflict = merge(store, mainHead, featureHead);
+            require(conflict.status == db::MergeStatus::Conflicts &&
+                    reasonNames(conflict, "placement") && !reasonNames(conflict, "text") &&
+                    store.head("main") == mainHead,
+                    "attach versus free drag must conflict as one placement field");
+            require(rejectedSelection(store, mainHead, featureHead,
+                        {choose(QStringLiteral("anchor"), true)}),
+                    "anchor alone must not be selectable separately from placement");
+            const db::MergeResult resolved = merge(store, mainHead, featureHead, {},
+                {choose(QStringLiteral("placement"), sourceWins)});
+            require(resolved.status == db::MergeStatus::Merged,
+                    "a placement choice must resolve the placement conflict");
+            const MapAnnotation merged = mergedNote(store);
+            require(merged.text == right.text, "placement choice lost the independent text edit");
+            if (sourceWins)
+                require(!merged.anchor && merged.position_wgs84.longitude_deg == 13.0,
+                        "source placement must keep the free drag");
+            else
+                require(merged.anchor && merged.anchor->entity_uuid == uuid(10) &&
+                        merged.position_wgs84.longitude_deg == note().position_wgs84.longitude_deg,
+                        "target placement must keep the attach and its explicit position");
+        });
+    }
+    // A placement choice without a placement conflict is inapplicable.
+    inRepository([](db::test::ProjectRepository& store) {
+        store.createBranch("main");
+        (void)commitValidated(store, "main", initialWithJunctions());
+        store.createBranch("feature", "main");
+        MapAnnotation left = note();
+        left.text = QStringLiteral("A");
+        const db::RevisionId mainHead = commitValidated(store, "main", edit(left));
+        MapAnnotation right = note();
+        right.text = QStringLiteral("B");
+        const db::RevisionId featureHead = commitValidated(store, "feature", edit(right));
+        require(rejectedSelection(store, mainHead, featureHead,
+                    {choose(QStringLiteral("text"), true), choose(QStringLiteral("placement"), true)}),
+                "a placement choice without a placement conflict must be rejected");
+    });
+}
+
+// The merged anchor is re-checked by the complete candidate validator: an
+// attach to a node the other branch deleted must not publish.
+void testMergedAnchorTargetIsValidated() {
+    inRepository([](db::test::ProjectRepository& store) {
+        store.createBranch("main");
+        (void)commitValidated(store, "main", initialWithJunctions());
+        store.createBranch("feature", "main");
+        MapAnnotation left = note();
+        left.text = QStringLiteral("Edited on main");
+        NetworkHydraulicDistribution network;
+        network.uuid = uuid(1);
+        network.id = QStringLiteral("N1");
+        HydraulicNodeJunction kept;
+        kept.uuid = uuid(10);
+        kept.id = QStringLiteral("J10");
+        kept.coordinate_wgs84.longitude_deg = 12.0;
+        kept.coordinate_wgs84.latitude_deg = 43.0;
+        network.nodes_junctions.append(kept);
+        std::vector<db::ModelChange> mainChanges = edit(left);
+        std::map<db::Key, db::ModelRecord> before;
+        for (const db::ModelChange& change : hydraulic::fullDraftHydraulicDistributionNetworkChanges(
+                 [&]() {
+                     NetworkHydraulicDistribution full = network;
+                     HydraulicNodeJunction removed = kept;
+                     removed.uuid = uuid(11);
+                     removed.id = QStringLiteral("J11");
+                     full.nodes_junctions.append(removed);
+                     return full;
+                 }()))
+            before.emplace(change.key, *change.record);
+        std::set<db::Key> after;
+        for (const db::ModelChange& change : hydraulic::fullDraftHydraulicDistributionNetworkChanges(network)) {
+            after.insert(change.key);
+            const std::map<db::Key, db::ModelRecord>::const_iterator old = before.find(change.key);
+            if (old == before.end() || old->second.payload != change.record->payload ||
+                old->second.references != change.record->references)
+                mainChanges.push_back(change);
+        }
+        for (const std::pair<const db::Key, db::ModelRecord>& entry : before)
+            if (!after.contains(entry.first))
+                mainChanges.push_back(db::ModelChange{entry.first, std::nullopt});
+        const db::RevisionId mainHead = commitValidated(store, "main", mainChanges);
+        const db::RevisionId featureHead = commitValidated(store, "feature", edit(attached(note(), 11)));
+        bool refused = false;
+        try {
+            const db::MergeResult outcome = merge(store, mainHead, featureHead);
+            refused = outcome.status != db::MergeStatus::Merged;
+        } catch (const db::StorageError&) {
+            refused = true;
+        }
+        require(refused && store.head("main") == mainHead,
+                "a merge must not publish an anchor to a node deleted on the other branch");
+    });
+}
+
+// A11: several members restored by object choices keep their baseline
+// order: before the next surviving baseline member, and a restored LAST
+// baseline member goes before the other branch's new additions.
+void testRestoredMembersKeepBaselineOrder() {
+    inRepository([](db::test::ProjectRepository& store) {
+        store.createBranch("main");
+        (void)commitValidated(store, "main", initial());
+        const QList<MapAnnotation> base{note(), additionalNote(2301), additionalNote(2302),
+                                        additionalNote(2303), additionalNote(2304)};
+        (void)commitValidated(store, "main", annotationDelta({note()}, base));
+        store.createBranch("feature", "main");
+        const QList<MapAnnotation> left{note(), additionalNote(2302), additionalNote(2305)};
+        const db::RevisionId mainHead = commitValidated(store, "main", annotationDelta(base, left));
+        QList<MapAnnotation> right = base;
+        for (const qsizetype index : {qsizetype{1}, qsizetype{3}, qsizetype{4}})
+            right[index].text = QStringLiteral("Kept %1").arg(index);
+        const db::RevisionId featureHead = commitValidated(store, "feature", annotationDelta(base, right));
+        require(merge(store, mainHead, featureHead).status == db::MergeStatus::Conflicts,
+                "delete-versus-edit of several members must conflict without choices");
+        std::vector<hydraulic::HydraulicObjectChoice> keep;
+        for (const qsizetype index : {qsizetype{1}, qsizetype{3}, qsizetype{4}})
+            keep.push_back({right.at(index).uuid, hydraulic::HydraulicMergeSide::Source});
+        require(merge(store, mainHead, featureHead, keep).status == db::MergeStatus::Merged,
+                "object choices must restore the deleted members");
+        const std::optional<ann::AnnotationLayerSnapshot> merged =
+            ann::loadAnnotationLayerAtRevision(store.native(), store.project(),
+                                               store.head("main"), layer().uuid);
+        const QList<QUuid> expected{note().uuid, uuid(2301), uuid(2302), uuid(2303),
+                                    uuid(2304), uuid(2305)};
+        require(merged && merged->annotations.size() == expected.size(),
+                "restored layer has the wrong member count");
+        for (qsizetype index = 0; index < expected.size(); ++index)
+            require(merged->annotations.at(index).uuid == expected.at(index),
+                    "restored members lost their baseline order");
+        require(merged->annotations.at(1).text == right.at(1).text &&
+                merged->annotations.at(4).text == right.at(4).text,
+                "restored members lost the chosen source edits");
+    });
+}
+
+// A5: tips edited through the real materializer have chunk UUIDs that a
+// canonical rebuild would not produce. The merge must delete the tips' actual
+// old chunks, or the merged candidate keeps orphaned chunks and is refused.
+std::vector<db::ModelChange> materialized(db::test::ProjectRepository& store, const char* branch,
+                                          const std::vector<aowis::model::ModelEntityEdit>& edits) {
+    const db::RevisionId head = store.head(branch);
+    const std::function<std::optional<db::ModelRecord>(const db::Key&)> read =
+        [&store, head](const db::Key& id) {
+            return store.native().getModelAtRevision(store.project(), head, id);
+        };
+    return ann::materializeDraftAnnotationEdits(read, layer().uuid, edits);
+}
+
+aowis::model::ModelEntityEdit annotationEdit(const std::optional<MapAnnotation>& before,
+                                             const std::optional<MapAnnotation>& after) {
+    aowis::model::ModelEntityEdit edit;
+    edit.entityId = before ? before->uuid : after->uuid;
+    edit.entityType = QStringLiteral("map.annotation");
+    edit.ownerLayerId = layer().uuid;
+    if (before) edit.before = aowis::model::ModelCodec<MapAnnotation>::encode(*before);
+    if (after) edit.after = aowis::model::ModelCodec<MapAnnotation>::encode(*after);
+    return edit;
+}
+
+db::MergeCandidate candidateAt(db::test::ProjectRepository& store, const db::RevisionId& revision) {
+    const std::shared_ptr<std::map<db::Key, db::ModelRecord>> records =
+        std::make_shared<std::map<db::Key, db::ModelRecord>>();
+    for (const std::pair<db::Key, db::Bytes>& entry :
+         store.native().scanAtRevision(store.project(), revision))
+        records->emplace(entry.first, db::decodeModelRecord(entry.second));
+    db::MergeCandidate candidate;
+    candidate.get = [records](const db::Key& id) -> std::optional<db::ModelRecord> {
+        const std::map<db::Key, db::ModelRecord>::const_iterator found = records->find(id);
+        return found == records->end() ? std::nullopt : std::optional<db::ModelRecord>(found->second);
+    };
+    candidate.forEach = [records](const std::function<void(const db::Key&, const db::ModelRecord&)>& visit) {
+        for (const std::pair<const db::Key, db::ModelRecord>& entry : *records)
+            visit(entry.first, entry.second);
+    };
+    return candidate;
+}
+
+void testMergeOfChunkLocalTips() {
+    inRepository([](db::test::ProjectRepository& store) {
+        store.createBranch("main");
+        (void)commitValidated(store, "main", initial());
+        QList<MapAnnotation> base{note()};
+        // 513 members: chunks of 256, 256 and 1. Emptying the first chunk
+        // never merges it with the full second one.
+        for (std::uint32_t ordinal = 3000; ordinal < 3512; ++ordinal)
+            base.append(additionalNote(ordinal));
+        (void)commitValidated(store, "main", annotationDelta({note()}, base));
+        store.createBranch("feature", "main");
+        // Main empties the first chunk completely, so chunk serials 1 and 2
+        // remain: a canonical rebuild would call them serials 0 and 1.
+        std::vector<aowis::model::ModelEntityEdit> removals;
+        for (qsizetype index = 0; index < 256; ++index)
+            removals.push_back(annotationEdit(base.at(index), std::nullopt));
+        const db::RevisionId mainHead =
+            commitValidated(store, "main", materialized(store, "main", removals));
+        const MapAnnotation added = additionalNote(3600);
+        const db::RevisionId featureHead = commitValidated(store, "feature",
+            materialized(store, "feature", {annotationEdit(std::nullopt, added)}));
+        const db::MergeResult outcome = merge(store, mainHead, featureHead);
+        require(outcome.status == db::MergeStatus::Merged,
+                "a merge of chunk-local tips must succeed");
+        const std::optional<ann::AnnotationLayerSnapshot> merged =
+            ann::loadAnnotationLayerAtRevision(store.native(), store.project(),
+                                               store.head("main"), layer().uuid);
+        require(merged && merged->annotations.size() == base.size() - 256 + 1,
+                "merged chunk-local layer has the wrong member count");
+        for (qsizetype index = 0; index + 1 < merged->annotations.size(); ++index)
+            require(merged->annotations.at(index).uuid == base.at(index + 256).uuid,
+                    "merged chunk-local layer lost the member order");
+        require(merged->annotations.last().uuid == added.uuid,
+                "merged chunk-local layer lost the source addition");
+        // Throws on any structural damage (orphans are caught by the merge
+        // validator above; this checks the stored pack and indexes).
+        (void)store.native().verifyRepository();
+        // The merged revision must still validate as a complete candidate.
+        require(!ann::validateAnnotationSnapshot(candidateAt(store, store.head("main"))).has_value(),
+                "merged chunk-local revision is not a valid annotation candidate");
+    });
+}
+
 void testInvalidFastForward() {
     const std::filesystem::path root = tempDirectory();
     try {
@@ -413,11 +801,17 @@ int main(int argc, char** argv) {
     try {
         testIndependentFieldsAndHistoricalRevision();
         testSameFieldConflict();
+        testAnnotationFieldChoices();
+        testAnchorCombinesWithText();
+        testPlacementIsOneUnit();
+        testMergedAnchorTargetIsValidated();
         testInvalidFastForward();
         testConcurrentInsertAndCanonicalChunkSplit();
         testConcurrentFirstChunkCreation();
         testIndependentDeletionAndAddition();
         testDeleteVersusModifyRequiresObjectChoice();
+        testRestoredMembersKeepBaselineOrder();
+        testMergeOfChunkLocalTips();
         testConcurrentReorderIsRejected();
         std::cout << "DVMDB B4 annotation merge tests passed\n";
         return 0;

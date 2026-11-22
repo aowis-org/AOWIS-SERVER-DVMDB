@@ -15,6 +15,7 @@
 #include <iostream>
 #include <map>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string_view>
 #include <string>
@@ -124,6 +125,50 @@ void testMembershipSizes() {
                     "annotation membership order or payload changed");
         require(!ann::loadAnnotationLayer(reader(model), uuid(987654)),
                 "nonexistent layer must return absent");
+    }
+}
+
+// A6: listings and HTTP limits use the root and membership chunks only.
+void testLayerSummaryReadsNoMembers() {
+    for (const int count : {0, 1, 256, 257, 513}) {
+        const MapAnnotationLayer layer = distributionLayer();
+        QList<MapAnnotation> annotations;
+        std::set<db::Key> memberKeys;
+        for (int number = 0; number < count; ++number) {
+            annotations.append(annotation(static_cast<std::uint32_t>(number)));
+            memberKeys.insert(db::record::keyFromUuid(annotations.back().uuid));
+        }
+        std::map<db::Key, db::ModelRecord> model =
+            records(ann::fullDraftAnnotationLayerChanges(layer, annotations));
+        std::vector<db::Key> visited;
+        const std::function<std::optional<db::ModelRecord>(const db::Key&)> base = reader(model);
+        const std::function<std::optional<db::ModelRecord>(const db::Key&)> counted =
+            [&visited, &base](const db::Key& key) {
+                visited.push_back(key);
+                return base(key);
+            };
+        const std::optional<ann::AnnotationLayerSummary> summary =
+            ann::loadAnnotationLayerSummary(counted, layer.uuid);
+        require(summary.has_value() && summary->memberCount == static_cast<std::size_t>(count) &&
+                summary->layer.uuid == layer.uuid &&
+                summary->layer.owner_network_uuid == layer.owner_network_uuid,
+                "layer summary lost metadata or member count");
+        require(visited.size() == 1 + static_cast<std::size_t>((count + 255) / 256),
+                "layer summary must read exactly the root and its chunks");
+        for (const db::Key& key : visited)
+            require(!memberKeys.contains(key), "layer summary read an annotation member");
+        require(!ann::loadAnnotationLayerSummary(reader(model), uuid(987654)),
+                "summary of a nonexistent layer must be absent");
+        if (count == 0) continue;
+        // A damaged chunk still fails closed without reading members.
+        for (std::pair<const db::Key, db::ModelRecord>& entry : model) {
+            if (entry.second.kind != ann::annotationChunkKind) continue;
+            entry.second.payload.back() =
+                static_cast<std::uint8_t>(entry.second.payload.back() ^ 0x01U);
+            break;
+        }
+        mustReject([&]() { (void)ann::loadAnnotationLayerSummary(reader(model), layer.uuid); },
+                   "layer summary accepted a damaged membership chunk");
     }
 }
 
@@ -252,6 +297,7 @@ int main(int argc, char** argv) {
     try {
         testDeterministicDistributionLayerIdentity();
         testMembershipSizes();
+        testLayerSummaryReadsNoMembers();
         testDrainageAndInvalidInput();
         testCorruptReferences();
         testNativeRevisionRoundtrip();

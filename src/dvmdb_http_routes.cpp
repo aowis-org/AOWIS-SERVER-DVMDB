@@ -1153,6 +1153,30 @@ QJsonObject layerJson(const annotations::AnnotationLayerSnapshot& snapshot,
     return result;
 }
 
+// Listing entry from root and chunks only; the same fields as layerJson
+// without members, so a listing never decodes annotation payloads (A6).
+QJsonObject layerSummaryJson(const annotations::AnnotationLayerSummary& summary) {
+    return QJsonObject{{"id", uuidString(summary.layer.uuid)},
+                       {"domain", summary.layer.domain == MapAnnotationDomain::Distribution
+                           ? QStringLiteral("distribution") : QStringLiteral("drainage")},
+                       {"ownerNetworkId", summary.layer.owner_network_uuid
+                           ? QJsonValue(uuidString(*summary.layer.owner_network_uuid))
+                           : QJsonValue(QJsonValue::Null)},
+                       {"count", static_cast<int>(summary.memberCount)}};
+}
+
+// One annotation layer with members, limited BEFORE any member record is
+// read: the summary decodes only the root and the membership chunks (A6).
+std::optional<annotations::AnnotationLayerSnapshot> loadLayerWithinHttpLimit(
+    const std::function<std::optional<ModelRecord>(const Key&)>& read, const QUuid& layerId) {
+    const std::optional<annotations::AnnotationLayerSummary> summary =
+        annotations::loadAnnotationLayerSummary(read, layerId);
+    if (!summary) return std::nullopt;
+    requireInput(summary->memberCount <= maxHttpEntityIds,
+                 "annotation layer exceeds HTTP listing limit");
+    return annotations::loadAnnotationLayer(read, layerId);
+}
+
 // The MODEL event journal is the undo/redo history of exactly the saved
 // candidate, so both must agree. Applied in order, every edit's before-image
 // must equal the entity's current state (earlier edit of this batch, else the
@@ -1406,27 +1430,42 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
             const ProjectId project = requestProject(request);
             QJsonArray layers;
             std::optional<RevisionId> revision;
+            // Layer roots have no kind index, so the revision is scanned once.
+            // Only roots and membership chunks are kept; member payloads are
+            // never decoded for a listing, and the summaries are built after
+            // the project operation lock is released (A6).
+            std::map<Key, ModelRecord> membership;
+            std::vector<Key> roots;
             service.withRepository(pathParam(request, "id"), [&](Repository& repository) {
                 revision = revisionForRead(repository, project,
                                             pathParam(request, "branch"), request);
                 requireModelIndexed(repository, project, *revision, "model data not found");
-                const std::vector<std::pair<Key, Bytes>> records =
-                    repository.scanAtRevision(project, *revision);
-                for (const std::pair<Key, Bytes>& item : records) {
-                    const ModelRecord decoded = decodeModelRecord(item.second);
-                    if (decoded.kind != annotations::annotationLayerKind) continue;
-                    const QUuid layerId = record::uuidFromKey(item.first);
-                    const std::optional<annotations::AnnotationLayerSnapshot> layer =
-                        annotations::loadAnnotationLayerAtRevision(
-                            repository, project, *revision, layerId);
-                    if (!layer)
-                        throw StorageError(StorageErrorKind::Corruption,
-                                           "missing annotation layer in indexed revision");
-                    layers.append(layerJson(*layer, false));
-                    requireInput(layers.size() <= static_cast<int>(maxHttpEntityIds),
-                                 "too many annotation layers for HTTP listing");
+                for (const std::pair<Key, Bytes>& item : repository.scanAtRevision(project, *revision)) {
+                    ModelRecord decoded = decodeModelRecord(item.second);
+                    if (decoded.kind == annotations::annotationLayerKind) {
+                        roots.push_back(item.first);
+                        requireInput(roots.size() <= maxHttpEntityIds,
+                                     "too many annotation layers for HTTP listing");
+                    } else if (decoded.kind != annotations::annotationChunkKind) {
+                        continue;
+                    }
+                    membership.emplace(item.first, std::move(decoded));
                 }
             });
+            const std::function<std::optional<ModelRecord>(const Key&)> read =
+                [&membership](const Key& key) -> std::optional<ModelRecord> {
+                const std::map<Key, ModelRecord>::const_iterator found = membership.find(key);
+                return found == membership.end() ? std::nullopt
+                                                 : std::optional<ModelRecord>(found->second);
+            };
+            for (const Key& root : roots) {
+                const std::optional<annotations::AnnotationLayerSummary> summary =
+                    annotations::loadAnnotationLayerSummary(read, record::uuidFromKey(root));
+                if (!summary)
+                    throw StorageError(StorageErrorKind::Corruption,
+                                       "missing annotation layer in indexed revision");
+                layers.append(layerSummaryJson(*summary));
+            }
             return Reply{200, QJsonObject{{"revision", revisionIdString(*revision)},
                                           {"layers", layers}}};
         });
@@ -1436,21 +1475,26 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
         guarded(response, [&]() {
             const ProjectId project = requestProject(request);
             const QUuid layerId = parseUuid(pathParam(request, "layer"));
-            QJsonObject result;
+            // Only the branch/revision resolution needs the project lock; the
+            // layer is read through the pinned immutable revision (A6).
+            std::optional<RevisionId> revision;
             service.withRepository(pathParam(request, "id"), [&](Repository& repository) {
-                const RevisionId revision = revisionForRead(repository, project,
-                                               pathParam(request, "branch"), request);
-                requireModelIndexed(repository, project, revision, "model data not found");
-                const std::optional<annotations::AnnotationLayerSnapshot> layer =
-                    annotations::loadAnnotationLayerAtRevision(
-                        repository, project, revision, layerId);
-                if (!layer) throw ProjectError(ProjectErrorKind::NotFound,
-                                               "annotation layer not found in revision");
-                requireInput(layer->annotations.size() <= static_cast<qsizetype>(maxHttpEntityIds),
-                             "annotation layer exceeds HTTP listing limit");
-                result = layerJson(*layer, true);
-                result.insert(QStringLiteral("revision"), revisionIdString(revision));
+                revision = revisionForRead(repository, project,
+                                           pathParam(request, "branch"), request);
+                requireModelIndexed(repository, project, *revision, "model data not found");
             });
+            const PinnedModelReader pinned =
+                service.pinModelRevision(pathParam(request, "id"), *revision);
+            const std::function<std::optional<ModelRecord>(const Key&)> read =
+                [&pinned](const Key& key) -> std::optional<ModelRecord> {
+                return pinned.get(key);
+            };
+            const std::optional<annotations::AnnotationLayerSnapshot> layer =
+                loadLayerWithinHttpLimit(read, layerId);
+            if (!layer) throw ProjectError(ProjectErrorKind::NotFound,
+                                           "annotation layer not found in revision");
+            QJsonObject result = layerJson(*layer, true);
+            result.insert(QStringLiteral("revision"), revisionIdString(*revision));
             return Reply{200, result};
         });
     });
@@ -1465,11 +1509,9 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
             const EngineeringCandidateView read =
                 draftCandidateView(draftBase(service, draft, false), draft, {});
             const std::optional<annotations::AnnotationLayerSnapshot> layer =
-                annotations::loadAnnotationLayer(read.get, layerId);
+                loadLayerWithinHttpLimit(read.get, layerId);
             if (!layer) throw ProjectError(ProjectErrorKind::NotFound,
                                            "annotation layer not found in working copy");
-            requireInput(layer->annotations.size() <= static_cast<qsizetype>(maxHttpEntityIds),
-                         "annotation layer exceeds HTTP listing limit");
             QJsonObject result = layerJson(*layer, true);
             result.insert(QStringLiteral("generation"),
                           QString::number(static_cast<qulonglong>(draft.generation)));

@@ -1,4 +1,6 @@
 #include "aowis/dvmdb/map_annotation_persistence.h"
+
+#include "aowis/dvmdb/engineering_delta_scope.h"
 #include "aowis/dvmdb/model_codec.h"
 #include "aowis/dvmdb/model_record_conversion.h"
 #include "aowis/dvmdb/storage_error.h"
@@ -6,6 +8,8 @@
 #include <aowis/model/serialization/model_validation.h>
 
 #include <QCryptographicHash>
+#include <QHash>
+#include <QSet>
 #include <QDataStream>
 #include <QIODevice>
 
@@ -20,7 +24,14 @@ namespace {
 
 constexpr quint32 layerMagic = 0x414E4C31U; // ANL1
 constexpr quint32 chunkMagic = 0x414E4331U; // ANC1
-constexpr quint32 recordVersion = 1;
+// Root version 2 (A5): chunks are edited in place and keep their serial, so a
+// deletion rewrites only its own chunk. A new chunk takes the next serial
+// after the highest listed one, so undoing an insertion restores the exact
+// previous records (unborn History reverses its journal this way).
+constexpr quint32 rootVersion = 2;
+constexpr quint32 chunkVersion = 1;
+// A chunk below this size is merged with a neighbour when both fit.
+constexpr qsizetype chunkMergeThreshold = 64;
 constexpr qsizetype maxRootBytes = 1024 * 1024;
 constexpr qsizetype maxChunkBytes = 16 * 1024;
 constexpr qsizetype maxMemberBytes = 256 * 1024;
@@ -82,7 +93,7 @@ ModelRecord encodeChunk(const QUuid& layerId, quint32 serial, const QList<QUuid>
     QByteArray encoded;
     QDataStream stream(&encoded, QIODevice::WriteOnly);
     stream.setVersion(QDataStream::Qt_6_0);
-    stream << chunkMagic << recordVersion << layerId << serial << members;
+    stream << chunkMagic << chunkVersion << layerId << serial << members;
     if (stream.status() != QDataStream::Ok || encoded.size() > maxChunkBytes)
         throw StorageError(StorageErrorKind::LimitExceeded, "annotation chunk exceeds size limit");
     ModelRecord record;
@@ -102,7 +113,7 @@ ModelRecord encodeRoot(const MapAnnotationLayer& layer, const QList<QUuid>& chun
     const QByteArray layerPayload = ModelCodec<MapAnnotationLayer>::encode(layer);
     if (layerPayload.isEmpty() || layerPayload.size() > 65536)
         throw StorageError(StorageErrorKind::InvalidInput, "invalid annotation layer metadata");
-    stream << layerMagic << recordVersion << layerPayload << chunkIds;
+    stream << layerMagic << rootVersion << layerPayload << chunkIds;
     if (stream.status() != QDataStream::Ok || encoded.size() > maxRootBytes)
         throw StorageError(StorageErrorKind::LimitExceeded, "annotation root exceeds size limit");
     QList<QUuid> references = chunkIds;
@@ -130,7 +141,14 @@ MapAnnotation decodeMember(const ModelRecord& record, const QUuid& expectedId) {
     return *decoded;
 }
 
-QList<QUuid> decodeChunk(const ModelRecord& record, const QUuid& layerId, quint32 serial) {
+struct Chunk final {
+    quint32 serial = 0;
+    QList<QUuid> members;
+};
+
+// Canonical chunk of `layerId`; the caller checks that the chunk's record UUID
+// is chunkUuid(layerId, serial) (see checkedChunk).
+Chunk decodeChunk(const ModelRecord& record, const QUuid& layerId) {
     reject(record.kind != annotationChunkKind || record.payload.size() > static_cast<std::size_t>(maxChunkBytes),
            "invalid annotation chunk record kind or size");
     const QByteArray payload = data(record.payload);
@@ -138,27 +156,26 @@ QList<QUuid> decodeChunk(const ModelRecord& record, const QUuid& layerId, quint3
     stream.setVersion(QDataStream::Qt_6_0);
     quint32 magic = 0;
     quint32 version = 0;
-    quint32 storedSerial = 0;
+    Chunk chunk;
     QUuid storedLayer;
-    QList<QUuid> members;
     quint32 memberCount = 0;
-    stream >> magic >> version >> storedLayer >> storedSerial >> memberCount;
+    stream >> magic >> version >> storedLayer >> chunk.serial >> memberCount;
     reject(stream.status() != QDataStream::Ok || memberCount == 0 ||
            memberCount > annotationChunkCapacity,
            "invalid annotation chunk member count");
     for (quint32 index = 0; index < memberCount; ++index) {
         QUuid member;
         stream >> member;
-        members.append(member);
+        chunk.members.append(member);
     }
     reject(stream.status() != QDataStream::Ok || !stream.atEnd() || magic != chunkMagic ||
-           version != recordVersion || storedLayer != layerId || storedSerial != serial,
+           version != chunkVersion || storedLayer != layerId,
            "invalid annotation chunk encoding");
-    reject(encodeChunk(layerId, serial, members).references != record.references,
+    const ModelRecord canonical = encodeChunk(layerId, chunk.serial, chunk.members);
+    reject(canonical.references != record.references,
            "annotation chunk membership references mismatch");
-    reject(encodeChunk(layerId, serial, members).payload != record.payload,
-           "noncanonical annotation chunk bytes");
-    return members;
+    reject(canonical.payload != record.payload, "noncanonical annotation chunk bytes");
+    return chunk;
 }
 
 struct Root final {
@@ -194,7 +211,9 @@ Root decodeRoot(const ModelRecord& record, const QUuid& expectedId) {
         root.chunkIds.append(chunkId);
     }
     reject(stream.status() != QDataStream::Ok || !stream.atEnd() || magic != layerMagic ||
-           version != recordVersion, "invalid annotation root encoding");
+           version != rootVersion, "invalid annotation root encoding");
+    reject(QSet<QUuid>(root.chunkIds.cbegin(), root.chunkIds.cend()).size() != root.chunkIds.size(),
+           "duplicate annotation chunk UUID");
     QString error;
     const std::optional<MapAnnotationLayer> layer = ModelCodec<MapAnnotationLayer>::decode(layerPayload, &error);
     reject(!layer || layer->uuid != expectedId ||
@@ -214,6 +233,17 @@ Root decodeRoot(const ModelRecord& record, const QUuid& expectedId) {
     reject(encodeRoot(root.layer, root.chunkIds).payload != record.payload,
            "noncanonical annotation root bytes");
     return root;
+}
+
+// Reads and checks one chunk listed by a root: canonical bytes, owned by this
+// layer, record UUID derived from its serial.
+Chunk checkedChunk(const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
+                   const QUuid& layerId, const QUuid& chunkId) {
+    const std::optional<ModelRecord> record = readCurrent(key(chunkId));
+    reject(!record, "missing annotation chunk");
+    Chunk chunk = decodeChunk(*record, layerId);
+    reject(chunkUuid(layerId, chunk.serial) != chunkId, "noncanonical annotation chunk UUID");
+    return chunk;
 }
 
 } // namespace
@@ -275,24 +305,101 @@ std::vector<ModelChange> materializeDraftAnnotationEdits(
     if (layerId.isNull() || edits.empty())
         throw StorageError(StorageErrorKind::InvalidInput,
                            "annotation edits require a layer UUID and nonempty batch");
-    const std::optional<AnnotationLayerSnapshot> snapshot = loadAnnotationLayer(readCurrent, layerId);
-    if (!snapshot)
-        throw StorageError(StorageErrorKind::NotFound, "annotation layer not found in draft");
-
     if (edits.size() > 4096)
         throw StorageError(StorageErrorKind::LimitExceeded,
                            "too many annotation edits in a draft batch");
-    // Stable iterators keep membership order while making a large batch
-    // O(N + edits*log(N)), rather than scanning a million-member layer for
-    // every user edit. Re-adding a removed member appends it at the end.
-    std::list<MapAnnotation> ordered(snapshot->annotations.cbegin(),
-                                     snapshot->annotations.cend());
-    std::map<Key, std::list<MapAnnotation>::iterator> positions;
-    for (std::list<MapAnnotation>::iterator item = ordered.begin();
-         item != ordered.end(); ++item)
-        positions.emplace(key(item->uuid), item);
-    bool membershipChanged = false;
-    std::map<Key, std::optional<MapAnnotation>> originalTouched;
+    const std::optional<ModelRecord> rootRecord = readCurrent(key(layerId));
+    if (!rootRecord)
+        throw StorageError(StorageErrorKind::NotFound, "annotation layer not found in draft");
+    const Root root = decodeRoot(*rootRecord, layerId);
+
+    // A5: membership state comes from the root and the chunks only (UUID
+    // lists); member payloads are read for edited members only. Chunks are
+    // edited in place: an insertion appends to the last chunk (or a new chunk
+    // whose serial follows the highest listed one), a deletion removes the
+    // member from its own chunk; an empty chunk is dropped and a chunk below
+    // the merge threshold is merged with a neighbour when both fit. Member
+    // order is the concatenation of the chunks, so it is unchanged by any of
+    // these steps.
+    //
+    // Exact inverse: removing the last member of the last chunk never merges
+    // chunks (only drops the chunk when it empties). Together with the serial
+    // rule this makes "delete the member just appended" restore the previous
+    // records byte for byte, which unborn History relies on when it undoes
+    // its journal.
+    struct Slot final {
+        QUuid id;
+        quint32 serial = 0;
+        QList<QUuid> members;
+        std::optional<ModelRecord> original;
+        bool alive = true;
+        bool dirty = false;
+    };
+    std::vector<Slot> chunkSlots;
+    chunkSlots.reserve(static_cast<std::size_t>(root.chunkIds.size()) + 1);
+    QHash<QUuid, std::size_t> chunkOf;
+    for (const QUuid& chunkId : root.chunkIds) {
+        Slot slot;
+        slot.id = chunkId;
+        const Chunk chunk = checkedChunk(readCurrent, layerId, chunkId);
+        slot.serial = chunk.serial;
+        slot.members = chunk.members;
+        slot.original = readCurrent(key(chunkId));
+        for (const QUuid& member : chunk.members) {
+            reject(chunkOf.contains(member), "duplicate annotation member UUID");
+            chunkOf.insert(member, chunkSlots.size());
+        }
+        chunkSlots.push_back(std::move(slot));
+    }
+    const QSet<QUuid> originalMembers(chunkOf.keyBegin(), chunkOf.keyEnd());
+    bool rootChanged = false;
+
+    const std::function<std::optional<std::size_t>(std::size_t)> previousAlive =
+        [&chunkSlots](std::size_t index) -> std::optional<std::size_t> {
+        while (index > 0) {
+            --index;
+            if (chunkSlots[index].alive) return index;
+        }
+        return std::nullopt;
+    };
+    const std::function<std::optional<std::size_t>(std::size_t)> nextAlive =
+        [&chunkSlots](std::size_t index) -> std::optional<std::size_t> {
+        for (++index; index < chunkSlots.size(); ++index)
+            if (chunkSlots[index].alive) return index;
+        return std::nullopt;
+    };
+    const std::function<void(std::size_t, std::size_t)> absorb =
+        [&chunkSlots, &chunkOf, &rootChanged](std::size_t into, std::size_t from) {
+        for (const QUuid& member : chunkSlots[from].members) chunkOf.insert(member, into);
+        chunkSlots[into].members.append(chunkSlots[from].members);
+        chunkSlots[into].dirty = true;
+        chunkSlots[from].members.clear();
+        chunkSlots[from].alive = false;
+        chunkSlots[from].dirty = true;
+        rootChanged = true;
+    };
+    const std::function<void(std::size_t)> compact = [&](std::size_t index) {
+        Slot& slot = chunkSlots[index];
+        if (slot.members.isEmpty()) {
+            slot.alive = false;
+            rootChanged = true;
+            return;
+        }
+        if (slot.members.size() >= chunkMergeThreshold) return;
+        const qsizetype capacity = static_cast<qsizetype>(annotationChunkCapacity);
+        const std::optional<std::size_t> previous = previousAlive(index);
+        if (previous && chunkSlots[*previous].members.size() + slot.members.size() <= capacity) {
+            absorb(*previous, index);
+            return;
+        }
+        const std::optional<std::size_t> following = nextAlive(index);
+        if (following && slot.members.size() + chunkSlots[*following].members.size() <= capacity)
+            absorb(index, *following);
+    };
+
+    // Current value of every touched member, plus its pre-batch record.
+    std::map<Key, std::optional<MapAnnotation>> current;
+    std::map<Key, std::optional<ModelRecord>> originalRecords;
     for (const aowis::model::ModelEntityEdit& edit : edits) {
         if (edit.entityType != QStringLiteral("map.annotation") || edit.entityId.isNull() ||
             !edit.ownerLayerId || *edit.ownerLayerId != layerId ||
@@ -300,16 +407,22 @@ std::vector<ModelChange> materializeDraftAnnotationEdits(
             throw StorageError(StorageErrorKind::InvalidInput,
                                "invalid annotation MODEL entity edit");
         const Key identity = key(edit.entityId);
-        const std::map<Key, std::list<MapAnnotation>::iterator>::iterator found =
-            positions.find(identity);
-        const bool exists = found != positions.end();
-        if (!originalTouched.contains(identity))
-            originalTouched.emplace(identity, exists ? std::optional<MapAnnotation>(*found->second)
-                                                      : std::nullopt);
-        if (exists != edit.before.has_value())
+        if (!current.contains(identity)) {
+            std::optional<MapAnnotation> value;
+            std::optional<ModelRecord> record;
+            if (originalMembers.contains(edit.entityId)) {
+                record = readCurrent(identity);
+                reject(!record, "missing annotation member");
+                value = decodeMember(*record, edit.entityId);
+            }
+            current.emplace(identity, value);
+            originalRecords.emplace(identity, record);
+        }
+        std::optional<MapAnnotation>& value = current.at(identity);
+        if (value.has_value() != edit.before.has_value())
             throw StorageError(StorageErrorKind::Conflict,
                                "annotation edit before-image presence is stale");
-        if (exists && ModelCodec<MapAnnotation>::encode(*found->second) != *edit.before)
+        if (value && ModelCodec<MapAnnotation>::encode(*value) != *edit.before)
             throw StorageError(StorageErrorKind::Conflict,
                                "annotation edit before-image does not match draft");
 
@@ -326,73 +439,105 @@ std::vector<ModelChange> materializeDraftAnnotationEdits(
             if (!report.valid())
                 throw StorageError(StorageErrorKind::InvalidInput,
                                    report.summary().toStdString());
-            if (exists) *found->second = *decoded;
-            else {
-                membershipChanged = true;
-                ordered.push_back(*decoded);
-                std::list<MapAnnotation>::iterator last = ordered.end();
-                --last;
-                positions.emplace(identity, last);
+            if (!value) {
+                // A new member UUID must not name any other record (a member
+                // removed earlier in this batch is no longer a collision).
+                if (!originalMembers.contains(edit.entityId) && readCurrent(identity))
+                    throw StorageError(StorageErrorKind::Conflict,
+                                       "annotation edit collides with a foreign model record UUID");
+                const std::optional<std::size_t> last =
+                    chunkSlots.empty() ? std::nullopt
+                                  : (chunkSlots.back().alive ? std::optional<std::size_t>(chunkSlots.size() - 1)
+                                                        : previousAlive(chunkSlots.size() - 1));
+                std::size_t target = 0;
+                if (last && chunkSlots[*last].members.size() <
+                                static_cast<qsizetype>(annotationChunkCapacity)) {
+                    target = *last;
+                } else {
+                    std::optional<quint32> highest;
+                    for (const Slot& slot : chunkSlots)
+                        if (slot.alive && (!highest || slot.serial > *highest)) highest = slot.serial;
+                    if (chunkSlots.size() >= maxChunkCount * 2 || (highest && *highest == 0xffffffffU))
+                        throw StorageError(StorageErrorKind::LimitExceeded,
+                                           "too many annotation chunks");
+                    Slot fresh;
+                    fresh.serial = highest ? *highest + 1 : 0;
+                    fresh.id = chunkUuid(layerId, fresh.serial);
+                    // A chunk of this layer dropped earlier in the batch may
+                    // have the same UUID: the new chunk takes over its stored
+                    // record, so the delta has one change (or none) per key.
+                    bool reused = false;
+                    for (Slot& dropped : chunkSlots) {
+                        if (dropped.alive || dropped.id != fresh.id) continue;
+                        // At most one dropped slot still holds the record.
+                        if (dropped.original) fresh.original = std::move(dropped.original);
+                        dropped.original.reset();
+                        dropped.dirty = false;
+                        reused = true;
+                    }
+                    if (!reused && readCurrent(key(fresh.id)))
+                        throw StorageError(StorageErrorKind::Conflict,
+                                           "annotation chunk UUID collides with a foreign model record");
+                    chunkSlots.push_back(std::move(fresh));
+                    target = chunkSlots.size() - 1;
+                    rootChanged = true;
+                }
+                chunkSlots[target].members.append(edit.entityId);
+                chunkSlots[target].dirty = true;
+                chunkOf.insert(edit.entityId, target);
             }
+            value = *decoded;
         } else {
-            membershipChanged = true;
-            ordered.erase(found->second);
-            positions.erase(found);
-        }
-    }
-    // Common case: text/position/style/anchor edits do not change membership.
-    // Emit only touched member records; no chunk/root reconstruction or write.
-    if (!membershipChanged) {
-        std::vector<ModelChange> delta;
-        for (const std::pair<const Key, std::optional<MapAnnotation>>& entry : originalTouched) {
-            const std::map<Key, std::list<MapAnnotation>::iterator>::const_iterator found =
-                positions.find(entry.first);
-            if (found == positions.end() || !entry.second)
+            const QHash<QUuid, std::size_t>::const_iterator owner = chunkOf.constFind(edit.entityId);
+            if (owner == chunkOf.cend())
                 throw StorageError(StorageErrorKind::Internal,
-                                   "annotation update unexpectedly changed membership");
-            const ModelRecord updated = encodeMember(*found->second);
-            const ModelRecord current = encodeMember(*entry.second);
-            if (updated.kind != current.kind || updated.references != current.references ||
-                updated.payload != current.payload)
-                delta.push_back(ModelChange{entry.first, updated});
+                                   "annotation member has no membership chunk");
+            const std::size_t index = owner.value();
+            const bool trailing = chunkSlots[index].members.last() == edit.entityId &&
+                                  !nextAlive(index).has_value();
+            chunkOf.erase(owner);
+            chunkSlots[index].members.removeOne(edit.entityId);
+            chunkSlots[index].dirty = true;
+            value.reset();
+            if (!trailing) {
+                compact(index);
+            } else if (chunkSlots[index].members.isEmpty()) {
+                chunkSlots[index].alive = false;
+                rootChanged = true;
+            }
         }
-        return delta;
     }
-    QList<MapAnnotation> revised;
-    revised.reserve(static_cast<qsizetype>(ordered.size()));
-    for (const MapAnnotation& annotation : ordered)
-        revised.append(annotation);
 
-    const std::vector<ModelChange> oldFull =
-        fullDraftAnnotationLayerChanges(snapshot->layer, snapshot->annotations);
-    const std::vector<ModelChange> newFull =
-        fullDraftAnnotationLayerChanges(snapshot->layer, revised);
-    std::map<Key, ModelRecord> oldRecords;
-    std::map<Key, ModelRecord> newRecords;
-    for (const ModelChange& change : oldFull)
-        oldRecords.emplace(change.key, *change.record);
-    for (const ModelChange& change : newFull)
-        newRecords.emplace(change.key, *change.record);
-
-    // The layer loader verified the input closure. Detect collisions with
-    // unrelated records before emitting any newly allocated record UUID.
-    for (const std::pair<const Key, ModelRecord>& entry : newRecords) {
-        if (!oldRecords.contains(entry.first) && readCurrent(entry.first))
-            throw StorageError(StorageErrorKind::Conflict,
-                               "annotation edit collides with a foreign model record UUID");
-    }
     std::vector<ModelChange> delta;
-    for (const std::pair<const Key, ModelRecord>& entry : newRecords) {
-        const std::map<Key, ModelRecord>::const_iterator previous = oldRecords.find(entry.first);
-        if (previous == oldRecords.end() ||
-            previous->second.kind != entry.second.kind ||
-            previous->second.references != entry.second.references ||
-            previous->second.payload != entry.second.payload)
-            delta.push_back(ModelChange{entry.first, entry.second});
+    for (const std::pair<const Key, std::optional<MapAnnotation>>& entry : current) {
+        const std::optional<ModelRecord>& before = originalRecords.at(entry.first);
+        if (!entry.second) {
+            if (before) delta.push_back(ModelChange{entry.first, std::nullopt});
+            continue;
+        }
+        const ModelRecord updated = encodeMember(*entry.second);
+        if (!before || before->kind != updated.kind || before->references != updated.references ||
+            before->payload != updated.payload)
+            delta.push_back(ModelChange{entry.first, updated});
     }
-    for (const std::pair<const Key, ModelRecord>& entry : oldRecords) {
-        if (!newRecords.contains(entry.first))
-            delta.push_back(ModelChange{entry.first, std::nullopt});
+    QList<QUuid> chunkIds;
+    for (const Slot& slot : chunkSlots) {
+        if (slot.alive) chunkIds.append(slot.id);
+        if (!slot.dirty) continue;
+        if (!slot.alive) {
+            if (slot.original) delta.push_back(ModelChange{key(slot.id), std::nullopt});
+            continue;
+        }
+        const ModelRecord encoded = encodeChunk(layerId, slot.serial, slot.members);
+        if (!slot.original || slot.original->references != encoded.references ||
+            slot.original->payload != encoded.payload)
+            delta.push_back(ModelChange{key(slot.id), encoded});
+    }
+    if (rootChanged || chunkIds != root.chunkIds) {
+        const ModelRecord encodedRoot = encodeRoot(root.layer, chunkIds);
+        if (encodedRoot.payload != rootRecord->payload ||
+            encodedRoot.references != rootRecord->references)
+            delta.push_back(ModelChange{key(layerId), encodedRoot});
     }
     return delta;
 }
@@ -405,21 +550,18 @@ std::optional<AnnotationLayerSnapshot> loadAnnotationLayer(
     const Root root = decodeRoot(*found, layerId);
     if (root.layer.owner_network_uuid) {
         const std::optional<ModelRecord> owner = readCurrent(key(*root.layer.owner_network_uuid));
-        reject(!owner || owner->kind != 100, "missing or invalid distribution network owner");
+        reject(!owner || owner->kind != engineeringNetworkKind,
+               "missing or invalid distribution network owner");
     }
     AnnotationLayerSnapshot result;
     result.layer = root.layer;
+    result.chunkIds = root.chunkIds;
     std::set<Key> seen;
     seen.insert(key(layerId));
     if (root.layer.owner_network_uuid) seen.insert(key(*root.layer.owner_network_uuid));
-    for (qsizetype index = 0; index < root.chunkIds.size(); ++index) {
-        const QUuid chunkId = root.chunkIds.at(index);
-        reject(chunkId != chunkUuid(layerId, static_cast<quint32>(index)),
-               "noncanonical annotation chunk UUID");
+    for (const QUuid& chunkId : root.chunkIds) {
         reject(!seen.insert(key(chunkId)).second, "duplicate annotation chunk UUID");
-        const std::optional<ModelRecord> chunk = readCurrent(key(chunkId));
-        reject(!chunk, "missing annotation chunk");
-        const QList<QUuid> members = decodeChunk(*chunk, layerId, static_cast<quint32>(index));
+        const QList<QUuid> members = checkedChunk(readCurrent, layerId, chunkId).members;
         for (const QUuid& id : members) {
             reject(!seen.insert(key(id)).second, "duplicate annotation member UUID");
             const std::optional<ModelRecord> item = readCurrent(key(id));
@@ -434,6 +576,64 @@ std::optional<AnnotationLayerSnapshot> loadAnnotationLayer(
                 reject(!anchor, "annotation anchor target is missing");
             }
             result.annotations.append(decoded);
+        }
+    }
+    return result;
+}
+
+std::optional<AnnotationLayerSummary> loadAnnotationLayerSummary(
+    const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
+    const QUuid& layerId) {
+    const std::optional<ModelRecord> found = readCurrent(key(layerId));
+    if (!found) return std::nullopt;
+    const Root root = decodeRoot(*found, layerId);
+    AnnotationLayerSummary summary;
+    summary.layer = root.layer;
+    for (const QUuid& chunkId : root.chunkIds)
+        summary.memberCount += static_cast<std::size_t>(
+            checkedChunk(readCurrent, layerId, chunkId).members.size());
+    return summary;
+}
+
+std::optional<AnnotationLayerDelta> checkAnnotationLayerDelta(
+    const EngineeringCandidateView& before, const EngineeringCandidateView& after,
+    const QUuid& layerId, const std::set<Key>& changedKeys) {
+    const std::optional<ModelRecord> nowRecord = after.get(key(layerId));
+    if (!nowRecord) return std::nullopt;
+    const Root now = decodeRoot(*nowRecord, layerId);
+    if (now.layer.owner_network_uuid) {
+        const std::optional<ModelRecord> owner = after.get(key(*now.layer.owner_network_uuid));
+        reject(!owner || owner->kind != engineeringNetworkKind,
+               "missing or invalid distribution network owner");
+    }
+    AnnotationLayerDelta result;
+    result.layer = now.layer;
+    const std::optional<ModelRecord> oldRecord = before.get(key(layerId));
+    if (!oldRecord) {
+        result.metadataChanged = true;
+        return result;
+    }
+    const Root old = decodeRoot(*oldRecord, layerId);
+    if (ModelCodec<MapAnnotationLayer>::encode(old.layer) !=
+        ModelCodec<MapAnnotationLayer>::encode(now.layer)) {
+        result.metadataChanged = true;
+        return result;
+    }
+    // Unchanged chunks were checked when they were written; decodeRoot has
+    // already refused a root that lists a chunk twice.
+    const QSet<QUuid> oldChunks(old.chunkIds.cbegin(), old.chunkIds.cend());
+    for (const QUuid& chunkId : now.chunkIds) {
+        if (oldChunks.contains(chunkId) && !changedKeys.contains(key(chunkId))) continue;
+        const Chunk chunk = checkedChunk(after.get, layerId, chunkId);
+        for (const QUuid& member : chunk.members) {
+            bool stayed = false;
+            for (const Key& referrer : before.referrers(key(member))) {
+                const std::optional<ModelRecord> previous = before.get(referrer);
+                if (previous && previous->kind == annotationChunkKind &&
+                    oldChunks.contains(record::uuidFromKey(referrer)))
+                    stayed = true;
+            }
+            if (!stayed) result.enteredMembers.push_back(member);
         }
     }
     return result;

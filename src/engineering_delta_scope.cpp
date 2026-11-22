@@ -67,6 +67,15 @@ void insertAll(std::set<Key>& target, const std::vector<Key>& source) {
 
 } // namespace
 
+bool isServerDerivedUuidKey(const Key& key) {
+    return (key[6] & 0xf0U) == 0x80U;
+}
+
+bool isClientIdentifiedEngineeringKind(std::uint16_t kind) {
+    return kind == engineeringNetworkKind || isHydraulicMemberKind(kind) ||
+           kind == engineeringAnnotationKind;
+}
+
 EngineeringCandidateView overlayEngineeringCandidateView(
     RecordReader baseGet, ReferrerReader baseReferrers,
     const std::vector<std::vector<ModelChange>>& overlays) {
@@ -151,6 +160,9 @@ EngineeringDeltaScope engineeringDeltaScope(const EngineeringCandidateView& befo
                 "native record kind cannot change in place");
         if (!entry.before && !entry.after) continue;
         const std::uint16_t kind = entry.after ? entry.after->kind : entry.before->kind;
+        invalid(entry.after && isClientIdentifiedEngineeringKind(kind) &&
+                    isServerDerivedUuidKey(item.first),
+                "UUID version 8 is reserved for server-derived records");
         // Root creation/deletion changes project-wide cardinality (one layer
         // per network, at most one Drainage layer): complete validation.
         if ((kind == engineeringNetworkKind || kind == engineeringLayerKind) &&

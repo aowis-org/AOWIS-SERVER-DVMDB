@@ -4,6 +4,7 @@
 // values; DVMDB owns record kinds, exact references and membership chunks.
 // No GUI or renderer dependency. B3.1 exposes draft planning only; only the
 // fenced ProjectService may publish records and corresponding MODEL events.
+#include "aowis/dvmdb/engineering_delta_scope.h"
 #include "aowis/dvmdb/native_store.h"
 
 #include <aowis/model/map/map_annotation.h>
@@ -11,7 +12,9 @@
 #include <QList>
 #include <QUuid>
 
+#include <cstddef>
 #include <functional>
+#include <set>
 #include <optional>
 #include <vector>
 
@@ -25,6 +28,9 @@ inline constexpr std::size_t annotationChunkCapacity = 256;
 struct AnnotationLayerSnapshot final {
     MapAnnotationLayer layer;
     QList<MapAnnotation> annotations;
+    // Native membership chunk UUIDs as stored (A5: chunk-local layout, so
+    // they are not derivable from the member count).
+    QList<QUuid> chunkIds;
 };
 
 // Stable Distribution layer UUID derived from its network UUID. This is a
@@ -73,6 +79,36 @@ std::optional<AnnotationLayerSnapshot> loadAnnotationLayer(
 std::optional<MapAnnotation> loadAnnotationMember(
     const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
     const QUuid& annotationId);
+
+// Layer root and membership chunks only, both canonically decoded; member
+// records are NOT read. For listings and for HTTP limits that must be checked
+// before any member is loaded (A6). Absent layer returns nullopt.
+struct AnnotationLayerSummary final {
+    MapAnnotationLayer layer;
+    std::size_t memberCount = 0;
+};
+std::optional<AnnotationLayerSummary> loadAnnotationLayerSummary(
+    const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
+    const QUuid& layerId);
+
+// A5: Save-time check of a layer whose root or chunks changed, WITHOUT
+// decoding its unchanged members. `before` must be a candidate that satisfied
+// the complete validator and `changedKeys` the keys the delta changed.
+// Checks the new root (canonical, owner exists, no chunk listed twice) and
+// every chunk that changed or is newly listed (canonical, UUID derived from
+// its layer and serial). Returns nullopt for an absent
+// layer. `metadataChanged` (also for a newly created layer) means the caller
+// must run the complete validator. `enteredMembers` are members listed by a
+// checked chunk that were not in this layer before; the caller decodes them
+// and checks their anchors individually.
+struct AnnotationLayerDelta final {
+    MapAnnotationLayer layer;
+    bool metadataChanged = false;
+    std::vector<QUuid> enteredMembers;
+};
+std::optional<AnnotationLayerDelta> checkAnnotationLayerDelta(
+    const EngineeringCandidateView& before, const EngineeringCandidateView& after,
+    const QUuid& layerId, const std::set<Key>& changedKeys);
 
 // Root-only read of a layer's canonical MODEL metadata; no chunk or member is
 // read. Absent layer returns nullopt; an invalid root throws Corruption.

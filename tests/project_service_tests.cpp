@@ -1,6 +1,7 @@
 #include "commit_metadata_fixture.h"
 #include "aowis/dvmdb/project_service.h"
 #include "aowis/dvmdb/object_id.h"
+#include "aowis/dvmdb/storage_error.h"
 
 #include <algorithm>
 #include <atomic>
@@ -296,8 +297,58 @@ void exerciseUnsafeCatalogue() {
 }
 } // namespace
 
+// A3: which failures a verify-or-refuse adapter may turn into a result.
+enum class Outcome { Swallowed, Rethrown };
+
+template <typename Failure>
+Outcome policyFor(const Failure& failure) {
+    try {
+        try {
+            throw failure;
+        } catch (...) {
+            aowis::dvmdb::rethrowIfNotVerificationFailure();
+            return Outcome::Swallowed;
+        }
+    } catch (const Failure&) {
+        return Outcome::Rethrown;
+    }
+}
+
+void exerciseVerificationFailurePolicy() {
+    namespace native = aowis::dvmdb;
+    using P = native::ProjectErrorKind;
+    using S = native::StorageErrorKind;
+    for (const P kind : {P::NotFound, P::Busy, P::Unavailable})
+        require(policyFor(native::ProjectError(kind, "x")) == Outcome::Rethrown,
+                "environment ProjectError must reach the HTTP mapping");
+    for (const P kind : {P::InvalidInput, P::Conflict})
+        require(policyFor(native::ProjectError(kind, "x")) == Outcome::Swallowed,
+                "verification ProjectError must stay a not-navigable result");
+    for (const S kind : {S::Unavailable, S::Busy, S::ResourceExhausted, S::Io, S::Internal})
+        require(policyFor(native::StorageError(kind, "x")) == Outcome::Rethrown,
+                "environment StorageError must reach the HTTP mapping");
+    for (const S kind : {S::InvalidInput, S::NotFound, S::Conflict, S::LimitExceeded, S::Corruption})
+        require(policyFor(native::StorageError(kind, "x")) == Outcome::Swallowed,
+                "verification StorageError must stay a not-navigable result");
+    require(policyFor(std::runtime_error("x")) == Outcome::Swallowed,
+            "plain verifier failures must stay a not-navigable result");
+    // The rethrown exception keeps its dynamic type and kind.
+    bool exact = false;
+    try {
+        try {
+            throw native::StorageError(S::ResourceExhausted, "disk full");
+        } catch (...) {
+            native::rethrowIfNotVerificationFailure();
+        }
+    } catch (const native::StorageError& error) {
+        exact = error.kind() == S::ResourceExhausted && std::string(error.what()) == "disk full";
+    }
+    require(exact, "rethrown failure must be the original exception");
+}
+
 int main() {
     try {
+        exerciseVerificationFailurePolicy();
         exerciseBackend();
         exerciseNonV7ProjectRejected();
         exerciseUnsafeCatalogue();

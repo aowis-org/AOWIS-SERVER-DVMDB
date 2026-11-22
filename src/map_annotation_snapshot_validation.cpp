@@ -15,6 +15,7 @@
 #include <aowis/model/serialization/model_codec.h>
 #include <algorithm>
 #include <map>
+#include <optional>
 #include <set>
 #include <vector>
 #include <stdexcept>
@@ -114,6 +115,8 @@ std::optional<std::string> validateAnnotationSnapshot(const MergeCandidate& cand
         std::set<Key> layerRoots;
         candidate.forEach([&](const Key& id, const ModelRecord& entry) {
             ensure(isKnownKind(entry.kind), "unsupported native model record kind in annotation candidate");
+            ensure(!(isClientIdentifiedEngineeringKind(entry.kind) && isServerDerivedUuidKey(id)),
+                   "UUID version 8 is reserved for server-derived records");
             ensure(existing.emplace(id, entry.kind).second,
                    "duplicate UUID in annotation candidate enumeration");
             if (entry.kind == hydraulic::hydraulicDistributionNetworkKind)
@@ -176,6 +179,8 @@ std::optional<std::string> validateAnnotationSnapshot(const MergeCandidate& cand
                    "candidate contains unowned or orphaned native model record");
         return std::nullopt;
     } catch (const std::exception& error) {
+        // A3: an unreadable candidate (I/O, ENOSPC, busy) is not an invalid one.
+        rethrowIfNotVerificationFailure();
         return std::string(error.what());
     }
 }
@@ -212,11 +217,6 @@ Key singleReferrer(const EngineeringCandidateView& view, const Key& id,
     return owners.front();
 }
 
-bool sameLayerMetadata(const MapAnnotationLayer& first, const MapAnnotationLayer& second) {
-    return aowis::model::ModelCodec<MapAnnotationLayer>::encode(first) ==
-           aowis::model::ModelCodec<MapAnnotationLayer>::encode(second);
-}
-
 // Point-read equivalent of the anchor rules in validateAnnotationSnapshot:
 // the target exists, has the record kind of its declared MODEL type and is a
 // member of the layer's owner network.
@@ -239,13 +239,6 @@ void checkAnchorScope(const EngineeringCandidateView& after, const MapAnnotation
            "annotation anchor is not owned by this distribution network");
 }
 
-// Failures that describe the environment, not the candidate.
-bool propagatesUnchanged(StorageErrorKind kind) {
-    return kind == StorageErrorKind::Io || kind == StorageErrorKind::ResourceExhausted ||
-           kind == StorageErrorKind::Unavailable || kind == StorageErrorKind::Busy ||
-           kind == StorageErrorKind::Internal;
-}
-
 } // namespace
 
 std::optional<std::string> validateAnnotationSnapshotDelta(
@@ -263,20 +256,24 @@ std::optional<std::string> validateAnnotationSnapshotDelta(
                     after.get, record::uuidFromKey(network));
             ensure(loaded.has_value(), "invalid candidate distribution network");
         }
+        // A5: a layer whose root or chunks changed is checked through its
+        // root and its changed chunks only; members are decoded only when they
+        // changed (scope.annotations) or newly entered the layer.
+        std::set<Key> changed;
+        for (const ModelChange& change : delta) changed.insert(change.key);
         std::set<Key> checked;
         for (const Key& layerKey : scope.layers) {
-            const QUuid layerId = record::uuidFromKey(layerKey);
-            const std::optional<MapAnnotationLayer> previous =
-                loadAnnotationLayerMetadata(before.get, layerId);
-            const std::optional<AnnotationLayerSnapshot> current =
-                loadAnnotationLayer(after.get, layerId);
+            const std::optional<AnnotationLayerDelta> current =
+                checkAnnotationLayerDelta(before, after, record::uuidFromKey(layerKey), changed);
             ensure(current.has_value(), "invalid candidate annotation layer");
             // Domain or owner changes alter project-wide layer cardinality.
-            if (!previous || !sameLayerMetadata(*previous, current->layer))
-                return completeValidation();
-            for (const MapAnnotation& annotation : current->annotations) {
-                checkAnchorScope(after, current->layer, annotation);
-                checked.insert(record::keyFromUuid(annotation.uuid));
+            if (current->metadataChanged) return completeValidation();
+            for (const QUuid& member : current->enteredMembers) {
+                const std::optional<MapAnnotation> annotation =
+                    loadAnnotationMember(after.get, member);
+                ensure(annotation.has_value(), "missing annotation member in candidate");
+                checkAnchorScope(after, current->layer, *annotation);
+                checked.insert(record::keyFromUuid(member));
             }
         }
         for (const Key& member : scope.annotations) {
@@ -294,12 +291,8 @@ std::optional<std::string> validateAnnotationSnapshotDelta(
             checkAnchorScope(after, *layer, *annotation);
         }
         return std::nullopt;
-    } catch (const ProjectError&) {
-        throw;
-    } catch (const StorageError& error) {
-        if (propagatesUnchanged(error.kind())) throw;
-        return std::string(error.what());
     } catch (const std::exception& error) {
+        rethrowIfNotVerificationFailure();
         return std::string(error.what());
     }
 }
@@ -309,29 +302,107 @@ std::optional<std::string> validateAnnotationSnapshotDelta(
 namespace aowis::dvmdb::annotations {
 namespace {
 
+// Synthetic merge field for an annotation's placement: `anchor` together
+// with `position_wgs84`. Attaching keeps the last explicit position and
+// derives offsets from it, so a concurrent free drag must never be combined
+// with an attach, detach or re-target (A10). Clients select it like any other
+// field choice: {"field": "placement", "side": "target"|"source"}.
+const QString placementField = QStringLiteral("placement");
+
+QByteArray placementBytes(const MapAnnotation& annotation) {
+    MapAnnotation placement;
+    placement.uuid = annotation.uuid;
+    placement.text = QStringLiteral("placement");
+    placement.position_wgs84 = annotation.position_wgs84;
+    placement.anchor = annotation.anchor;
+    return aowis::model::ModelCodec<MapAnnotation>::encode(placement);
+}
+
+void applyPlacement(MapAnnotation& annotation, const MapAnnotation& winner) {
+    annotation.position_wgs84 = winner.position_wgs84;
+    annotation.anchor = winner.anchor;
+}
+
+// A4: field-level annotation merge with the caller's field choices. Text and
+// style fields merge like hydraulic entity fields; the placement merges as one
+// unit; the native anchor reference is derived from the merged image, so an
+// attach on one branch combines with a text edit on the other. The complete
+// candidate validator re-checks every anchor target after the merge.
+// A choice for a field that does not conflict is rejected (InvalidInput).
 MergeResolution resolveAnnotationMember(const Key& key, const ModelRecord& base,
                                         const ModelRecord& target, const ModelRecord& source,
                                         const QMap<QString, bool>& choices) {
     MergeResolution conflict;
     if (base.kind != annotationMemberKind || target.kind != annotationMemberKind ||
-        source.kind != annotationMemberKind ||
-        base.references != target.references || target.references != source.references)
-        return conflict; // Anchors are structural references; require an explicit object choice.
-    const std::optional<ModelFieldMerge> merged = mergeModelFields(
-        record::uuidFromKey(key), QStringLiteral("map.annotation"),
-        record::qByteArrayFromBytes(base.payload),
-        record::qByteArrayFromBytes(target.payload),
-        record::qByteArrayFromBytes(source.payload), choices);
-    if (!merged) return conflict;
-    if (!merged->conflicting_fields.isEmpty()) {
-        for (const QString& field : merged->conflicting_fields)
-            conflict.conflictingFields.push_back(field.toStdString());
+        source.kind != annotationMemberKind)
         return conflict;
+    const QUuid id = record::uuidFromKey(key);
+    const QByteArray baseBytes = record::qByteArrayFromBytes(base.payload);
+    const std::optional<MapAnnotation> baseValue = aowis::model::ModelCodec<MapAnnotation>::decode(baseBytes);
+    const std::optional<MapAnnotation> targetValue = aowis::model::ModelCodec<MapAnnotation>::decode(
+        record::qByteArrayFromBytes(target.payload));
+    const std::optional<MapAnnotation> sourceValue = aowis::model::ModelCodec<MapAnnotation>::decode(
+        record::qByteArrayFromBytes(source.payload));
+    if (!baseValue || !targetValue || !sourceValue) return conflict;
+
+    QMap<QString, bool> fieldChoices = choices;
+    const bool placementChosen = fieldChoices.contains(placementField);
+    const bool placementFromSource = fieldChoices.take(placementField);
+    const QByteArray basePlacement = placementBytes(*baseValue);
+    const QByteArray targetPlacement = placementBytes(*targetValue);
+    const QByteArray sourcePlacement = placementBytes(*sourceValue);
+    if (basePlacement.isEmpty() || targetPlacement.isEmpty() || sourcePlacement.isEmpty())
+        return conflict;
+    const bool targetMoved = targetPlacement != basePlacement;
+    const bool sourceMoved = sourcePlacement != basePlacement;
+    const bool placementConflict = targetMoved && sourceMoved && targetPlacement != sourcePlacement;
+    if (placementChosen && !placementConflict)
+        throw StorageError(StorageErrorKind::InvalidInput,
+                           "merge selection is not a conflicting field: placement");
+    const bool takeSourcePlacement = placementConflict ? placementFromSource
+                                                       : (sourceMoved && !targetMoved);
+    // Both sides carry the winning placement, so the per-field MODEL merge can
+    // never split anchor and position. Without a choice the target placement
+    // is used only to list the remaining conflicts.
+    MapAnnotation normalizedTarget = *targetValue;
+    MapAnnotation normalizedSource = *sourceValue;
+    const MapAnnotation& winner = takeSourcePlacement ? *sourceValue : *targetValue;
+    applyPlacement(normalizedTarget, winner);
+    applyPlacement(normalizedSource, winner);
+    const QByteArray targetBytes = aowis::model::ModelCodec<MapAnnotation>::encode(normalizedTarget);
+    const QByteArray sourceBytes = aowis::model::ModelCodec<MapAnnotation>::encode(normalizedSource);
+    if (targetBytes.isEmpty() || sourceBytes.isEmpty()) return conflict;
+
+    if (!fieldChoices.isEmpty()) {
+        const std::optional<ModelFieldMerge> preview = mergeModelFields(
+            id, QStringLiteral("map.annotation"), baseBytes, targetBytes, sourceBytes);
+        if (!preview)
+            throw StorageError(StorageErrorKind::Corruption,
+                               "cannot resolve fields of an invalid canonical annotation");
+        for (QMap<QString, bool>::const_iterator choice = fieldChoices.cbegin();
+             choice != fieldChoices.cend(); ++choice) {
+            if (!preview->conflicting_fields.contains(choice.key()))
+                throw StorageError(StorageErrorKind::InvalidInput,
+                                   "merge selection is not a conflicting field: " +
+                                   choice.key().toStdString());
+        }
     }
-    if (merged->content.isEmpty()) return conflict;
-    ModelRecord result = target;
-    result.payload = record::bytesFromQByteArray(merged->content);
-    return MergeResolution{std::move(result), {}};
+    const std::optional<ModelFieldMerge> merged = mergeModelFields(
+        id, QStringLiteral("map.annotation"), baseBytes, targetBytes, sourceBytes, fieldChoices);
+    if (!merged) return conflict;
+    for (const QString& field : merged->conflicting_fields)
+        conflict.conflictingFields.push_back(field.toStdString());
+    if (placementConflict && !placementChosen)
+        conflict.conflictingFields.push_back(placementField.toStdString());
+    if (!conflict.conflictingFields.empty() || merged->content.isEmpty()) return conflict;
+    const std::optional<MapAnnotation> result =
+        aowis::model::ModelCodec<MapAnnotation>::decode(merged->content);
+    if (!result) return conflict;
+    ModelRecord resolved = target;
+    resolved.payload = record::bytesFromQByteArray(merged->content);
+    resolved.references.clear();
+    if (result->anchor) resolved.references.push_back(record::keyFromUuid(result->anchor->entity_uuid));
+    return MergeResolution{std::move(resolved), {}};
 }
 
 // Server-owned layer/chunk records are synthetic representations of one
@@ -387,12 +458,16 @@ bool equalLayerMetadata(const MapAnnotationLayer& first, const MapAnnotationLaye
            aowis::model::ModelCodec<MapAnnotationLayer>::encode(second);
 }
 
+// The records a tip's layer actually stores (root, chunks, members). With the
+// chunk-local layout (A5) a tip's chunk UUIDs are not those of a canonical
+// rebuild, so they are taken from the loaded snapshot.
 void includeSnapshotRecords(std::set<Key>& ids,
                             const std::optional<AnnotationLayerSnapshot>& snapshot) {
     if (!snapshot) return;
-    const std::vector<ModelChange> changes = fullDraftAnnotationLayerChanges(
-        snapshot->layer, snapshot->annotations);
-    for (const ModelChange& entry : changes) ids.insert(entry.key);
+    ids.insert(record::keyFromUuid(snapshot->layer.uuid));
+    for (const QUuid& chunk : snapshot->chunkIds) ids.insert(record::keyFromUuid(chunk));
+    for (const MapAnnotation& annotation : snapshot->annotations)
+        ids.insert(record::keyFromUuid(annotation.uuid));
 }
 
 std::optional<std::string> reconcileAnnotationMembership(const MergeCandidate& candidate,
@@ -433,19 +508,24 @@ std::optional<std::string> reconcileAnnotationMembership(const MergeCandidate& c
             const QList<QUuid> rightIds = right ? memberIds(*right) : QList<QUuid>{};
             const bool leftChanged = leftIds != baseIds;
             const bool rightChanged = rightIds != baseIds;
+            QSet<QUuid> leftMembers;
+            QSet<QUuid> rightMembers;
+            QSet<QUuid> originalMembers;
+            for (const QUuid& id : leftIds) leftMembers.insert(id);
+            for (const QUuid& id : rightIds) rightMembers.insert(id);
+            for (const QUuid& id : baseIds) originalMembers.insert(id);
             QList<QUuid> requested;
             if (leftChanged && !rightChanged) requested = leftIds;
             else if (rightChanged && !leftChanged) requested = rightIds;
             else {
+                // Saves only append and remove members. A different relative
+                // order of baseline members can only come from an earlier
+                // merge, and no merge choice can express a member order.
                 if (!appendedOrRemovedOnly(baseIds, leftIds) ||
                     !appendedOrRemovedOnly(baseIds, rightIds))
-                    return std::string("concurrent annotation reordering requires explicit resolution");
-                QSet<QUuid> leftMembers;
-                QSet<QUuid> rightMembers;
-                QSet<QUuid> originalMembers;
-                for (const QUuid& id : leftIds) leftMembers.insert(id);
-                for (const QUuid& id : rightIds) rightMembers.insert(id);
-                for (const QUuid& id : baseIds) originalMembers.insert(id);
+                    return std::string("annotation member order changed on both branches; "
+                                       "a member order cannot be chosen in a merge, so merge "
+                                       "one of the reorderings first");
                 // Baseline members preserve their historical order. Deletions
                 // win when the other branch only kept an unchanged member;
                 // delete-versus-edit of the member record is a native conflict
@@ -463,30 +543,49 @@ std::optional<std::string> reconcileAnnotationMembership(const MergeCandidate& c
             }
             // A whole-object choice may preserve an annotation deleted on
             // the other branch. Reintroduce it in baseline order rather than
-            // silently discarding the user's explicit selection.
+            // silently discarding the user's explicit selection: before the
+            // next later baseline member still present, otherwise before the
+            // first newly added member, otherwise at the end. One pass over
+            // the lists with hash lookups (no quadratic search).
             QSet<QUuid> requestedSet;
             for (const QUuid& memberId : requested) requestedSet.insert(memberId);
-            for (qsizetype index = 0; index < baseIds.size(); ++index) {
+            QHash<QUuid, QList<QUuid>> restoredBefore;
+            QList<QUuid> restoredBeforeAdditions;
+            std::optional<QUuid> nextPresent;
+            QList<QUuid> restoredReversed;
+            QList<std::optional<QUuid>> anchors;
+            for (qsizetype index = baseIds.size() - 1; index >= 0; --index) {
                 const QUuid memberId = baseIds.at(index);
-                if (requestedSet.contains(memberId) ||
-                    !candidate.get(record::keyFromUuid(memberId))) continue;
-                if (!leftIds.contains(memberId) && !rightIds.contains(memberId))
+                if (requestedSet.contains(memberId)) {
+                    nextPresent = memberId;
+                    continue;
+                }
+                if (!candidate.get(record::keyFromUuid(memberId))) continue;
+                if (!leftMembers.contains(memberId) && !rightMembers.contains(memberId))
                     return std::string("selected annotation has no historical membership");
-                qsizetype insertion = requested.size();
-                for (qsizetype following = index + 1; following < baseIds.size(); ++following) {
-                    const qsizetype position = requested.indexOf(baseIds.at(following));
-                    if (position >= 0) { insertion = position; break; }
+                restoredReversed.append(memberId);
+                anchors.append(nextPresent);
+            }
+            for (qsizetype index = restoredReversed.size() - 1; index >= 0; --index) {
+                if (anchors.at(index)) restoredBefore[*anchors.at(index)].append(restoredReversed.at(index));
+                else restoredBeforeAdditions.append(restoredReversed.at(index));
+            }
+            if (!restoredReversed.isEmpty()) {
+                QList<QUuid> ordered;
+                ordered.reserve(requested.size() + restoredReversed.size());
+                bool additionsPlaced = restoredBeforeAdditions.isEmpty();
+                for (const QUuid& memberId : requested) {
+                    if (!additionsPlaced && !originalMembers.contains(memberId)) {
+                        ordered.append(restoredBeforeAdditions);
+                        additionsPlaced = true;
+                    }
+                    const QHash<QUuid, QList<QUuid>>::const_iterator group =
+                        restoredBefore.constFind(memberId);
+                    if (group != restoredBefore.cend()) ordered.append(group.value());
+                    ordered.append(memberId);
                 }
-                if (insertion == requested.size()) {
-                    // Keep restored baseline entries before newly appended IDs.
-                    for (qsizetype position = 0; position < requested.size(); ++position)
-                        if (!baseIds.contains(requested.at(position))) {
-                            insertion = position;
-                            break;
-                        }
-                }
-                requested.insert(insertion, memberId);
-                requestedSet.insert(memberId);
+                if (!additionsPlaced) ordered.append(restoredBeforeAdditions);
+                requested = ordered;
             }
             QList<MapAnnotation> combined;
             QSet<QUuid> seen;
@@ -543,17 +642,8 @@ MergeResult mergeDistributionAnnotationBranches(
     // callbacks must be pure and may not call back into the repository.
     const std::function<void(MergeOptions&)> configure =
         [&selections](MergeOptions& options) {
-        const std::function<MergeResolution(const Key&, const ModelRecord&,
-            const ModelRecord&, const ModelRecord&)> hydraulicResolver = options.resolve;
-        options.resolve = [hydraulicResolver](const Key& key, const ModelRecord& base,
-                                              const ModelRecord& targetRecord,
-                                              const ModelRecord& sourceRecord) {
-            if (base.kind == annotationMemberKind ||
-                targetRecord.kind == annotationMemberKind ||
-                sourceRecord.kind == annotationMemberKind)
-                return resolveAnnotationMember(key, base, targetRecord, sourceRecord, {});
-            return hydraulicResolver(key, base, targetRecord, sourceRecord);
-        };
+        // Annotation members are resolved through the hydraulic merge's
+        // domain hook (below), which also passes and consumes field choices.
         options.resolveStructural = resolveAnnotationStructure;
         const std::vector<hydraulic::HydraulicObjectChoice> objects = selections.objects;
         options.reconcileWithBase = [objects](const MergeCandidate& candidate,
@@ -577,8 +667,17 @@ MergeResult mergeDistributionAnnotationBranches(
         // annotation layers; it subsumes the old hydraulic-only candidate check.
         options.validate = validateAnnotationSnapshot;
     };
+    const hydraulic::DomainMergeResolver annotationResolver =
+        [](const Key& key, const ModelRecord& base, const ModelRecord& targetRecord,
+           const ModelRecord& sourceRecord,
+           const QMap<QString, bool>& fieldChoices) -> std::optional<MergeResolution> {
+        if (base.kind != annotationMemberKind && targetRecord.kind != annotationMemberKind &&
+            sourceRecord.kind != annotationMemberKind)
+            return std::nullopt;
+        return resolveAnnotationMember(key, base, targetRecord, sourceRecord, fieldChoices);
+    };
     return hydraulic::mergeHydraulicBranches(repository, project, target, source,
-                                           selections, metadata, configure);
+                                           selections, metadata, configure, annotationResolver);
 }
 
 } // namespace aowis::dvmdb::annotations
