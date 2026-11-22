@@ -291,6 +291,50 @@ QString branchIdOf(aowis::dvmdb::ProjectService& service, const QString& project
     return QString::fromStdString(id->toString());
 }
 
+// Independent reference for the historyDelta version 2 digest, computed the
+// way the GUI does it: from a COMPLETE network and the delta's orderedTypes.
+QString historyDeltaDigestReference(const NetworkHydraulicDistribution& network,
+                                    const QJsonArray& orderedTypes) {
+    QByteArray bytes("AOWIS-HISTORY-DELTA-2");
+    const std::function<void(quint32)> u32 = [&bytes](quint32 value) {
+        for (int shift = 24; shift >= 0; shift -= 8)
+            bytes.append(static_cast<char>((value >> shift) & 0xffU));
+    };
+    const QByteArray settings = aowis::model::hydraulicDistributionRootImage(network);
+    u32(static_cast<quint32>(settings.size()));
+    bytes.append(settings);
+    for (const QJsonValue& type : orderedTypes) {
+        QList<QUuid> members;
+#define HISTORY_REFERENCE_MEMBERS(list, entityType) \
+        if (type.toString() == QStringLiteral(#entityType)) \
+            for (const entityType& member : network.list) members.append(member.uuid);
+        HISTORY_REFERENCE_MEMBERS(pipe_materials, HydraulicPipeMaterial)
+        HISTORY_REFERENCE_MEMBERS(patterns_time, HydraulicPatternTime)
+        HISTORY_REFERENCE_MEMBERS(curves_tank_volume, HydraulicCurveTankVolume)
+        HISTORY_REFERENCE_MEMBERS(curves_pump_head, HydraulicCurvePumpHead)
+        HISTORY_REFERENCE_MEMBERS(curves_pump_efficiency, HydraulicCurvePumpEfficiency)
+        HISTORY_REFERENCE_MEMBERS(curves_valve_headloss, HydraulicCurveValveHeadloss)
+        HISTORY_REFERENCE_MEMBERS(curves_valve_characteristic, HydraulicCurveValveCharacteristic)
+        HISTORY_REFERENCE_MEMBERS(curves_generic, HydraulicCurveGeneric)
+        HISTORY_REFERENCE_MEMBERS(nodes_reservoirs, HydraulicNodeReservoir)
+        HISTORY_REFERENCE_MEMBERS(nodes_junctions, HydraulicNodeJunction)
+        HISTORY_REFERENCE_MEMBERS(nodes_tanks, HydraulicNodeTank)
+        HISTORY_REFERENCE_MEMBERS(demand_points, HydraulicDemandPoint)
+        HISTORY_REFERENCE_MEMBERS(links_pipes, HydraulicLinkPipe)
+        HISTORY_REFERENCE_MEMBERS(links_pumps, HydraulicLinkPump)
+        HISTORY_REFERENCE_MEMBERS(links_valves, HydraulicLinkValve)
+        HISTORY_REFERENCE_MEMBERS(controls_simple, HydraulicControlSimple)
+        HISTORY_REFERENCE_MEMBERS(controls_rules, HydraulicControlRule)
+#undef HISTORY_REFERENCE_MEMBERS
+        const QByteArray name = type.toString().toUtf8();
+        u32(static_cast<quint32>(name.size()));
+        bytes.append(name);
+        u32(static_cast<quint32>(members.size()));
+        for (const QUuid& member : members) bytes.append(member.toRfc4122());
+    }
+    return QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
+}
+
 QString revisionText(const aowis::dvmdb::RevisionId& id) {
     return QString::fromStdString(id.toString());
 }
@@ -3805,8 +3849,9 @@ void exerciseHydraulicDraftMembershipHttp() {
           cursorAtBase.json.value("nextAction").toObject().value("actionPosition") == "1",
           "HDB-03d HTTP Undo to the immutable base failed");
     // The delta-enabled request must return ONLY the newly restored entity,
-    // not the full NetworkHydraulicDistribution or the unchanged base member. The source
-    // and destination hashes cover the complete canonical model snapshots.
+    // not the full NetworkHydraulicDistribution or the unchanged base member.
+    // Version 2 hashes cover the network settings and the member order of the
+    // collections whose membership changed (orderedTypes).
     QJsonObject sparseRedoRequest = navBody(
         QString::fromStdString(native::UuidV7::generate().toString()), "4", "1");
     sparseRedoRequest.insert("networkId", networkId);
@@ -3815,12 +3860,14 @@ void exerciseHydraulicDraftMembershipHttp() {
     const QJsonArray sparseEdits = sparseDelta.value("edits").toArray();
     const QJsonObject sparseInsert = sparseEdits.isEmpty() ? QJsonObject() :
         sparseEdits.first().toObject();
-    const QString baseDigest = baseAgain ? QString::fromLatin1(QCryptographicHash::hash(
-        native::ModelCodec<NetworkHydraulicDistribution>::encode(*baseAgain),
-        QCryptographicHash::Sha256).toHex()) : QString();
     const QString oneDigest = oneNetwork ? QString::fromLatin1(QCryptographicHash::hash(
         native::ModelCodec<NetworkHydraulicDistribution>::encode(*oneNetwork),
         QCryptographicHash::Sha256).toHex()) : QString();
+    const QJsonArray orderedTypes = sparseDelta.value("orderedTypes").toArray();
+    const QString baseDeltaDigest =
+        baseAgain ? historyDeltaDigestReference(*baseAgain, orderedTypes) : QString();
+    const QString oneDeltaDigest =
+        oneNetwork ? historyDeltaDigestReference(*oneNetwork, orderedTypes) : QString();
     // A tiny read-only receipt is enough to identify the exact authoritative
     // state after a lost navigation reply. A matching digest alone is NOT
     // proof that the requested History action was accepted: the operation,
@@ -3846,10 +3893,12 @@ void exerciseHydraulicDraftMembershipHttp() {
           "HDB-03d accepted malformed History SHA reconciliation parameters");
     check(sparseRedo.status == 200 && !sparseRedo.json.contains("payloadBase64") &&
           !sparseRedo.json.contains("changes") &&
-          sparseDelta.value("version") == QJsonValue(1) &&
+          sparseDelta.value("version") == QJsonValue(2) &&
           sparseDelta.value("networkId") == networkId &&
-          sparseDelta.value("fromSha256") == baseDigest &&
-          sparseDelta.value("toSha256") == oneDigest &&
+          orderedTypes == QJsonArray{QStringLiteral("HydraulicNodeJunction")} &&
+          sparseDelta.value("fromSha256") == baseDeltaDigest &&
+          sparseDelta.value("toSha256") == oneDeltaDigest &&
+          baseDeltaDigest != oneDeltaDigest &&
           sparseEdits.size() == 1 && sparseInsert.value("id") == newId &&
           sparseInsert.value("type") == "HydraulicNodeJunction" &&
           sparseInsert.value("beforeBase64").isNull() &&
@@ -4196,6 +4245,11 @@ void exerciseHydraulicDraftMembershipHttp() {
     check(crossedForward.status == 200 &&
           !crossedForward.json.contains("payloadBase64") &&
           archivedDelta.value("networkId") == networkId &&
+          archivedDelta.value("version") == QJsonValue(2) &&
+          // An update changes neither settings nor membership: no collection
+          // order is hashed and both digests cover the same settings.
+          archivedDelta.value("orderedTypes").toArray().isEmpty() &&
+          archivedDelta.value("fromSha256") == archivedDelta.value("toSha256") &&
           archivedEdits.size() == 1 &&
           archivedUpdate.value("type") == "HydraulicNodeJunction" &&
           archivedUpdate.value("id") == newId &&

@@ -744,7 +744,8 @@ if(AOWIS_DVMDB_WITH_MODEL_CODEC)
             set_tests_properties(aowis-dvmdb-model-codec-tests PROPERTIES LABELS "aowis")
             add_executable(aowis-dvmdb-hydraulic-distribution-network-tests
                 tests/hydraulic_distribution_network_persistence_tests.cpp)
-            target_link_libraries(aowis-dvmdb-hydraulic-distribution-network-tests PRIVATE aowis-dvmdb-hydraulic)
+            target_link_libraries(aowis-dvmdb-hydraulic-distribution-network-tests PRIVATE
+                aowis-dvmdb-hydraulic aowis-dvmdb-annotation-action-replay)
             add_test(NAME aowis-dvmdb-hydraulic-distribution-network-tests COMMAND aowis-dvmdb-hydraulic-distribution-network-tests)
             set_tests_properties(aowis-dvmdb-hydraulic-distribution-network-tests PROPERTIES LABELS "aowis")
             add_executable(aowis-dvmdb-model-value-rules-tests tests/model_value_rules_tests.cpp)

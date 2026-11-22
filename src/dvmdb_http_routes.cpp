@@ -26,6 +26,7 @@
 #include <QMessageAuthenticationCode>
 #include <QRandomGenerator>
 #include <QCryptographicHash>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <QUuid>
@@ -786,96 +787,194 @@ QString historyNetworkDigest(const NetworkHydraulicDistribution& network) {
         canonical, QCryptographicHash::Sha256).toHex());
 }
 
-QJsonObject verifiedHistoryNetworkDelta(const NetworkHydraulicDistribution& before,
-                                        const NetworkHydraulicDistribution& after) {
-    requireInput(!before.uuid.isNull() && before.uuid == after.uuid,
-                 "History network identity changed during navigation");
+// ---- historyDelta version 2: built from the native changes only ----------
+//
+// Both drafts share one base revision (History navigation never moves it), so
+// the records that differ are exactly those whose value differs in the two
+// candidate overlays. Members are never decoded: their stored payload is the
+// canonical MODEL image. Collection order is read from the root manifest and
+// membership chunks, and only for collections whose membership changed.
+
+EngineeringCandidateView historyDraftView(ProjectService& service, const WorkingCopyInfo& draft) {
+    std::function<std::optional<ModelRecord>(const Key&)> get =
+        [](const Key&) -> std::optional<ModelRecord> { return std::nullopt; };
+    std::function<std::vector<Key>(const Key&)> referrers =
+        [](const Key&) -> std::vector<Key> { return {}; };
+    if (draft.baseRevision) {
+        const std::shared_ptr<const PinnedModelReader> pinned =
+            std::make_shared<const PinnedModelReader>(
+                service.pinModelRevision(draft.projectId, *draft.baseRevision));
+        get = [pinned](const Key& key) { return pinned->get(key); };
+        referrers = [pinned](const Key& key) { return pinned->referrers(key); };
+    }
+    return overlayEngineeringCandidateView(get, referrers, {draft.candidateChanges});
+}
+
+std::optional<Key> historyMemberNetwork(const EngineeringCandidateView& view, const Key& member) {
+    std::optional<Key> owner;
+    for (const Key& chunk : engineeringReferrersOfKind(view, member, engineeringNetworkChunkKind))
+        for (const Key& root : engineeringReferrersOfKind(view, chunk,
+                                                          hydraulic::hydraulicDistributionNetworkKind)) {
+            requireInput(!owner || *owner == root, "History entity belongs to several networks");
+            owner = root;
+        }
+    return owner;
+}
+
+// SHA-256 (hex) of: "AOWIS-HISTORY-DELTA-2", then u32be length + network
+// settings image, then for every listed collection (canonical order): u32be
+// length + MODEL type name (UTF-8), u32be member count, 16-byte RFC 4122 UUID
+// of every member in collection order. See docs/history-transport.md.
+QString historyDeltaDigest(const QByteArray& settingsImage,
+                           const std::vector<std::pair<QString, QList<QUuid>>>& collections) {
+    QByteArray bytes("AOWIS-HISTORY-DELTA-2");
+    const std::function<void(quint32)> u32 = [&bytes](quint32 value) {
+        for (int shift = 24; shift >= 0; shift -= 8)
+            bytes.append(static_cast<char>((value >> shift) & 0xffU));
+    };
+    u32(static_cast<quint32>(settingsImage.size()));
+    bytes.append(settingsImage);
+    for (const std::pair<QString, QList<QUuid>>& collection : collections) {
+        const QByteArray name = collection.first.toUtf8();
+        u32(static_cast<quint32>(name.size()));
+        bytes.append(name);
+        u32(static_cast<quint32>(collection.second.size()));
+        for (const QUuid& member : collection.second) bytes.append(member.toRfc4122());
+    }
+    return QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
+}
+
+QJsonObject changeBasedHistoryNetworkDelta(ProjectService& service, const WorkingCopyInfo& source,
+                                           const WorkingCopyInfo& destination,
+                                           const QUuid& networkId) {
+    requireInput(source.projectId == destination.projectId &&
+                 source.baseRevision == destination.baseRevision,
+                 "History base changed during navigation");
+    const EngineeringCandidateView before = historyDraftView(service, source);
+    const EngineeringCandidateView after = historyDraftView(service, destination);
+    const Key rootKey = record::keyFromUuid(networkId);
+    const std::optional<ModelRecord> rootBefore = before.get(rootKey);
+    const std::optional<ModelRecord> rootAfter = after.get(rootKey);
+    if (!rootBefore || !rootAfter ||
+        rootBefore->kind != hydraulic::hydraulicDistributionNetworkKind ||
+        rootAfter->kind != hydraulic::hydraulicDistributionNetworkKind)
+        throw ProjectError(ProjectErrorKind::Conflict,
+                           "History network is unavailable at the selected candidate");
+    const QByteArray settingsBefore = hydraulic::hydraulicRootImageOfRecord(*rootBefore);
+    const QByteArray settingsAfter = hydraulic::hydraulicRootImageOfRecord(*rootAfter);
+    const std::function<bool(const std::optional<ModelRecord>&, const std::optional<ModelRecord>&)> same =
+        [](const std::optional<ModelRecord>& first, const std::optional<ModelRecord>& second) {
+            return first.has_value() == second.has_value() &&
+                   (!first || (first->kind == second->kind && first->payload == second->payload &&
+                               first->references == second->references));
+        };
+    const std::size_t collections = hydraulic::hydraulicCollectionCount();
+    std::vector<bool> membershipChanged(collections, false);
+    // Changed members of this network: before/after canonical images.
+    std::vector<std::map<Key, std::pair<std::optional<QByteArray>, std::optional<QByteArray>>>>
+        changedMembers(collections);
+    std::set<Key> keys;
+    for (const ModelChange& change : source.candidateChanges) keys.insert(change.key);
+    for (const ModelChange& change : destination.candidateChanges) keys.insert(change.key);
+    for (const Key& key : keys) {
+        if (key == rootKey) continue;
+        const std::optional<ModelRecord> old = before.get(key);
+        const std::optional<ModelRecord> now = after.get(key);
+        if (same(old, now)) continue;
+        for (const std::optional<ModelRecord>* side : {&old, &now}) {
+            if (!*side || (*side)->kind != engineeringNetworkChunkKind) continue;
+            const std::optional<std::pair<QUuid, std::size_t>> owner =
+                hydraulic::hydraulicChunkCollection(**side);
+            if (owner && owner->first == networkId) membershipChanged[owner->second] = true;
+        }
+        const bool ownedBefore = old && isHydraulicMemberKind(old->kind) &&
+                                 historyMemberNetwork(before, key) == rootKey;
+        const bool ownedAfter = now && isHydraulicMemberKind(now->kind) &&
+                                historyMemberNetwork(after, key) == rootKey;
+        if (!ownedBefore && !ownedAfter) continue;
+        requireInput(!ownedBefore || !ownedAfter || old->kind == now->kind,
+                     "History entity changed its type");
+        const std::optional<std::size_t> collection =
+            hydraulic::hydraulicCollectionForKind(ownedBefore ? old->kind : now->kind);
+        requireInput(collection.has_value(), "unknown History entity type");
+        changedMembers[*collection][key] = {
+            ownedBefore ? std::optional<QByteArray>(record::qByteArrayFromBytes(old->payload)) : std::nullopt,
+            ownedAfter ? std::optional<QByteArray>(record::qByteArrayFromBytes(now->payload)) : std::nullopt};
+        if (ownedBefore != ownedAfter) membershipChanged[*collection] = true;
+    }
+
     QJsonArray edits;
     QJsonArray moves;
-    const QByteArray rootBefore = aowis::model::hydraulicDistributionRootImage(before);
-    const QByteArray rootAfter = aowis::model::hydraulicDistributionRootImage(after);
-    requireInput(!rootBefore.isEmpty() && !rootAfter.isEmpty(),
-                 "History network metadata is not canonical");
-    if (rootBefore != rootAfter)
+    QJsonArray orderedTypes;
+    std::vector<std::pair<QString, QList<QUuid>>> ordersBefore;
+    std::vector<std::pair<QString, QList<QUuid>>> ordersAfter;
+    if (settingsBefore != settingsAfter)
         edits.append(historyImageChange(
-            QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType), before.uuid,
-            rootBefore, rootAfter));
-#define HISTORY_COLLECTION_DIFF(name, type, kind) \
-    { \
-        QHash<QUuid, QByteArray> oldImages; \
-        QHash<QUuid, QByteArray> newImages; \
-        QList<QUuid> projected; \
-        QList<QUuid> desired; \
-        for (const type& member : before.name) { \
-            requireInput(!member.uuid.isNull() && !oldImages.contains(member.uuid), \
-                         "duplicate History source entity UUID"); \
-            const QByteArray image = ModelCodec<type>::encode(member); \
-            requireInput(!image.isEmpty(), "invalid History source entity image"); \
-            oldImages.insert(member.uuid, image); \
-            projected.append(member.uuid); \
-        } \
-        for (const type& member : after.name) { \
-            requireInput(!member.uuid.isNull() && !newImages.contains(member.uuid), \
-                         "duplicate History destination entity UUID"); \
-            const QByteArray image = ModelCodec<type>::encode(member); \
-            requireInput(!image.isEmpty(), "invalid History destination entity image"); \
-            newImages.insert(member.uuid, image); \
-            desired.append(member.uuid); \
-        } \
-        for (const type& member : before.name) { \
-            const QHash<QUuid, QByteArray>::const_iterator found = \
-                newImages.constFind(member.uuid); \
-            if (found == newImages.constEnd()) \
-                edits.append(historyImageChange(QStringLiteral(#type), member.uuid, \
-                                                 oldImages.value(member.uuid), std::nullopt)); \
-            else if (found.value() != oldImages.value(member.uuid)) \
-                edits.append(historyImageChange(QStringLiteral(#type), member.uuid, \
-                                                 oldImages.value(member.uuid), found.value())); \
-        } \
-        for (const type& member : after.name) \
-            if (!oldImages.contains(member.uuid)) { \
-                edits.append(historyImageChange(QStringLiteral(#type), member.uuid, \
-                                                 std::nullopt, newImages.value(member.uuid))); \
-                projected.append(member.uuid); \
-            } \
-        for (qsizetype index = projected.size(); index > 0;) { \
-            --index; \
-            if (!newImages.contains(projected.at(index))) projected.removeAt(index); \
-        } \
-        for (qsizetype index = 0; index < desired.size(); ++index) { \
-            if (projected.at(index) == desired.at(index)) continue; \
-            const qsizetype from = projected.indexOf(desired.at(index), index + 1); \
-            requireInput(from >= 0, "History membership ordering is inconsistent"); \
-            projected.move(from, index); \
-            moves.append(QJsonObject{{"type", QStringLiteral(#type)}, \
-                                     {"id", uuidString(desired.at(index))}, \
-                                     {"position", static_cast<int>(index)}}); \
-        } \
-        requireInput(projected == desired, "History membership move verification failed"); \
+            QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType), networkId,
+            settingsBefore, settingsAfter));
+    const std::function<QByteArray(const EngineeringCandidateView&, const QUuid&)> image =
+        [](const EngineeringCandidateView& view, const QUuid& member) {
+            const std::optional<ModelRecord> stored = view.get(record::keyFromUuid(member));
+            requireInput(stored.has_value(), "History entity image is missing");
+            return record::qByteArrayFromBytes(stored->payload);
+        };
+    for (std::size_t collection = 0; collection < collections; ++collection) {
+        const QString type = hydraulic::hydraulicCollectionTypeName(collection);
+        const std::map<Key, std::pair<std::optional<QByteArray>, std::optional<QByteArray>>>& changed =
+            changedMembers[collection];
+        if (!membershipChanged[collection]) {
+            for (const std::pair<const Key, std::pair<std::optional<QByteArray>,
+                                                      std::optional<QByteArray>>>& entry : changed) {
+                requireInput(entry.second.first && entry.second.second,
+                             "History membership change without a chunk change");
+                edits.append(historyImageChange(type, record::uuidFromKey(entry.first),
+                                                entry.second.first, entry.second.second));
+            }
+            continue;
+        }
+        const QList<QUuid> projectedSource =
+            hydraulic::hydraulicCollectionMembers(before.get, networkId, collection);
+        const QList<QUuid> desired =
+            hydraulic::hydraulicCollectionMembers(after.get, networkId, collection);
+        const QSet<QUuid> sourceSet(projectedSource.cbegin(), projectedSource.cend());
+        const QSet<QUuid> desiredSet(desired.cbegin(), desired.cend());
+        requireInput(sourceSet.size() == projectedSource.size() && desiredSet.size() == desired.size(),
+                     "duplicate History collection member");
+        QList<QUuid> projected = projectedSource;
+        for (const QUuid& member : projectedSource) {
+            const std::map<Key, std::pair<std::optional<QByteArray>, std::optional<QByteArray>>>::const_iterator
+                found = changed.find(record::keyFromUuid(member));
+            if (!desiredSet.contains(member))
+                edits.append(historyImageChange(type, member, image(before, member), std::nullopt));
+            else if (found != changed.end())
+                edits.append(historyImageChange(type, member, found->second.first, found->second.second));
+        }
+        for (const QUuid& member : desired)
+            if (!sourceSet.contains(member)) {
+                edits.append(historyImageChange(type, member, std::nullopt, image(after, member)));
+                projected.append(member);
+            }
+        for (qsizetype index = projected.size(); index > 0;) {
+            --index;
+            if (!desiredSet.contains(projected.at(index))) projected.removeAt(index);
+        }
+        for (qsizetype index = 0; index < desired.size(); ++index) {
+            if (projected.at(index) == desired.at(index)) continue;
+            const qsizetype from = projected.indexOf(desired.at(index), index + 1);
+            requireInput(from >= 0, "History membership ordering is inconsistent");
+            projected.move(from, index);
+            moves.append(QJsonObject{{"type", type}, {"id", uuidString(desired.at(index))},
+                                     {"position", static_cast<int>(index)}});
+        }
+        requireInput(projected == desired, "History membership move verification failed");
+        orderedTypes.append(type);
+        ordersBefore.emplace_back(type, projectedSource);
+        ordersAfter.emplace_back(type, desired);
     }
-    // Keep in sync with the 17 canonical hydraulic collections used by the
-    // native manifest and the GUI's typed MODEL registry.
-    HISTORY_COLLECTION_DIFF(pipe_materials, HydraulicPipeMaterial, 8)
-    HISTORY_COLLECTION_DIFF(patterns_time, HydraulicPatternTime, 9)
-    HISTORY_COLLECTION_DIFF(curves_tank_volume, HydraulicCurveTankVolume, 10)
-    HISTORY_COLLECTION_DIFF(curves_pump_head, HydraulicCurvePumpHead, 11)
-    HISTORY_COLLECTION_DIFF(curves_pump_efficiency, HydraulicCurvePumpEfficiency, 12)
-    HISTORY_COLLECTION_DIFF(curves_valve_headloss, HydraulicCurveValveHeadloss, 13)
-    HISTORY_COLLECTION_DIFF(curves_valve_characteristic, HydraulicCurveValveCharacteristic, 14)
-    HISTORY_COLLECTION_DIFF(curves_generic, HydraulicCurveGeneric, 15)
-    HISTORY_COLLECTION_DIFF(nodes_reservoirs, HydraulicNodeReservoir, 2)
-    HISTORY_COLLECTION_DIFF(nodes_junctions, HydraulicNodeJunction, 1)
-    HISTORY_COLLECTION_DIFF(nodes_tanks, HydraulicNodeTank, 3)
-    HISTORY_COLLECTION_DIFF(demand_points, HydraulicDemandPoint, 7)
-    HISTORY_COLLECTION_DIFF(links_pipes, HydraulicLinkPipe, 4)
-    HISTORY_COLLECTION_DIFF(links_pumps, HydraulicLinkPump, 5)
-    HISTORY_COLLECTION_DIFF(links_valves, HydraulicLinkValve, 6)
-    HISTORY_COLLECTION_DIFF(controls_simple, HydraulicControlSimple, 16)
-    HISTORY_COLLECTION_DIFF(controls_rules, HydraulicControlRule, 17)
-#undef HISTORY_COLLECTION_DIFF
-    return QJsonObject{{"version", 1}, {"networkId", uuidString(before.uuid)},
-                       {"fromSha256", historyNetworkDigest(before)},
-                       {"toSha256", historyNetworkDigest(after)},
+    return QJsonObject{{"version", 2}, {"networkId", uuidString(networkId)},
+                       {"fromSha256", historyDeltaDigest(settingsBefore, ordersBefore)},
+                       {"toSha256", historyDeltaDigest(settingsAfter, ordersAfter)},
+                       {"orderedTypes", orderedTypes},
                        {"edits", edits}, {"moves", moves}};
 }
 
@@ -2275,18 +2374,16 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             const std::optional<QUuid> networkId = wantsDelta
                 ? std::optional<QUuid>(parseUuid(requiredString(body, "networkId")))
                 : std::nullopt;
-            // Capture the requested network before publishing. The generation
+            // Capture the source draft before publishing. The generation
             // fence in the native writer proves this was the actual source.
-            std::optional<NetworkHydraulicDistribution> before;
+            std::optional<WorkingCopyInfo> before;
             if (networkId) {
                 const WorkingCopyInfo current = service.workingCopy(draftId, false);
                 if (current.generation == generation) {
-                    before = historyNetworkAtDraft(service, current, *networkId);
+                    before = current;
                 } else if (current.lastHistoryNavigationOperationId == operationId &&
                            current.lastHistoryNavigationSourceGeneration == generation) {
-                    const WorkingCopyInfo source = service.historyNavigationSource(
-                        draftId, operationId, generation);
-                    before = historyNetworkAtDraft(service, source, *networkId);
+                    before = service.historyNavigationSource(draftId, operationId, generation);
                 }
             }
             // The authenticated MODEL frame identities determine the archive
@@ -2350,10 +2447,8 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                     answer.insert(QStringLiteral("deltaRecoveryRequired"), true);
                     return Reply{200, answer};
                 }
-                const NetworkHydraulicDistribution after =
-                    historyNetworkAtDraft(service, *result, *networkId);
                 answer.insert(QStringLiteral("historyDelta"),
-                              verifiedHistoryNetworkDelta(*before, after));
+                              changeBasedHistoryNetworkDelta(service, *before, *result, *networkId));
             }
             return Reply{200, answer};
         });

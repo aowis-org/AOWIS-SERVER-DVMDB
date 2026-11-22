@@ -13,16 +13,58 @@ network UUID, the exact active/archived target coordinate, operation UUIDv7,
 expected source generation/base and fenced writer identity. DVMDB verifies
 the original MODEL frames and destination, then atomically publishes the
 HEAD-relative private candidate and the cursor. Its HTTP `historyDelta`
-contains the source and destination **canonical SHA-256** digests, changed
-typed entity before/after images (including network-root metadata) and
-ordered membership moves across the 17 collections. It does **not** return
-every unchanged entity or a full `NetworkHydraulicDistribution` just to Undo one action.
+(version 2) contains changed typed entity before/after images (including
+network-root metadata), ordered membership moves across the 17 collections,
+the list `orderedTypes` of collections whose membership changed, and source
+and destination digests `fromSha256` / `toSha256` (below). It does **not**
+return every unchanged entity or a full `NetworkHydraulicDistribution` just
+to Undo one action.
 
-The server can reconstruct full snapshots internally; this is not a full
-network **transfer**. The GUI checks its source digest, validates every
-before-image, applies the delta and verifies the destination digest before
-publishing that candidate locally. A distant jump may have a large delta
-when many entities actually differ.
+The server builds the delta from the native records that differ between the
+source and destination drafts; it never loads or encodes the whole network.
+The GUI checks the source digest, validates every before-image, applies the
+delta and verifies the destination digest before publishing that candidate
+locally. A distant jump may have a large delta when many entities actually
+differ.
+
+### historyDelta version 2
+
+```json
+{"version": 2, "networkId": "<uuid>",
+ "fromSha256": "<hex>", "toSha256": "<hex>",
+ "orderedTypes": ["HydraulicNodeJunction", ...],
+ "edits": [{"type": "...", "id": "<uuid>", "beforeBase64": ..., "afterBase64": ...}],
+ "moves": [{"type": "...", "id": "<uuid>", "position": 3}]}
+```
+
+- `edits`: the network-root settings edit first (type
+  `hydraulicDistributionRootEditType`, images
+  `aowis::model::hydraulicDistributionRootImage`), then per collection in
+  canonical order. In a collection listed in `orderedTypes`: deletions and
+  updates in source order, then insertions in destination order. In any
+  other collection: updates only, in UUID byte order.
+- `moves`: unchanged from version 1. Apply deletions, append insertions in
+  edit order, then each move in order (`position` = final index).
+- `orderedTypes`: the collections whose membership changed (insertion,
+  deletion or reorder), in canonical collection order.
+- Digest: SHA-256, lowercase hex, of the byte string
+  1. ASCII `AOWIS-HISTORY-DELTA-2` (no terminator);
+  2. `u32be(n)` followed by the `n` bytes of
+     `aowis::model::hydraulicDistributionRootImage(network)`;
+  3. for each type in `orderedTypes`, in the listed order: `u32be(n)` + the
+     UTF-8 type name, `u32be(count)`, then the 16-byte RFC 4122 UUID
+     (`QUuid::toRfc4122`) of every member of that collection, in collection
+     order.
+
+  `fromSha256` uses the source state and `toSha256` the destination state,
+  with the same `orderedTypes`. The GUI computes both from its own network:
+  the settings image plus the member order of the listed collections. All
+  other content is checked through the before-images of `edits`.
+
+Version 1 hashed the complete canonical network, which forced the server to
+load and encode the whole network on every Undo/Redo. The reconciliation
+receipt below still reports the complete-network `networkSha256` (a rare
+recovery path).
 
 ## Durable same-operation replay
 

@@ -89,15 +89,13 @@ client-supplied arbitrary changes:
 |---|---|
 | `verifiedRevisionNativeActionWitness` | Links an indexed archive to the complete **actual** immutable first-parent native record delta (including deletion), validating parent and candidate record equality |
 | `readHistoryReverseActionWindow` | Paged original frames from a selected first-parent revision, **newest first**; these are not precomputed inverse writes |
-| `previewReverseHydraulicActions` | Read-only reverse verification for existing members/root metadata; refuses structural insertion/deletion without parent context |
-| `previewVerifiedHydraulicActionBoundary` | Full forward replay from a parent network, append-on-insert and ordered-delete rules, byte-equal final canonical network before returning any intermediate boundary |
-| `verifyHydraulicRevisionActionCoverage` | Attributes **every changed native record** to verified MODEL actions and server-generated hydraulic membership/root records, even across several networks |
+| `annotations::verifyIndexedCombinedActionBoundary` | Replays the archive on changes (Save materializers) and proves that it reproduces **every changed native record** of the revision (members, membership chunks, roots, annotation layers), across several networks; supports archives started at an older History position |
 | `planHistoryCheckpoint` | Full draft-relative replacement overlay for an immutable first-parent checkpoint; read-only |
-| `planVerifiedHydraulicActionNavigation` | Full **current-HEAD-relative** candidate overlay for a global archived action position; read-only |
+| `annotations::planVerifiedArchivedAction` | **Current-HEAD-relative** candidate overlay for a global archived action position; read-only |
 | `navigateHistoryCheckpoint` | Atomic, fenced exact-checkpoint candidate+marker publication in a private draft |
-| `navigateVerifiedHydraulicAction` | Atomic, fenced, idempotent candidate+action-coordinate publication; restores the selected archived hydraulic state without moving the committed HEAD |
-| `planVerifiedHydraulicDraftActionNavigation` | Verifies the full retained active MODEL journal against the draft's selected canonical network and constructs a complete HEAD-relative candidate, read-only. Currently requires one existing hydraulic root in the committed base |
-| `navigateVerifiedHydraulicDraftAction` | Calls the MODEL-aware planner and fenced/idempotent native publisher; retains redo frames and survives service restart. Also exposed as restricted HTTP active-journal selection |
+| `annotations::navigateVerifiedCombinedAction` / `navigateVerifiedAnnotationAction` | Atomic, fenced, idempotent candidate+action-coordinate publication; restores the selected archived state without moving the committed HEAD |
+| `annotations::planVerifiedActiveDraftAction` | Replays the retained active MODEL journal on changes, proves it reproduces the saved draft at its cursor, and returns the HEAD-relative candidate for another position, read-only. Hydraulic, annotation and mixed journals; several networks |
+| `annotations::navigateVerifiedActiveDraftAction` | Calls that planner and the fenced/idempotent native publisher; retains redo frames and survives service restart. Used by HTTP active-journal selection |
 | `publishVerifiedDraftActionNavigation` | Atomic storage boundary for a **preverified** live-draft journal position and complete candidate; never accepts unchecked client native overlays |
 
 MODEL actions in a multi-network Commit retain a **single global action

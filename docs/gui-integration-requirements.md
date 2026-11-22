@@ -59,9 +59,12 @@ archived MODEL actions** alongside the active draft journal. Fenced HTTP
 `/history/navigate` selects eligible draft or archived action coordinates,
 including crossing Commit markers without rewriting immutable revisions.
 
-A successful navigation returns a verified **sparse `historyDelta`** for the
-selected hydraulic distribution network (canonical source/destination SHA-256, changed
-entity images and membership-order changes). The GUI verifies source digest,
+A successful navigation returns a verified **sparse `historyDelta`** (version 2)
+for the selected hydraulic distribution network: changed entity images,
+membership-order changes, and source/destination SHA-256 digests over the
+network settings and the member order of the collections listed in
+`orderedTypes` (exact byte layout in [History transport](history-transport.md);
+version 1 hashed the whole network). The GUI verifies source digest,
 before-images, and destination digest before changing the editor. It does
 **not** download the complete network for routine Undo/Redo.
 

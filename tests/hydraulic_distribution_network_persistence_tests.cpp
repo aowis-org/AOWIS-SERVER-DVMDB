@@ -4,6 +4,7 @@
 #include "aowis/dvmdb/revision_record.h"
 #include "aowis/dvmdb/map_annotation_snapshot_validation.h"
 #include "aowis/dvmdb/map_annotation_persistence.h"
+#include "aowis/dvmdb/map_annotation_action_replay.h"
 #include <aowis/model/edit/hydraulic_distribution_root_edit.h>
 
 #include <aowis/dvmdb/model_validation.h>
@@ -1996,363 +1997,6 @@ void exerciseAtomicRootMetadataEdit() {
     require(identityRejected, "root UUID replacement rejected");
 }
 
-// HIST-03c2: prove image continuity before any draft cursor could use it.
-// This coverage is intentionally about already-existing objects (no
-// collection-position guessing), including all 17 canonical MODEL kinds.
-void exerciseHistoricalScalarActionPreview() {
-    const NetworkHydraulicDistribution original = completeNetwork();
-    NetworkHydraulicDistribution edited = original;
-    aowis::model::ModelEditTransaction first;
-    first.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
-    first.operation = QStringLiteral("hydraulic.history.all-collections");
-#define HISTORY_UPDATE_COLLECTION(name, type, kind) \
-    { \
-        const type before = original.name.first(); \
-        type &after = edited.name.first(); \
-        after.id = before.id + QStringLiteral("-history"); \
-        first.edits.append(aowis::model::ModelEntityEdit{ \
-            before.uuid, QStringLiteral(#type), \
-            native::ModelCodec<type>::encode(before), \
-            native::ModelCodec<type>::encode(after)}); \
-    }
-    HISTORY_UPDATE_COLLECTION(pipe_materials, HydraulicPipeMaterial, 8)
-    HISTORY_UPDATE_COLLECTION(patterns_time, HydraulicPatternTime, 9)
-    HISTORY_UPDATE_COLLECTION(curves_tank_volume, HydraulicCurveTankVolume, 10)
-    HISTORY_UPDATE_COLLECTION(curves_pump_head, HydraulicCurvePumpHead, 11)
-    HISTORY_UPDATE_COLLECTION(curves_pump_efficiency, HydraulicCurvePumpEfficiency, 12)
-    HISTORY_UPDATE_COLLECTION(curves_valve_headloss, HydraulicCurveValveHeadloss, 13)
-    HISTORY_UPDATE_COLLECTION(curves_valve_characteristic, HydraulicCurveValveCharacteristic, 14)
-    HISTORY_UPDATE_COLLECTION(curves_generic, HydraulicCurveGeneric, 15)
-    HISTORY_UPDATE_COLLECTION(nodes_reservoirs, HydraulicNodeReservoir, 2)
-    HISTORY_UPDATE_COLLECTION(nodes_junctions, HydraulicNodeJunction, 1)
-    HISTORY_UPDATE_COLLECTION(nodes_tanks, HydraulicNodeTank, 3)
-    HISTORY_UPDATE_COLLECTION(demand_points, HydraulicDemandPoint, 7)
-    HISTORY_UPDATE_COLLECTION(links_pipes, HydraulicLinkPipe, 4)
-    HISTORY_UPDATE_COLLECTION(links_pumps, HydraulicLinkPump, 5)
-    HISTORY_UPDATE_COLLECTION(links_valves, HydraulicLinkValve, 6)
-    HISTORY_UPDATE_COLLECTION(controls_simple, HydraulicControlSimple, 16)
-    HISTORY_UPDATE_COLLECTION(controls_rules, HydraulicControlRule, 17)
-#undef HISTORY_UPDATE_COLLECTION
-    require(first.edits.size() == 17, "HIST-03c2 must cover all 17 collections");
-    const QByteArray firstBytes = aowis::model::ModelEditTransactionCodec::encode(first);
-    require(!firstBytes.isEmpty(), "HIST-03c2 17-collection MODEL action not encoded");
-
-    aowis::model::ModelEditTransaction second;
-    second.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
-    second.operation = QStringLiteral("hydraulic.history.root-metadata");
-    const NetworkHydraulicDistribution afterFirst = edited;
-    edited.title_line_2 = QStringLiteral("Historical root after-image");
-    edited.nodes_junctions.first().id += QStringLiteral("-twice");
-    second.edits.append(aowis::model::ModelEntityEdit{
-        edited.uuid, QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType),
-        aowis::model::hydraulicDistributionRootImage(afterFirst),
-        aowis::model::hydraulicDistributionRootImage(edited)});
-    second.edits.append(aowis::model::ModelEntityEdit{
-        edited.nodes_junctions.first().uuid, QStringLiteral("HydraulicNodeJunction"),
-        native::ModelCodec<HydraulicNodeJunction>::encode(
-            afterFirst.nodes_junctions.first()),
-        native::ModelCodec<HydraulicNodeJunction>::encode(
-            edited.nodes_junctions.first())});
-    const QByteArray secondBytes = aowis::model::ModelEditTransactionCodec::encode(second);
-    require(!secondBytes.isEmpty(), "HIST-03c2 root MODEL action not encoded");
-    const native::Bytes frameFirst = hydraulic::bytesFromQByteArray(firstBytes);
-    const native::Bytes frameSecond = hydraulic::bytesFromQByteArray(secondBytes);
-    const QByteArray baselineBytes = native::ModelCodec<NetworkHydraulicDistribution>::encode(original);
-    const QByteArray intermediateBytes = native::ModelCodec<NetworkHydraulicDistribution>::encode(afterFirst);
-    const QByteArray finalBytes = native::ModelCodec<NetworkHydraulicDistribution>::encode(edited);
-    QString error;
-    const std::optional<NetworkHydraulicDistribution> afterRootUndo =
-        hydraulic::previewReverseHydraulicActions(edited, {frameSecond}, &error);
-    require(afterRootUndo.has_value() && error.isEmpty() &&
-            native::ModelCodec<NetworkHydraulicDistribution>::encode(*afterRootUndo) == intermediateBytes,
-            "HIST-03c2 root undo did not recover exact intermediate bytes");
-    const std::optional<NetworkHydraulicDistribution> beforeBoth =
-        hydraulic::previewReverseHydraulicActions(edited, {frameSecond, frameFirst}, &error);
-    require(beforeBoth.has_value() && error.isEmpty() &&
-            native::ModelCodec<NetworkHydraulicDistribution>::encode(*beforeBoth) == baselineBytes &&
-            native::ModelCodec<NetworkHydraulicDistribution>::encode(edited) == finalBytes,
-            "HIST-03c2 complete reverse replay changed the source or lost bytes");
-    require(!hydraulic::previewReverseHydraulicActions(edited, {frameFirst}, &error) &&
-            error.contains(QStringLiteral("after-image")),
-            "HIST-03c2 accepted out-of-order original events");
-    NetworkHydraulicDistribution tampered = edited;
-    tampered.nodes_junctions.first().id = QStringLiteral("stale");
-    require(!hydraulic::previewReverseHydraulicActions(tampered,
-            {frameSecond, frameFirst}, &error) && !error.isEmpty(),
-            "HIST-03c2 accepted stale entity images");
-    aowis::model::ModelEditTransaction creation;
-    creation.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
-    creation.operation = QStringLiteral("hydraulic.junction.add");
-    HydraulicNodeJunction newJunction = item<HydraulicNodeJunction>(551);
-    creation.edits.append(aowis::model::ModelEntityEdit{
-        newJunction.uuid, QStringLiteral("HydraulicNodeJunction"), std::nullopt,
-        native::ModelCodec<HydraulicNodeJunction>::encode(newJunction)});
-    const QByteArray creationBytes = aowis::model::ModelEditTransactionCodec::encode(creation);
-    require(!creationBytes.isEmpty() &&
-            !hydraulic::previewReverseHydraulicActions(edited,
-                {hydraulic::bytesFromQByteArray(creationBytes)}, &error) &&
-            error.contains(QStringLiteral("membership-order")),
-            "HIST-03c2 guessed a missing original insertion position");
-    native::Bytes invalid = frameFirst;
-    invalid.back() ^= 0xff;
-    require(!hydraulic::previewReverseHydraulicActions(edited, {invalid}, &error),
-            "HIST-03c2 accepted corrupted archived MODEL bytes");
-}
-
-// HIST-03c2b: an immutable parent + *complete* forward action archive is
-// sufficient to reconstruct ordered structural intermediate states. Native
-// draft member insertion appends; a deletion preserves survivor order.
-// An unjournaled change or a different historical ordering must fail closed.
-void exerciseVerifiedHydraulicActionBoundary() {
-    const NetworkHydraulicDistribution parent = completeNetwork();
-    NetworkHydraulicDistribution current = parent;
-    std::vector<native::Bytes> archived;
-    std::vector<NetworkHydraulicDistribution> states{parent};
-    const std::function<void(const aowis::model::ModelEditTransaction&)> archive =
-        [&archived, &states, &current](const aowis::model::ModelEditTransaction& event) {
-            const QByteArray bytes = aowis::model::ModelEditTransactionCodec::encode(event);
-            require(!bytes.isEmpty(), "HIST-03c2b action did not encode");
-            archived.push_back(hydraulic::bytesFromQByteArray(bytes));
-            states.push_back(current);
-        };
-
-    // One logical action updates *all 17* existing collection types.
-    aowis::model::ModelEditTransaction fields;
-    fields.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
-    fields.operation = QStringLiteral("hydraulic.history.verified.all-collections");
-#define HISTORY_VERIFY_UPDATE(name, type) \
-    { \
-        const type before = current.name.first(); \
-        type& after = current.name.first(); \
-        after.id += QStringLiteral("-verified"); \
-        fields.edits.append(aowis::model::ModelEntityEdit{ \
-            before.uuid, QStringLiteral(#type), native::ModelCodec<type>::encode(before), \
-            native::ModelCodec<type>::encode(after)}); \
-    }
-    HISTORY_VERIFY_UPDATE(pipe_materials, HydraulicPipeMaterial)
-    HISTORY_VERIFY_UPDATE(patterns_time, HydraulicPatternTime)
-    HISTORY_VERIFY_UPDATE(curves_tank_volume, HydraulicCurveTankVolume)
-    HISTORY_VERIFY_UPDATE(curves_pump_head, HydraulicCurvePumpHead)
-    HISTORY_VERIFY_UPDATE(curves_pump_efficiency, HydraulicCurvePumpEfficiency)
-    HISTORY_VERIFY_UPDATE(curves_valve_headloss, HydraulicCurveValveHeadloss)
-    HISTORY_VERIFY_UPDATE(curves_valve_characteristic, HydraulicCurveValveCharacteristic)
-    HISTORY_VERIFY_UPDATE(curves_generic, HydraulicCurveGeneric)
-    HISTORY_VERIFY_UPDATE(nodes_reservoirs, HydraulicNodeReservoir)
-    HISTORY_VERIFY_UPDATE(nodes_junctions, HydraulicNodeJunction)
-    HISTORY_VERIFY_UPDATE(nodes_tanks, HydraulicNodeTank)
-    HISTORY_VERIFY_UPDATE(demand_points, HydraulicDemandPoint)
-    HISTORY_VERIFY_UPDATE(links_pipes, HydraulicLinkPipe)
-    HISTORY_VERIFY_UPDATE(links_pumps, HydraulicLinkPump)
-    HISTORY_VERIFY_UPDATE(links_valves, HydraulicLinkValve)
-    HISTORY_VERIFY_UPDATE(controls_simple, HydraulicControlSimple)
-    HISTORY_VERIFY_UPDATE(controls_rules, HydraulicControlRule)
-#undef HISTORY_VERIFY_UPDATE
-    require(fields.edits.size() == 17, "HIST-03c2b must update all collections");
-    archive(fields);
-
-    // One mixed root+creation event. The new member must be appended after
-    // the original two junctions, including when chunks have been rebalanced.
-    aowis::model::ModelEditTransaction mixed;
-    mixed.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
-    mixed.operation = QStringLiteral("hydraulic.history.verified.mixed");
-    const NetworkHydraulicDistribution beforeMixed = current;
-    current.title_line_2 = QStringLiteral("HIST-03c2b archived mixed edit");
-    const HydraulicNodeJunction firstNew = item<HydraulicNodeJunction>(551);
-    current.nodes_junctions.append(firstNew);
-    mixed.edits.append(aowis::model::ModelEntityEdit{
-        current.uuid, QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType),
-        aowis::model::hydraulicDistributionRootImage(beforeMixed),
-        aowis::model::hydraulicDistributionRootImage(current)});
-    mixed.edits.append(aowis::model::ModelEntityEdit{
-        firstNew.uuid, QStringLiteral("HydraulicNodeJunction"), std::nullopt,
-        native::ModelCodec<HydraulicNodeJunction>::encode(firstNew)});
-    archive(mixed);
-
-    // Create one member and delete an earlier appended member in a single
-    // action, retaining the two original junctions in their exact order.
-    aowis::model::ModelEditTransaction swap;
-    swap.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
-    swap.operation = QStringLiteral("hydraulic.history.verified.swap");
-    const HydraulicNodeJunction secondNew = item<HydraulicNodeJunction>(552);
-    swap.edits.append(aowis::model::ModelEntityEdit{
-        secondNew.uuid, QStringLiteral("HydraulicNodeJunction"), std::nullopt,
-        native::ModelCodec<HydraulicNodeJunction>::encode(secondNew)});
-    swap.edits.append(aowis::model::ModelEntityEdit{
-        firstNew.uuid, QStringLiteral("HydraulicNodeJunction"),
-        native::ModelCodec<HydraulicNodeJunction>::encode(firstNew), std::nullopt});
-    current.nodes_junctions.append(secondNew);
-    current.nodes_junctions.removeAt(2);
-    archive(swap);
-
-    // Deleting an original ordered member and then introducing another new
-    // member must reconstruct the parent order at earlier boundaries.
-    aowis::model::ModelEditTransaction removal;
-    removal.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
-    removal.operation = QStringLiteral("hydraulic.history.verified.remove");
-    const HydraulicCurveGeneric oldLabel = current.curves_generic.first();
-    removal.edits.append(aowis::model::ModelEntityEdit{
-        oldLabel.uuid, QStringLiteral("HydraulicCurveGeneric"),
-        native::ModelCodec<HydraulicCurveGeneric>::encode(oldLabel), std::nullopt});
-    current.curves_generic.clear();
-    archive(removal);
-
-    aowis::model::ModelEditTransaction insertion;
-    insertion.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
-    insertion.operation = QStringLiteral("hydraulic.history.verified.insert");
-    HydraulicCurveGeneric newLabel = item<HydraulicCurveGeneric>(553);
-    newLabel.id = QStringLiteral("Historical label");
-    insertion.edits.append(aowis::model::ModelEntityEdit{
-        newLabel.uuid, QStringLiteral("HydraulicCurveGeneric"), std::nullopt,
-        native::ModelCodec<HydraulicCurveGeneric>::encode(newLabel)});
-    current.curves_generic.append(newLabel);
-    archive(insertion);
-
-    const NetworkHydraulicDistribution committed = current;
-    QString error;
-    for (std::size_t boundary = 0; boundary <= archived.size(); ++boundary) {
-        const std::optional<NetworkHydraulicDistribution> reconstructed =
-            hydraulic::previewVerifiedHydraulicActionBoundary(
-                parent, committed, archived, boundary, &error);
-        require(reconstructed.has_value() && error.isEmpty() &&
-                native::ModelCodec<NetworkHydraulicDistribution>::encode(*reconstructed) ==
-                native::ModelCodec<NetworkHydraulicDistribution>::encode(states[boundary]) &&
-                native::ModelCodec<NetworkHydraulicDistribution>::encode(parent) ==
-                native::ModelCodec<NetworkHydraulicDistribution>::encode(states.front()),
-                "HIST-03c2b failed byte-exact ordered intermediate reconstruction");
-    }
-    require(!hydraulic::previewVerifiedHydraulicActionBoundary(
-                parent, committed, archived, archived.size() + 1, &error) &&
-            error.contains(QStringLiteral("boundary")),
-            "HIST-03c2b accepted an out-of-range historical position");
-
-    // If an early action is missing, a later action may encounter a stale
-    // before-image before the final checkpoint comparison. That is also a
-    // correct fail-closed result, not evidence that coverage was accepted.
-    std::vector<native::Bytes> missingPrefix = archived;
-    missingPrefix.erase(missingPrefix.begin());
-    require(!hydraulic::previewVerifiedHydraulicActionBoundary(
-                parent, committed, missingPrefix, 0, &error) &&
-            error.contains(QStringLiteral("before-image mismatch")),
-            "HIST-03c2b did not reject an omitted earlier action");
-    // Removing the *last* action leaves a valid prefix that can be replayed
-    // without stale before-images. Only the final immutable snapshot witness
-    // detects its missing edit; that coverage check is essential.
-    std::vector<native::Bytes> incomplete = archived;
-    incomplete.pop_back();
-    require(!hydraulic::previewVerifiedHydraulicActionBoundary(
-                parent, committed, incomplete, 0, &error) &&
-            error.contains(QStringLiteral("does not cover")),
-            "HIST-03c2b accepted incomplete archived action coverage");
-    NetworkHydraulicDistribution unjournaled = committed;
-    unjournaled.title_line_3 = QStringLiteral("Unjournaled native change");
-    require(!hydraulic::previewVerifiedHydraulicActionBoundary(
-                parent, unjournaled, archived, 1, &error) &&
-            error.contains(QStringLiteral("does not cover")),
-            "HIST-03c2b accepted unjournaled root metadata");
-
-    NetworkHydraulicDistribution outOfOrder = committed;
-    std::swap(outOfOrder.nodes_junctions[0], outOfOrder.nodes_junctions[1]);
-    require(!hydraulic::previewVerifiedHydraulicActionBoundary(
-                parent, outOfOrder, archived, 2, &error) &&
-            error.contains(QStringLiteral("does not cover")),
-            "HIST-03c2b guessed a different historical membership order");
-    std::vector<native::Bytes> corrupted = archived;
-    corrupted[2].back() ^= 0xff;
-    require(!hydraulic::previewVerifiedHydraulicActionBoundary(
-                parent, committed, corrupted, 0, &error) &&
-            error.contains(QStringLiteral("Invalid archived MODEL")),
-            "HIST-03c2b accepted a corrupt historical action frame");
-    std::vector<native::Bytes> duplicated = archived;
-    duplicated.push_back(archived.front());
-    require(!hydraulic::previewVerifiedHydraulicActionBoundary(
-                parent, committed, duplicated, 0, &error) && !error.isEmpty(),
-            "HIST-03c2b accepted a duplicate historical action");
-    aowis::model::ModelEditTransaction collision;
-    collision.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
-    collision.operation = QStringLiteral("hydraulic.history.verified.uuid-collision");
-    // The UUID already belongs to a junction in the parent network. A
-    // distinct generic curve carrying that UUID must be rejected regardless
-    // of the entity's unrelated field values.
-    HydraulicCurveGeneric duplicate = item<HydraulicCurveGeneric>(19);
-    collision.edits.append(aowis::model::ModelEntityEdit{
-        duplicate.uuid, QStringLiteral("HydraulicCurveGeneric"), std::nullopt,
-        native::ModelCodec<HydraulicCurveGeneric>::encode(duplicate)});
-    const QByteArray collisionBytes = aowis::model::ModelEditTransactionCodec::encode(collision);
-    require(!collisionBytes.isEmpty() &&
-            !hydraulic::previewVerifiedHydraulicActionBoundary(
-                parent, parent, {hydraulic::bytesFromQByteArray(collisionBytes)}, 0, &error) &&
-            error.contains(QStringLiteral("collides")),
-            "HIST-03c2b accepted a member UUID already owned by another collection");
-
-    // Use real immutable native revisions as the before/after witnesses.
-    // This also proves collection ordering survives manifest chunk materialization.
-    const std::filesystem::path folder = tempDir();
-    try {
-        const native::ProjectId project = native::ProjectId::generate();
-        native::Repository repository(folder);
-        const native::RevisionId unborn =
-            repository.createRootBranch(project, "history-verified", commitMetadata());
-        const native::RevisionId parentRevision = hydraulic::saveHydraulicDistributionNetwork(
-            repository, project, "history-verified", parent, unborn, commitMetadata());
-        const native::RevisionId childRevision = hydraulic::saveHydraulicDistributionNetwork(
-            repository, project, "history-verified", committed, parentRevision, commitMetadata());
-        const std::optional<NetworkHydraulicDistribution> storedParent =
-            hydraulic::loadHydraulicDistributionNetworkAtRevision(repository, project, parentRevision, parent.uuid);
-        const std::optional<NetworkHydraulicDistribution> storedChild =
-            hydraulic::loadHydraulicDistributionNetworkAtRevision(repository, project, childRevision, parent.uuid);
-        require(storedParent.has_value() && storedChild.has_value(),
-                "HIST-03c2b could not load immutable checkpoint witnesses");
-        const std::optional<NetworkHydraulicDistribution> fromRevisions =
-            hydraulic::previewVerifiedHydraulicActionBoundary(
-                *storedParent, *storedChild, archived, 3, &error);
-        require(fromRevisions.has_value() && error.isEmpty() &&
-                native::ModelCodec<NetworkHydraulicDistribution>::encode(*fromRevisions) ==
-                native::ModelCodec<NetworkHydraulicDistribution>::encode(states[3]),
-                "HIST-03c2b native revision witnesses disagree with archived action ordering");
-        (void)repository.verifyRepository();
-    } catch (...) {
-        std::error_code ignored;
-        std::filesystem::remove_all(folder, ignored);
-        throw;
-    }
-    std::error_code ignored;
-    std::filesystem::remove_all(folder, ignored);
-
-    // A complete archive may span several HTTP pages. Verification must
-    // only succeed with every frame, never with the first 100 alone.
-    NetworkHydraulicDistribution longEnd = parent;
-    std::vector<native::Bytes> longFrames;
-    for (int index = 0; index < 126; ++index) {
-        aowis::model::ModelEditTransaction action;
-        action.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
-        action.operation = QStringLiteral("hydraulic.history.verified.root-step");
-        const QByteArray before = aowis::model::hydraulicDistributionRootImage(longEnd);
-        longEnd.title_line_2 = QStringLiteral("Action %1").arg(index);
-        action.edits.append(aowis::model::ModelEntityEdit{
-            longEnd.uuid, QString::fromLatin1(aowis::model::hydraulicDistributionRootEditType),
-            before, aowis::model::hydraulicDistributionRootImage(longEnd)});
-        const QByteArray bytes = aowis::model::ModelEditTransactionCodec::encode(action);
-        require(!bytes.isEmpty(), "HIST-03c2b failed to encode paged action archive");
-        longFrames.push_back(hydraulic::bytesFromQByteArray(bytes));
-    }
-    require(hydraulic::previewVerifiedHydraulicActionBoundary(
-                parent, longEnd, longFrames, 126, &error).has_value() && error.isEmpty(),
-            "HIST-03c2b failed archive spanning multiple read pages");
-    std::vector<native::Bytes> firstPage(longFrames.begin(), longFrames.begin() + 100);
-    require(!hydraulic::previewVerifiedHydraulicActionBoundary(
-                parent, longEnd, firstPage, 100, &error) &&
-            error.contains(QStringLiteral("does not cover")),
-            "HIST-03c2b accepted a truncated first archive page");
-
-    const NetworkHydraulicDistribution untouchedParent = parent;
-    const NetworkHydraulicDistribution untouchedChild = committed;
-    require(native::ModelCodec<NetworkHydraulicDistribution>::encode(parent) ==
-                native::ModelCodec<NetworkHydraulicDistribution>::encode(untouchedParent) &&
-            native::ModelCodec<NetworkHydraulicDistribution>::encode(committed) ==
-                native::ModelCodec<NetworkHydraulicDistribution>::encode(untouchedChild),
-            "HIST-03c2b mutated immutable caller checkpoints");
-}
-
 } // namespace
 
 // HIST-03c3b: the indexed native witness alone is not enough. Exercise a
@@ -2434,13 +2078,24 @@ void exerciseVerifiedRevisionHydraulicCoverage() {
         const native::RevisionId revision =
             *native::RevisionId::parse(committed.reservedRevisionId);
         QString error;
-        const std::optional<hydraulic::VerifiedHydraulicRevisionCoverage> verified =
-            hydraulic::verifyHydraulicRevisionActionCoverage(
-                *service, projectId, "main", revision, &error);
-        require(verified && error.isEmpty() && verified->actionCount == 1 &&
-                verified->changedNetworkIds.size() == 2 &&
-                verified->changedNetworkIds[0] == a.uuid &&
-                verified->changedNetworkIds[1] == b.uuid,
+        const std::optional<native::annotations::VerifiedIndexedAnnotationActionBoundary> verified =
+            native::annotations::verifyIndexedCombinedActionBoundary(
+                *service, projectId, "main", revision, 1, &error);
+        // The tip boundary must carry the edits of BOTH networks: the new
+        // member of A, the changed member of B and B's root metadata.
+        const std::function<bool(const native::annotations::VerifiedIndexedAnnotationActionBoundary&)>
+            coversBothNetworks = [&added, &changedB, &b](
+                const native::annotations::VerifiedIndexedAnnotationActionBoundary& proof) {
+                bool member = false, other = false, root = false;
+                for (const native::ModelChange& change : proof.boundary.changesFromParent) {
+                    member = member || change.key == hydraulic::keyFromUuid(added.uuid);
+                    other = other || change.key == hydraulic::keyFromUuid(changedB.uuid);
+                    root = root || change.key == hydraulic::keyFromUuid(b.uuid);
+                }
+                return member && other && root;
+            };
+        require(verified && error.isEmpty() && verified->boundary.actionCount == 1 &&
+                coversBothNetworks(*verified),
                 "HIST-03c3b failed to attribute complete two-network native delta");
         const native::RevisionNativeActionWitness witness =
             service->verifiedRevisionNativeActionWitness(projectId, "main", revision);
@@ -2453,27 +2108,23 @@ void exerciseVerifiedRevisionHydraulicCoverage() {
         // retaining canonical collection order and root metadata.
         const std::string navigationDraft = service->createWorkingCopy(
             projectId, "main", revision, session).id;
-        const std::optional<hydraulic::VerifiedHydraulicActionNavigationPlan> beforeAction =
-            hydraulic::planVerifiedHydraulicActionNavigation(
-                *service, navigationDraft, revision, 0, 0, &error);
-        const std::optional<hydraulic::VerifiedHydraulicActionNavigationPlan> afterAction =
-            hydraulic::planVerifiedHydraulicActionNavigation(
-                *service, navigationDraft, revision, 1, 0, &error);
+        const std::optional<std::vector<native::ModelChange>> beforeAction =
+            native::annotations::planVerifiedArchivedAction(
+                *service, navigationDraft, revision, revision, 0, 0, &error);
+        const std::optional<std::vector<native::ModelChange>> afterAction =
+            native::annotations::planVerifiedArchivedAction(
+                *service, navigationDraft, revision, revision, 1, 0, &error);
         require(beforeAction && afterAction && error.isEmpty() &&
-                beforeAction->expectedHead == revision &&
-                afterAction->expectedHead == revision &&
-                beforeAction->actionPosition == 0 && afterAction->actionPosition == 1 &&
-                beforeAction->commitOperationId == witness.commitOperationId &&
-                !beforeAction->candidateChanges.empty() &&
-                afterAction->candidateChanges.empty(),
+                !(*beforeAction).empty() &&
+                (*afterAction).empty(),
                 "HIST-03c4a overlays must be relative to HEAD, without no-op records");
         const std::function<NetworkHydraulicDistribution(
-            const hydraulic::VerifiedHydraulicActionNavigationPlan&, const QUuid&)>
+            const std::vector<native::ModelChange>&, const QUuid&)>
             plannedNetwork = [&service, &projectId, &revision](
-                const hydraulic::VerifiedHydraulicActionNavigationPlan& plan,
+                const std::vector<native::ModelChange>& plan,
                 const QUuid& id) -> NetworkHydraulicDistribution {
                 std::map<native::Key, std::optional<native::ModelRecord>> overlay;
-                for (const native::ModelChange& change : plan.candidateChanges)
+                for (const native::ModelChange& change : plan)
                     require(overlay.emplace(change.key, change.record).second,
                             "duplicate key in HIST-03c4a candidate overlay");
                 const std::function<std::optional<native::ModelRecord>(const native::Key&)> read =
@@ -2510,11 +2161,11 @@ void exerciseVerifiedRevisionHydraulicCoverage() {
                 !service->workingCopy(navigationDraft).dirty &&
                 !service->workingCopy(navigationDraft).historyCheckpointRevisionId,
                 "HIST-03c4a read-only planning modified the actual draft");
-        require(!hydraulic::planVerifiedHydraulicActionNavigation(
-                    *service, navigationDraft, revision, 2, 0, &error) &&
+        require(!native::annotations::planVerifiedArchivedAction(
+                    *service, navigationDraft, revision, revision, 2, 0, &error) &&
                 !error.isEmpty() &&
-                !hydraulic::planVerifiedHydraulicActionNavigation(
-                    *service, navigationDraft, revision, 0, 1, &error) &&
+                !native::annotations::planVerifiedArchivedAction(
+                    *service, navigationDraft, revision, revision, 0, 1, &error) &&
                 !error.isEmpty(),
                 "HIST-03c4a accepted invalid action positions or stale draft generations");
 
@@ -2525,7 +2176,7 @@ void exerciseVerifiedRevisionHydraulicCoverage() {
         const std::string navOperation0 = native::UuidV7::generate().toString();
         const std::string navOperation1 = native::UuidV7::generate().toString();
         const std::optional<native::WorkingCopyInfo> selectedBefore =
-            hydraulic::navigateVerifiedHydraulicAction(*service, navOperation0,
+            native::annotations::navigateVerifiedCombinedAction(*service, navOperation0,
                 navigationDraft, session, navLease, revision, revision, 0, 0, &error);
         require(selectedBefore && error.isEmpty() && selectedBefore->generation == 1 &&
                 selectedBefore->historyActionPosition == 0 &&
@@ -2535,15 +2186,15 @@ void exerciseVerifiedRevisionHydraulicCoverage() {
                 selectedBefore->journalCount == 0,
                 "HIST-03c4b failed atomic action boundary zero publication");
         const std::optional<native::WorkingCopyInfo> retryBefore =
-            hydraulic::navigateVerifiedHydraulicAction(*service, navOperation0,
+            native::annotations::navigateVerifiedCombinedAction(*service, navOperation0,
                 navigationDraft, session, navLease, revision, revision, 0, 0, &error);
         require(retryBefore && retryBefore->generation == 1,
                 "HIST-03c4b retried action navigation advanced generation");
-        require(!hydraulic::navigateVerifiedHydraulicAction(*service, navOperation0,
+        require(!native::annotations::navigateVerifiedCombinedAction(*service, navOperation0,
                     navigationDraft, session, navLease, revision, revision, 1, 0, &error) &&
                 !error.isEmpty(), "HIST-03c4b reused operation ID at a different boundary");
         const std::optional<native::WorkingCopyInfo> selectedAfter =
-            hydraulic::navigateVerifiedHydraulicAction(*service, navOperation1,
+            native::annotations::navigateVerifiedCombinedAction(*service, navOperation1,
                 navigationDraft, session, navLease, revision, revision, 1, 1, &error);
         const std::string forwardError =
             "HIST-03c4b could not publish forward navigation: " + error.toStdString();
@@ -2553,12 +2204,12 @@ void exerciseVerifiedRevisionHydraulicCoverage() {
                 selectedAfter->historyArchiveCommitOperationId == witness.commitOperationId &&
                 selectedAfter->candidateChanges.empty() && !selectedAfter->dirty,
                 "HIST-03c4b failed atomic action forward navigation");
-        require(!hydraulic::navigateVerifiedHydraulicAction(*service,
+        require(!native::annotations::navigateVerifiedCombinedAction(*service,
                     native::UuidV7::generate().toString(), navigationDraft,
                     session, navLease, revision, revision, 0, 1, &error) &&
                 !error.isEmpty(), "HIST-03c4b accepted stale generation after navigation");
         const std::optional<native::WorkingCopyInfo> selectedAgain =
-            hydraulic::navigateVerifiedHydraulicAction(*service,
+            native::annotations::navigateVerifiedCombinedAction(*service,
                 native::UuidV7::generate().toString(), navigationDraft,
                 session, navLease, revision, revision, 0, 2, &error);
         require(selectedAgain && selectedAgain->generation == 3 &&
@@ -2601,12 +2252,12 @@ void exerciseVerifiedRevisionHydraulicCoverage() {
             *native::RevisionId::parse(unrelatedCommit.reservedRevisionId);
         // Planning cannot race a newly published branch HEAD, even if the
         // selected older action archive itself remains immutable and readable.
-        require(!hydraulic::planVerifiedHydraulicActionNavigation(
-                    *service, navigationDraft, revision, 0, 0, &error) &&
+        require(!native::annotations::planVerifiedArchivedAction(
+                    *service, navigationDraft, revision, revision, 0, 0, &error) &&
                 error.contains(QStringLiteral("HEAD")),
                 "HIST-03c4a did not reject a draft after its branch HEAD advanced");
-        require(!hydraulic::verifyHydraulicRevisionActionCoverage(
-                    *service, projectId, "main", later, &error) &&
+        require(!native::annotations::verifyIndexedCombinedActionBoundary(
+                    *service, projectId, "main", later, 1, &error) &&
                 error.contains(QStringLiteral("unjournaled")),
                 "HIST-03c3b accepted a native record with no MODEL action");
         // Also reject a *valid hydraulic* native record omitted from the
@@ -2638,13 +2289,13 @@ void exerciseVerifiedRevisionHydraulicCoverage() {
             native::annotations::validateAnnotationSnapshot);
         require(missingCommit.state == native::LocalCommitState::Succeeded,
                 "HIST-03c3b missing hydraulic action fixture Commit failed");
-        require(!hydraulic::verifyHydraulicRevisionActionCoverage(
+        require(!native::annotations::verifyIndexedCombinedActionBoundary(
                     *service, projectId, "main",
-                    *native::RevisionId::parse(missingCommit.reservedRevisionId), &error) &&
-                error.contains(QStringLiteral("unjournaled hydraulic distribution network")),
+                    *native::RevisionId::parse(missingCommit.reservedRevisionId), 1, &error) &&
+                error.contains(QStringLiteral("unjournaled")),
                 "HIST-03c3b accepted a changed hydraulic distribution network with no MODEL event");
-        require(!hydraulic::planVerifiedHydraulicActionNavigation(
-                    *service, missingDraft,
+        require(!native::annotations::planVerifiedArchivedAction(
+                    *service, missingDraft, later,
                     *native::RevisionId::parse(missingCommit.reservedRevisionId),
                     0, 2, &error) && !error.isEmpty(),
                 "HIST-03c4a built a candidate from an incomplete MODEL archive");
@@ -2659,11 +2310,11 @@ void exerciseVerifiedRevisionHydraulicCoverage() {
                     persistentCursor.historyCheckpointRevisionId == revision.toString() &&
                     persistentCursor.historyArchiveCommitOperationId == witness.commitOperationId,
                     "HIST-03c4b action cursor was not durable across DVMDB restart");
-            const std::optional<hydraulic::VerifiedHydraulicRevisionCoverage> recovered =
-                hydraulic::verifyHydraulicRevisionActionCoverage(
-                    reopened, projectId, "main", revision, &error);
-            require(recovered && recovered->actionCount == 1 &&
-                    recovered->changedNetworkIds.size() == 2,
+            const std::optional<native::annotations::VerifiedIndexedAnnotationActionBoundary> recovered =
+                native::annotations::verifyIndexedCombinedActionBoundary(
+                    reopened, projectId, "main", revision, 1, &error);
+            require(recovered && recovered->boundary.actionCount == 1 &&
+                    coversBothNetworks(*recovered),
                     "HIST-03c3b archive/native attribution was lost after restart");
         }
     } catch (...) {
@@ -2796,34 +2447,34 @@ void exerciseVerifiedActiveDraftActionNavigation() {
         compareNetworks(stepThree, readDraft());
 
         QString error;
-        const std::optional<hydraulic::VerifiedHydraulicDraftActionNavigationPlan> cleanPlan =
-            hydraulic::planVerifiedHydraulicDraftActionNavigation(
-                *service, draftId, 0, 3, &error);
-        const std::optional<hydraulic::VerifiedHydraulicDraftActionNavigationPlan> middlePlan =
-            hydraulic::planVerifiedHydraulicDraftActionNavigation(
-                *service, draftId, 2, 3, &error);
-        require(cleanPlan && cleanPlan->candidateChanges.empty() &&
-                middlePlan && !middlePlan->candidateChanges.empty() &&
+        const std::optional<std::vector<native::ModelChange>> cleanPlan =
+            native::annotations::planVerifiedActiveDraftAction(
+                *service, draftId, head, 0, 3, &error);
+        const std::optional<std::vector<native::ModelChange>> middlePlan =
+            native::annotations::planVerifiedActiveDraftAction(
+                *service, draftId, head, 2, 3, &error);
+        require(cleanPlan && (*cleanPlan).empty() &&
+                middlePlan && !(*middlePlan).empty() &&
                 service->workingCopy(draftId, true).journal.size() == 3,
                 "HDB-03b planning mutated the draft or failed to rebuild a clean base");
-        require(!hydraulic::planVerifiedHydraulicDraftActionNavigation(
-                    *service, draftId, 4, 3, &error) && !error.isEmpty(),
+        require(!native::annotations::planVerifiedActiveDraftAction(
+                    *service, draftId, head, 4, 3, &error) && !error.isEmpty(),
                 "HDB-03b accepted an out-of-range action position");
         const std::string firstMove = native::UuidV7::generate().toString();
         const std::optional<native::WorkingCopyInfo> toMiddle =
-            hydraulic::navigateVerifiedHydraulicDraftAction(
+            native::annotations::navigateVerifiedActiveDraftAction(
                 *service, firstMove, draftId, session, token, head, 2, 3, &error);
         require(toMiddle && toMiddle->generation == 4 &&
                 toMiddle->draftActionPosition == 2 && toMiddle->journalCount == 3,
                 "HDB-03b failed verified backward active-journal navigation");
         compareNetworks(stepTwo, readDraft());
         const std::optional<native::WorkingCopyInfo> retry =
-            hydraulic::navigateVerifiedHydraulicDraftAction(
+            native::annotations::navigateVerifiedActiveDraftAction(
                 *service, firstMove, draftId, session, token, head, 2, 3, &error);
         require(retry && retry->generation == 4,
                 "HDB-03b repeated operation changed the draft generation");
         const std::optional<native::WorkingCopyInfo> toBase =
-            hydraulic::navigateVerifiedHydraulicDraftAction(
+            native::annotations::navigateVerifiedActiveDraftAction(
                 *service, native::UuidV7::generate().toString(),
                 draftId, session, token, head, 0, 4, &error);
         require(toBase && toBase->generation == 5 && !toBase->dirty &&
@@ -2831,7 +2482,7 @@ void exerciseVerifiedActiveDraftActionNavigation() {
                 "HDB-03b did not restore the clean committed base");
         compareNetworks(base, readDraft());
         const std::optional<native::WorkingCopyInfo> forward =
-            hydraulic::navigateVerifiedHydraulicDraftAction(
+            native::annotations::navigateVerifiedActiveDraftAction(
                 *service, native::UuidV7::generate().toString(),
                 draftId, session, token, head, 3, 5, &error);
         require(forward && forward->generation == 6 &&
@@ -2864,8 +2515,8 @@ void exerciseVerifiedActiveDraftActionNavigation() {
                     {labelChange},
                     {hydraulic::bytesFromQByteArray(firstBytes)}).generation == 2,
                 "HDB-03b could not Save negative-control MODEL action");
-        require(!hydraulic::planVerifiedHydraulicDraftActionNavigation(
-                    *service, unjournaled, 0, 2, &error) && !error.isEmpty(),
+        require(!native::annotations::planVerifiedActiveDraftAction(
+                    *service, unjournaled, head, 0, 2, &error) && !error.isEmpty(),
                 "HDB-03b accepted an unjournaled foreign native draft change");
         service.reset();
         {
@@ -2875,10 +2526,10 @@ void exerciseVerifiedActiveDraftActionNavigation() {
                     recovered.journal.size() == 3 &&
                     reopened.optionalHead(projectId, "main") == head,
                     "HDB-03b lost verified active journal cursor after restart");
-            const std::optional<hydraulic::VerifiedHydraulicDraftActionNavigationPlan> again =
-                hydraulic::planVerifiedHydraulicDraftActionNavigation(
-                    reopened, draftId, 1, 6, &error);
-            require(again && !again->candidateChanges.empty(),
+            const std::optional<std::vector<native::ModelChange>> again =
+                native::annotations::planVerifiedActiveDraftAction(
+                    reopened, draftId, head, 1, 6, &error);
+            require(again && !(*again).empty(),
                     "HDB-03b cannot reconstruct saved journal after restart");
         }
     } catch (...) {
@@ -2890,6 +2541,84 @@ void exerciseVerifiedActiveDraftActionNavigation() {
     std::filesystem::remove_all(folder, ignored);
 }
 
+
+// History undoes an unborn journal by deleting what it appended and then
+// replays it forward: deleting the member just added must restore the
+// previous root and chunk records byte for byte, also when the addition
+// opened a new chunk, and a dropped chunk may be re-created in one batch.
+void exerciseMembershipUndoIsExact() {
+    using Records = std::map<native::Key, native::ModelRecord>;
+    const QUuid networkId = uuid(991000);
+    const native::ModelChange root =
+        hydraulic::emptyDraftHydraulicDistributionNetworkRoot(networkId, QStringLiteral("Undo"));
+    Records records{{root.key, *root.record}};
+    const std::function<std::optional<native::ModelRecord>(const native::Key&)> read =
+        [&records](const native::Key& key) -> std::optional<native::ModelRecord> {
+            const Records::const_iterator found = records.find(key);
+            return found == records.end() ? std::nullopt
+                                          : std::optional<native::ModelRecord>(found->second);
+        };
+    const std::function<void(const std::vector<HydraulicNodeJunction>&, bool)> edit =
+        [&](const std::vector<HydraulicNodeJunction>& junctions, bool insert) {
+            std::vector<native::ModelChange> changes;
+            std::vector<hydraulic::DraftMembershipIntent> intents;
+            for (const HydraulicNodeJunction& junction : junctions) {
+                native::ModelChange change = hydraulic::changeFor(junction);
+                if (!insert) change.record.reset();
+                changes.push_back(change);
+                intents.push_back(hydraulic::DraftMembershipIntent{
+                    hydraulic::keyFromUuid(networkId), hydraulic::keyFromUuid(junction.uuid),
+                    201, 9, insert});
+            }
+            hydraulic::materializeDraftMembership(read, intents, changes);
+            for (const native::ModelChange& change : changes) {
+                if (change.record) records[change.key] = *change.record;
+                else records.erase(change.key);
+            }
+        };
+    const std::function<bool(const Records&, const Records&)> same =
+        [](const Records& left, const Records& right) {
+            if (left.size() != right.size()) return false;
+            for (Records::const_iterator a = left.begin(), b = right.begin(); a != left.end(); ++a, ++b)
+                if (a->first != b->first || a->second.kind != b->second.kind ||
+                    a->second.payload != b->second.payload ||
+                    a->second.references != b->second.references) return false;
+            return true;
+        };
+    const Records empty = records;
+    const HydraulicNodeJunction first = item<HydraulicNodeJunction>(991001);
+    edit({first}, true);
+    edit({first}, false);
+    require(same(records, empty), "undoing the first member must restore the empty network exactly");
+    // Fill one chunk (256), then one more member opens a second chunk.
+    std::vector<HydraulicNodeJunction> batch;
+    for (int ordinal = 0; ordinal < 256; ++ordinal) {
+        batch.push_back(item<HydraulicNodeJunction>(991100 + ordinal));
+        if (batch.size() == 128) {
+            edit(batch, true);
+            batch.clear();
+        }
+    }
+    const Records full = records;
+    const HydraulicNodeJunction overflow = item<HydraulicNodeJunction>(991999);
+    edit({overflow}, true);
+    edit({overflow}, false);
+    require(same(records, full), "undoing a member that opened a new chunk must restore the network exactly");
+    // Drop and re-create the same chunk in one batch: a valid single delta.
+    edit({overflow}, true);
+    std::vector<native::ModelChange> changes{native::ModelChange{
+        hydraulic::keyFromUuid(overflow.uuid), std::nullopt}};
+    const HydraulicNodeJunction again = item<HydraulicNodeJunction>(991998);
+    changes.push_back(hydraulic::changeFor(again));
+    hydraulic::materializeDraftMembership(read,
+        {hydraulic::DraftMembershipIntent{hydraulic::keyFromUuid(networkId),
+             hydraulic::keyFromUuid(overflow.uuid), 201, 9, false},
+         hydraulic::DraftMembershipIntent{hydraulic::keyFromUuid(networkId),
+             hydraulic::keyFromUuid(again.uuid), 201, 9, true}}, changes);
+    std::set<native::Key> keys;
+    for (const native::ModelChange& change : changes)
+        require(keys.insert(change.key).second, "a membership batch emitted two changes for one key");
+}
 
 // The first hydraulic distribution network is initialized in an unborn private working
 // copy without inventing a Commit. Its subsequent MODEL actions must still
@@ -2909,8 +2638,20 @@ void exerciseUnbornFirstTankHistory() {
         const QUuid networkId = uuid(990301);
         const native::ModelChange root = hydraulic::emptyDraftHydraulicDistributionNetworkRoot(
             networkId, QStringLiteral("New network"));
+        // Initialize like the server does: the network root together with its
+        // (empty) Distribution annotation layer. Every distribution network
+        // must own exactly one layer, and History checks the unborn seed
+        // with the complete candidate validator.
+        std::vector<native::ModelChange> initialization{root};
+        MapAnnotationLayer initialLayer;
+        initialLayer.uuid = native::annotations::distributionLayerUuid(networkId);
+        initialLayer.domain = MapAnnotationDomain::Distribution;
+        initialLayer.owner_network_uuid = networkId;
+        for (const native::ModelChange& change :
+             native::annotations::fullDraftAnnotationLayerChanges(initialLayer, {}))
+            initialization.push_back(change);
         require(service->saveWorkingCopyChanges(draftId, session, token, 0,
-                    {root}).generation == 1,
+                    initialization).generation == 1,
                 "Unborn History could not initialize its first network");
         const HydraulicNodeTank tank = item<HydraulicNodeTank>(990302);
         aowis::model::ModelEditTransaction action;
@@ -2973,13 +2714,13 @@ void exerciseUnbornFirstTankHistory() {
         require(readDraft().nodes_tanks.size() == 1,
                 "Unborn History tank was not persisted");
         QString error;
-        const std::optional<hydraulic::VerifiedHydraulicDraftActionNavigationPlan> plan =
-            hydraulic::planVerifiedHydraulicDraftActionNavigation(
-                *service, draftId, 0, 2, &error);
-        require(plan && !plan->candidateChanges.empty() && !plan->expectedHead,
+        const std::optional<std::vector<native::ModelChange>> plan =
+            native::annotations::planVerifiedActiveDraftAction(
+                *service, draftId, std::nullopt, 0, 2, &error);
+        require(plan && !(*plan).empty(),
                 "Unborn History could not verify the first Undo");
         const std::optional<native::WorkingCopyInfo> undo =
-            hydraulic::navigateVerifiedHydraulicDraftAction(
+            native::annotations::navigateVerifiedActiveDraftAction(
                 *service, native::UuidV7::generate().toString(), draftId,
                 session, token, std::nullopt, 0, 2, &error);
         require(undo && undo->generation == 3 && undo->draftActionPosition == 0 &&
@@ -2988,7 +2729,7 @@ void exerciseUnbornFirstTankHistory() {
         require(readDraft().nodes_tanks.isEmpty(),
                 "Unborn History Undo did not remove the tank");
         const std::optional<native::WorkingCopyInfo> redo =
-            hydraulic::navigateVerifiedHydraulicDraftAction(
+            native::annotations::navigateVerifiedActiveDraftAction(
                 *service, native::UuidV7::generate().toString(), draftId,
                 session, token, std::nullopt, 1, 3, &error);
         require(redo && redo->generation == 4 && redo->draftActionPosition == 1,
@@ -3117,7 +2858,7 @@ void exerciseArchivedHistoryForkedHydraulicEdit() {
             forkDraft, session, 120).token;
         QString error;
         const std::optional<native::WorkingCopyInfo> selected =
-            hydraulic::navigateVerifiedHydraulicAction(*service,
+            native::annotations::navigateVerifiedCombinedAction(*service,
                 native::UuidV7::generate().toString(), forkDraft, session,
                 forkToken, *secondRevision, *firstRevision, 0, 0, &error);
         require(selected && selected->generation == 1 &&
@@ -3140,22 +2881,22 @@ void exerciseArchivedHistoryForkedHydraulicEdit() {
                 saved.historyForkActionPosition == 0 &&
                 service->optionalHead(projectId, "main") == secondRevision,
                 "Forked MODEL Save discarded origin or changed immutable HEAD");
-        const std::optional<hydraulic::VerifiedHydraulicDraftActionNavigationPlan> undoPlan =
-            hydraulic::planVerifiedHydraulicDraftActionNavigation(
-                *service, forkDraft, 0, 2, &error);
-        const std::optional<hydraulic::VerifiedHydraulicDraftActionNavigationPlan> redoPlan =
-            hydraulic::planVerifiedHydraulicDraftActionNavigation(
-                *service, forkDraft, 1, 2, &error);
+        const std::optional<std::vector<native::ModelChange>> undoPlan =
+            native::annotations::planVerifiedActiveDraftAction(
+                *service, forkDraft, *secondRevision, 0, 2, &error);
+        const std::optional<std::vector<native::ModelChange>> redoPlan =
+            native::annotations::planVerifiedActiveDraftAction(
+                *service, forkDraft, *secondRevision, 1, 2, &error);
         require(undoPlan && redoPlan,
                 ("Cannot replay new forked MODEL action: " + error.toStdString()).c_str());
         const std::optional<native::WorkingCopyInfo> undone =
-            hydraulic::navigateVerifiedHydraulicDraftAction(*service,
+            native::annotations::navigateVerifiedActiveDraftAction(*service,
                 native::UuidV7::generate().toString(), forkDraft, session, forkToken,
                 *secondRevision, 0, 2, &error);
         require(undone && undone->generation == 3 && undone->draftActionPosition == 0,
                 ("Cannot Undo newly forked MODEL action: " + error.toStdString()).c_str());
         const std::optional<native::WorkingCopyInfo> redone =
-            hydraulic::navigateVerifiedHydraulicDraftAction(*service,
+            native::annotations::navigateVerifiedActiveDraftAction(*service,
                 native::UuidV7::generate().toString(), forkDraft, session, forkToken,
                 *secondRevision, 1, 3, &error);
         require(redone && redone->generation == 4 && redone->draftActionPosition == 1,
@@ -3169,10 +2910,14 @@ void exerciseArchivedHistoryForkedHydraulicEdit() {
         const std::optional<native::RevisionId> forkRevision =
             native::RevisionId::parse(forkCommit.reservedRevisionId);
         require(forkRevision.has_value(), "Fork Commit lacks immutable revision");
-        const std::optional<hydraulic::VerifiedHydraulicRevisionCoverage> verified =
-            hydraulic::verifyHydraulicRevisionActionCoverage(
-                *service, projectId, "main", *forkRevision, &error);
-        require(verified && verified->actionCount == 1 && verified->tracks.size() == 1,
+        const std::optional<native::annotations::VerifiedIndexedAnnotationActionBoundary> verified =
+            native::annotations::verifyIndexedCombinedActionBoundary(
+                *service, projectId, "main", *forkRevision, 1, &error);
+        // The forked archive starts at the first Commit's action 0, i.e. at
+        // that Commit's parent, not at its own first parent (the second Commit).
+        require(verified && verified->boundary.actionCount == 1 &&
+                verified->originRevision && *verified->originRevision != *secondRevision &&
+                *verified->originRevision != *firstRevision,
                 ("Cannot replay forked Commit actions: " + error.toStdString()).c_str());
         const native::BranchActionHistoryPage history =
             service->branchActionHistory(projectId, "main", 10);
@@ -3189,10 +2934,10 @@ void exerciseArchivedHistoryForkedHydraulicEdit() {
                 "New editing History modified the abandoned immutable Commit");
         service.reset();
         native::ProjectService recovered(folder);
-        const std::optional<hydraulic::VerifiedHydraulicRevisionCoverage> afterRestart =
-            hydraulic::verifyHydraulicRevisionActionCoverage(
-                recovered, projectId, "main", *forkRevision, &error);
-        require(afterRestart && afterRestart->actionCount == 1,
+        const std::optional<native::annotations::VerifiedIndexedAnnotationActionBoundary> afterRestart =
+            native::annotations::verifyIndexedCombinedActionBoundary(
+                recovered, projectId, "main", *forkRevision, 1, &error);
+        require(afterRestart && afterRestart->boundary.actionCount == 1,
                 "Forked MODEL archive cannot be verified after DVMDB restart");
     } catch (...) {
         std::error_code ignored;
@@ -3206,10 +2951,9 @@ void exerciseArchivedHistoryForkedHydraulicEdit() {
 int main(int argc, char** argv) {
     QCoreApplication application(argc, argv);
     try {
-        exerciseHistoricalScalarActionPreview();
-        exerciseVerifiedHydraulicActionBoundary();
         exerciseVerifiedRevisionHydraulicCoverage();
         exerciseVerifiedActiveDraftActionNavigation();
+        exerciseMembershipUndoIsExact();
         exerciseUnbornFirstTankHistory();
         exerciseArchivedHistoryForkedHydraulicEdit();
         exerciseAtomicRootMetadataEdit();

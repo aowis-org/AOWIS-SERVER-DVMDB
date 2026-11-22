@@ -611,11 +611,11 @@ static std::optional<VerifiedAnnotationActionBoundary> replayActionBoundary(
         const std::vector<ModelChange> reproduced =
             (persistedBoundary ? persisted : current).changes();
         require(reproduced.size() == expected.size(),
-                "annotation MODEL archive does not cover the committed native snapshot");
+                "History MODEL archive does not cover the committed native snapshot (unjournaled native change)");
         for (std::size_t index = 0; index < expected.size(); ++index)
             require(reproduced[index].key == expected[index].key &&
                     sameRecord(reproduced[index].record, expected[index].record),
-                    "annotation MODEL archive differs from committed native records");
+                    "History MODEL archive differs from the committed native records (unjournaled native change)");
         const std::vector<ModelChange> selectedChanges = selected.changes();
         const std::size_t provenPosition = persistedBoundary ? *persistedBoundary : actions.size();
         if (actionPosition != 0 && actionPosition != provenPosition) {
@@ -707,6 +707,11 @@ static std::optional<VerifiedIndexedAnnotationActionBoundary> verifyIndexedActio
         ProjectService& service, std::string_view projectId, std::string_view branch,
         const RevisionId& revision, std::size_t actionPosition, bool combined, QString* error,
         std::size_t forkDepth = 0) {
+    // A fork's source is an older Commit whose Redo suffix was abandoned by
+    // the fork, so it is no longer completely on the visible History path.
+    // It is still authenticated (witness, action chain, first-parent
+    // ancestry checked by the caller) and replayed completely.
+    const bool forkSource = forkDepth > 0;
     if (error) error->clear();
     const std::function<std::optional<VerifiedIndexedAnnotationActionBoundary>(const QString&)> fail =
         [error](const QString& reason) -> std::optional<VerifiedIndexedAnnotationActionBoundary> {
@@ -723,12 +728,14 @@ static std::optional<VerifiedIndexedAnnotationActionBoundary> verifyIndexedActio
         // First-parent reachability alone is insufficient after History forks:
         // a discarded Redo suffix may remain in the immutable Commit archive.
         // Only a fully visible action path may be presented as verified.
-        const RevisionActionPage active =
-            service.revisionActionPage(projectId, branch, revision, 0, 1);
-        if (!active.commitOperationId ||
-            *active.commitOperationId != witness.commitOperationId ||
-            active.total != witness.actions.size())
-            return fail(QStringLiteral("Archive is not completely on the active History path"));
+        if (!forkSource) {
+            const RevisionActionPage active =
+                service.revisionActionPage(projectId, branch, revision, 0, 1);
+            if (!active.commitOperationId ||
+                *active.commitOperationId != witness.commitOperationId ||
+                active.total != witness.actions.size())
+                return fail(QStringLiteral("Archive is not completely on the active History path"));
+        }
 
         ReplayInput input;
         input.roots = witness.hydraulicDistributionRootKeys;
@@ -817,6 +824,93 @@ std::optional<VerifiedIndexedAnnotationActionBoundary> verifyIndexedCombinedActi
                                        actionPosition, true, error);
 }
 
+struct ArchivedActionPlan final {
+    std::string commitOperationId;
+    std::vector<ModelChange> changes; // relative to HEAD
+};
+
+// Read-only plan of an archived action boundary as a HEAD-relative overlay.
+static std::optional<ArchivedActionPlan> planArchivedAction(
+        ProjectService& service, std::string_view draftId, const RevisionId& expectedHead,
+        const RevisionId& revision, std::size_t actionPosition,
+        std::uint64_t expectedGeneration, bool combined, QString* error) {
+    if (error) error->clear();
+    const std::function<std::optional<ArchivedActionPlan>(const QString&)> failPlan =
+        [error](const QString& message) -> std::optional<ArchivedActionPlan> {
+            if (error) *error = message;
+            return std::nullopt;
+        };
+    try {
+        const WorkingCopyInfo draft = service.workingCopy(draftId, false);
+        if (draft.generation != expectedGeneration ||
+            !draft.baseRevision || *draft.baseRevision != expectedHead)
+            return failPlan(QStringLiteral("History draft generation or HEAD is stale"));
+        const bool suspendedJournal = draft.journalCount > 0 &&
+            draft.draftActionPosition == 0;
+        if ((draft.journalCount != 0 && !suspendedJournal) ||
+            (draft.dirty && !draft.historyCheckpointRevisionId) ||
+            (suspendedJournal && !draft.historyCheckpointRevisionId &&
+             !draft.candidateChanges.empty()))
+            return failPlan(QStringLiteral("History requires a clean suspended draft or checkpoint"));
+        const std::optional<RevisionGraphHead> branch =
+            service.branchById(draft.projectId, draft.branchId);
+        if (!branch || branch->revision != draft.baseRevision)
+            return failPlan(QStringLiteral("History branch HEAD changed"));
+        QString replayError;
+        const std::optional<VerifiedIndexedAnnotationActionBoundary> selected =
+            verifyIndexedActionBoundary(service, draft.projectId,
+                branch->name, revision, actionPosition, combined, &replayError);
+        if (!selected)
+            return failPlan(QStringLiteral("History archive is not verified: ") + replayError);
+        const RevisionNativeActionWitness witness =
+            service.verifiedRevisionNativeActionWitness(draft.projectId, branch->name, revision);
+        if (!witness.parentRevision ||
+            witness.commitOperationId != selected->commitOperationId ||
+            witness.actions.size() != selected->boundary.actionCount)
+            return failPlan(QStringLiteral("History witness changed during planning"));
+        if (!selected->originRevision)
+            return failPlan(QStringLiteral("History archive has no verified starting state"));
+        const HistoryCheckpointPlan checkpoint = service.planHistoryCheckpoint(
+            draftId, *selected->originRevision, expectedGeneration);
+        if (checkpoint.expectedHead != draft.baseRevision ||
+            checkpoint.projectId != draft.projectId ||
+            checkpoint.branchId != draft.branchId)
+            return failPlan(QStringLiteral("History checkpoint became stale"));
+        // The checkpoint plan is the store's exact difference from HEAD to the
+        // archive's starting revision, built by the service (never by a
+        // client). HEAD + checkpoint is that revision; the verified origin
+        // changes (a fork's source boundary) and the boundary delta on top give
+        // exactly the replayed boundary state.
+        // Entries equal to HEAD are dropped, so returning to the archived tip
+        // produces a clean draft when the revision is the current HEAD.
+        std::set<Key> checkpointKeys;
+        for (const ModelChange& change : checkpoint.candidateChanges)
+            require(checkpointKeys.insert(change.key).second,
+                    "duplicate annotation checkpoint change key");
+        State candidate(pinnedView(service.pinModelRevision(draft.projectId, expectedHead)));
+        candidate.apply(checkpoint.candidateChanges);
+        candidate.apply(selected->originChanges);
+        candidate.apply(selected->boundary.changesFromParent);
+        const std::vector<ModelChange> changes = candidate.changes();
+        if (changes.size() > maximumHistoryChanges)
+            return failPlan(QStringLiteral("History candidate exceeds draft record limit"));
+        // A concurrent writer can invalidate planning, never make it
+        // executable. The native publisher checks these pins again under
+        // draft/repository locks, including the current lease and archive ID.
+        const WorkingCopyInfo rechecked = service.workingCopy(draftId, false);
+        const std::optional<RevisionGraphHead> currentBranch =
+            service.branchById(draft.projectId, draft.branchId);
+        if (rechecked.generation != expectedGeneration ||
+            rechecked.baseRevision != draft.baseRevision ||
+            !currentBranch || currentBranch->revision != draft.baseRevision)
+            return failPlan(QStringLiteral("History draft changed during planning"));
+        return ArchivedActionPlan{selected->commitOperationId, changes};
+    } catch (const std::exception& exception) {
+        rethrowIfNotVerificationFailure(); // A3: environment errors keep their status
+        return failPlan(QString::fromUtf8(exception.what()));
+    }
+}
+
 static std::optional<WorkingCopyInfo> navigateVerifiedAction(
         ProjectService& service, std::string_view operationId,
         std::string_view draftId, std::string_view sessionId,
@@ -839,75 +933,26 @@ static std::optional<WorkingCopyInfo> navigateVerifiedAction(
                 operationId, draftId, sessionId, fencingToken,
                 expectedGeneration, expectedHead, revision,
                 draft.historyArchiveCommitOperationId.value_or(""), actionPosition, {});
-        if (draft.generation != expectedGeneration ||
-            !draft.baseRevision || *draft.baseRevision != expectedHead)
-            return fail(QStringLiteral("Annotation History draft generation or HEAD is stale"));
-        const bool suspendedJournal = draft.journalCount > 0 &&
-            draft.draftActionPosition == 0;
-        if ((draft.journalCount != 0 && !suspendedJournal) ||
-            (draft.dirty && !draft.historyCheckpointRevisionId) ||
-            (suspendedJournal && !draft.historyCheckpointRevisionId &&
-             !draft.candidateChanges.empty()))
-            return fail(QStringLiteral("Annotation History requires a clean suspended draft or checkpoint"));
-        const std::optional<RevisionGraphHead> branch =
-            service.branchById(draft.projectId, draft.branchId);
-        if (!branch || branch->revision != draft.baseRevision)
-            return fail(QStringLiteral("Annotation History branch HEAD changed"));
-        QString replayError;
-        const std::optional<VerifiedIndexedAnnotationActionBoundary> selected =
-            verifyIndexedActionBoundary(service, draft.projectId,
-                branch->name, revision, actionPosition, combined, &replayError);
-        if (!selected)
-            return fail(QStringLiteral("Annotation History archive is not verified: ") + replayError);
-        const RevisionNativeActionWitness witness =
-            service.verifiedRevisionNativeActionWitness(draft.projectId, branch->name, revision);
-        if (!witness.parentRevision ||
-            witness.commitOperationId != selected->commitOperationId ||
-            witness.actions.size() != selected->boundary.actionCount)
-            return fail(QStringLiteral("Annotation History witness changed during planning"));
-        if (!selected->originRevision)
-            return fail(QStringLiteral("Annotation History archive has no verified starting state"));
-        const HistoryCheckpointPlan checkpoint = service.planHistoryCheckpoint(
-            draftId, *selected->originRevision, expectedGeneration);
-        if (checkpoint.expectedHead != draft.baseRevision ||
-            checkpoint.projectId != draft.projectId ||
-            checkpoint.branchId != draft.branchId)
-            return fail(QStringLiteral("Annotation History checkpoint became stale"));
-        // The checkpoint plan is the store's exact difference from HEAD to the
-        // archive's starting revision, built by the service (never by a
-        // client). HEAD + checkpoint is that revision; the verified origin
-        // changes (a fork's source boundary) and the boundary delta on top give
-        // exactly the replayed boundary state.
-        // Entries equal to HEAD are dropped, so returning to the archived tip
-        // produces a clean draft when the revision is the current HEAD.
-        std::set<Key> checkpointKeys;
-        for (const ModelChange& change : checkpoint.candidateChanges)
-            require(checkpointKeys.insert(change.key).second,
-                    "duplicate annotation checkpoint change key");
-        State candidate(pinnedView(service.pinModelRevision(draft.projectId, expectedHead)));
-        candidate.apply(checkpoint.candidateChanges);
-        candidate.apply(selected->originChanges);
-        candidate.apply(selected->boundary.changesFromParent);
-        const std::vector<ModelChange> changes = candidate.changes();
-        if (changes.size() > maximumHistoryChanges)
-            return fail(QStringLiteral("Annotation History candidate exceeds draft record limit"));
-        // A concurrent writer can invalidate planning, never make it
-        // executable. The native publisher checks these pins again under
-        // draft/repository locks, including the current lease and archive ID.
-        const WorkingCopyInfo rechecked = service.workingCopy(draftId, false);
-        const std::optional<RevisionGraphHead> currentBranch =
-            service.branchById(draft.projectId, draft.branchId);
-        if (rechecked.generation != expectedGeneration ||
-            rechecked.baseRevision != draft.baseRevision ||
-            !currentBranch || currentBranch->revision != draft.baseRevision)
-            return fail(QStringLiteral("Annotation History draft changed during planning"));
+        const std::optional<ArchivedActionPlan> plan = planArchivedAction(service, draftId,
+            expectedHead, revision, actionPosition, expectedGeneration, combined, error);
+        if (!plan) return std::nullopt;
         return service.publishVerifiedHistoryActionNavigation(
             operationId, draftId, sessionId, fencingToken, expectedGeneration,
-            expectedHead, revision, selected->commitOperationId, actionPosition, changes);
+            expectedHead, revision, plan->commitOperationId, actionPosition, plan->changes);
     } catch (const std::exception& exception) {
         rethrowIfNotVerificationFailure(); // A3: environment errors keep their status
         return fail(QString::fromUtf8(exception.what()));
     }
+}
+
+std::optional<std::vector<ModelChange>> planVerifiedArchivedAction(
+        ProjectService& service, std::string_view draftId, const RevisionId& expectedHead,
+        const RevisionId& revision, std::size_t actionPosition,
+        std::uint64_t expectedGeneration, QString* error) {
+    const std::optional<ArchivedActionPlan> plan = planArchivedAction(service, draftId,
+        expectedHead, revision, actionPosition, expectedGeneration, true, error);
+    if (!plan) return std::nullopt;
+    return plan->changes;
 }
 
 std::optional<WorkingCopyInfo> navigateVerifiedAnnotationAction(
@@ -1114,6 +1159,14 @@ static std::optional<std::vector<ModelChange>> planVerifiedActiveAnnotationDraft
         if (error) *error = QString::fromUtf8(exception.what());
         return std::nullopt;
     }
+}
+
+std::optional<std::vector<ModelChange>> planVerifiedActiveDraftAction(
+        ProjectService& service, std::string_view draftId,
+        std::optional<RevisionId> expectedHead, std::size_t actionPosition,
+        std::uint64_t expectedGeneration, QString* error) {
+    return planVerifiedActiveAnnotationDraftAction(service, draftId, expectedHead,
+               actionPosition, expectedGeneration, error);
 }
 
 bool canNavigateVerifiedActiveAnnotationDraftAction(

@@ -657,11 +657,11 @@ void testRootKeysAndRevisionChanges() {
                 const std::map<db::Key, db::ModelRecord>& to = states[range.second];
                 std::vector<db::ModelChange> reference;
                 std::set<db::Key> keys;
-                for (const auto& entry : from) keys.insert(entry.first);
-                for (const auto& entry : to) keys.insert(entry.first);
+                for (const std::pair<const db::Key, db::ModelRecord>& entry : from) keys.insert(entry.first);
+                for (const std::pair<const db::Key, db::ModelRecord>& entry : to) keys.insert(entry.first);
                 for (const db::Key& id : keys) {
-                    const auto before = from.find(id);
-                    const auto after = to.find(id);
+                    const std::map<db::Key, db::ModelRecord>::const_iterator before = from.find(id);
+                    const std::map<db::Key, db::ModelRecord>::const_iterator after = to.find(id);
                     if (after == to.end()) {
                         reference.push_back(erase(id));
                     } else if (before == from.end() || before->second.kind != after->second.kind ||

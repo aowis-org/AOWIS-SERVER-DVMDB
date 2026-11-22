@@ -14,11 +14,13 @@
 #include <QList>
 #include <QMap>
 #include <QString>
+#include <QUuid>
 #include <aowis/model/edit/model_edit_transaction.h>
 
 #include <optional>
 #include <string_view>
 #include <variant>
+#include <utility>
 #include <vector>
 
 namespace aowis::dvmdb::hydraulic {
@@ -67,6 +69,23 @@ bool checkDraftHydraulicNetworkDelta(const EngineeringCandidateView& before,
                                      const EngineeringCandidateView& after,
                                      const QUuid& networkId,
                                      const std::vector<ModelChange>& delta);
+// Building blocks for change-based History replies (no member is decoded):
+// - the network settings image (aowis::model::hydraulicDistributionRootImage)
+//   of a stored root record;
+// - the ordered member UUIDs of one collection, read from the root manifest
+//   and its membership chunks only;
+// - collection index of a member record kind, collection count and the
+//   MODEL type name of a collection (e.g. "HydraulicLinkPipe");
+// - network and collection of a membership chunk record.
+QByteArray hydraulicRootImageOfRecord(const ModelRecord& root);
+QList<QUuid> hydraulicCollectionMembers(
+    const std::function<std::optional<ModelRecord>(const Key&)>& read,
+    const QUuid& networkId, std::size_t collection);
+std::optional<std::size_t> hydraulicCollectionForKind(std::uint16_t kind);
+std::size_t hydraulicCollectionCount();
+QString hydraulicCollectionTypeName(std::size_t collection);
+std::optional<std::pair<QUuid, std::size_t>> hydraulicChunkCollection(const ModelRecord& chunk);
+
 // True when a network root record was created, deleted, or its network
 // settings (everything except membership chunk lists) changed.
 bool hydraulicRootSettingsChanged(const std::optional<ModelRecord>& before,
@@ -98,127 +117,9 @@ void materializeDraftMembership(
     std::vector<ModelChange>& changes);
 
 
-// One network's ORIGINAL action subsequence, indexed by its position in the
-// entire Commit archive. A mixed action has one global position even when it
-// touches multiple networks. This evidence is emitted only after complete
-// native revision/action coverage has been verified.
-struct VerifiedHydraulicDistributionNetworkActionTrack final {
-    NetworkHydraulicDistribution parent;
-    NetworkHydraulicDistribution committed;
-    std::vector<Bytes> frames;
-    std::vector<std::size_t> globalPositions;
-};
-
-// HIST-03c3b: prove that a *real indexed local Commit* is completely
-// accounted for by its archived MODEL actions, including native-owned
-// membership chunks/root manifests and edits across multiple networks.
-// The native witness supplies ALL roots in the parent and child snapshots;
-// every changed native record must belong to a network with matching MODEL
-// events. Initial network creation/deletion and foreign model kinds fail
-// closed until explicitly supported. Read-only; no history cursor mutation.
-struct VerifiedHydraulicRevisionCoverage final {
-    std::string revisionId;
-    std::string commitOperationId;
-    std::size_t actionCount = 0;
-    std::vector<QUuid> changedNetworkIds;
-    std::vector<VerifiedHydraulicDistributionNetworkActionTrack> tracks;
-};
-std::optional<VerifiedHydraulicRevisionCoverage> verifyHydraulicRevisionActionCoverage(
-    ProjectService& service, std::string_view projectId, std::string_view branch,
-    const RevisionId& revision, QString* error = nullptr);
-
-// HIST-03c4a: compose an exact historical action boundary into the active
-// branch HEAD's native-record space. The result is the COMPLETE replacement
-// candidate overlay, not an incremental Save. Authenticated MODEL replay
-// must cover the entire immutable revision and all affected hydraulic
-// networks; parent-snapshot membership is rebuilt in canonical order.
-// Read-only: no lease or cursor is changed. A future fenced/idempotent writer
-// must recheck expectedGeneration and expectedHead before publishing this
-// overlay and its logical history cursor together.
-struct VerifiedHydraulicActionNavigationPlan final {
-    std::string draftId;
-    std::string revisionId;
-    std::string commitOperationId;
-    std::size_t actionPosition = 0;
-    std::optional<RevisionId> expectedHead;
-    std::uint64_t expectedGeneration = 0;
-    std::vector<ModelChange> candidateChanges;
-};
-std::optional<VerifiedHydraulicActionNavigationPlan> planVerifiedHydraulicActionNavigation(
-    ProjectService& service, std::string_view draftId,
-    const RevisionId& revision, std::size_t actionPosition,
-    std::uint64_t expectedGeneration, QString* error = nullptr);
-
-// HIST-03c4b: MODEL-verified, fenced and atomic action-boundary publication.
-// Generates the plan from immutable archived frames, then rechecks lease,
-// generation and branch HEAD inside ProjectService before publishing. The
-// original archived events and immutable revisions are not modified.
-// Same-operation retries after a lost acknowledgement return the persisted
-// cursor without re-running the planner. This is not yet a general Undo/Redo
-// engine (active unsaved MODEL journals are refused).
-std::optional<WorkingCopyInfo> navigateVerifiedHydraulicAction(
-    ProjectService& service, std::string_view operationId,
-    std::string_view draftId, std::string_view sessionId,
-    std::string_view fencingToken, const RevisionId& expectedHead,
-    const RevisionId& revision, std::size_t actionPosition,
-    std::uint64_t expectedGeneration, QString* error = nullptr);
-
-// HDB-03b: verify an active draft's entire retained MODEL journal against
-// its persisted canonical network, then compute a COMPLETE, HEAD-relative
-// candidate for an action position. This first slice supports one existing
-// hydraulic distribution network per base snapshot; additional/ambiguous roots, unjournaled
-// native candidate changes and active checkpoint selection fail closed.
-// Read-only: the native cursor/overlay cannot change while planning.
-struct VerifiedHydraulicDraftActionNavigationPlan final {
-    std::string draftId;
-    std::optional<RevisionId> expectedHead;
-    std::uint64_t expectedGeneration = 0;
-    std::size_t actionPosition = 0;
-    std::vector<ModelChange> candidateChanges;
-};
-std::optional<VerifiedHydraulicDraftActionNavigationPlan> planVerifiedHydraulicDraftActionNavigation(
-    ProjectService& service, std::string_view draftId, std::size_t actionPosition,
-    std::uint64_t expectedGeneration, QString* error = nullptr);
-
-// Only a locally reconstructed and checked candidate is passed to the
-// fenced/idempotent native writer. An uncertain result is retried by the
-// ORIGINAL operation UUID before attempting another replay or publication.
-std::optional<WorkingCopyInfo> navigateVerifiedHydraulicDraftAction(
-    ProjectService& service, std::string_view operationId,
-    std::string_view draftId, std::string_view sessionId,
-    std::string_view fencingToken, std::optional<RevisionId> expectedHead,
-    std::size_t actionPosition, std::uint64_t expectedGeneration,
-    QString* error = nullptr);
-
-// HIST-03c2: read-only MODEL-aware reverse replay for scalar/member updates
-// and network-root metadata. The input frames must be ORIGINAL archived
-// forward events in newest-first order, and `committed` must be the exact
-// terminal state at that boundary. Every before-image is checked against the
-// reconstructed state. Unknown entity types, missing or stale images, and
-// membership creation/deletion are rejected without changing `committed`.
-//
-// Creation/deletion needs retained collection insertion order; the current
-// MODEL envelope does not record it. This preview must not be used as an
-// executable DVMDB navigation plan until archive coverage against immutable
-// revision snapshots and atomic cursor publication are implemented.
-std::optional<NetworkHydraulicDistribution> previewReverseHydraulicActions(
-    const NetworkHydraulicDistribution& committed, const std::vector<Bytes>& newestFirstFrames,
-    QString* error = nullptr);
-
-// HIST-03c2b: verify a *complete* forward archive for one hydraulic distribution network
-// against immutable before/after snapshots. Archived events are oldest-first,
-// and `boundary` counts accepted logical actions (0 = parent, size = child).
-// Structural edits obey the native draft membership contract: additions append
-// to the owning collection, removals preserve the order of surviving members.
-// Every before image, type and UUID is checked before applying an action;
-// complete canonical equality with `committed` is mandatory, so changes-only
-// Saves or an incompatible ordering scheme fail closed. This verifies one
-// network's content, not every record in a multi-network revision, and does
-// not publish the resulting state or a history cursor.
-std::optional<NetworkHydraulicDistribution> previewVerifiedHydraulicActionBoundary(
-    const NetworkHydraulicDistribution& parent, const NetworkHydraulicDistribution& committed,
-    const std::vector<Bytes>& oldestFirstFrames, std::size_t boundary,
-    QString* error = nullptr);
+// Hydraulic Undo/Redo is replayed on changes by the shared History engine
+// (map_annotation_action_replay.h), with the membership and root
+// materializers above; this module has no separate History replay.
 
 // Exactly the 17 top-level types persisted by saveHydraulicDistributionNetwork().
 // The alternative order follows the manifest's collection order.

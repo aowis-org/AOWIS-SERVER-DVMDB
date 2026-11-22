@@ -82,8 +82,8 @@ the **entire** draft overlay and saves a checkpoint cursor in draft metadata.
 Retrying the same request after a lost response does not apply it twice;
 a different operation or stale generation fails. The branch HEAD and
 immutable revision content never change. A subsequent normal Save or Commit
-clears the exact-checkpoint cursor. Native `hydraulic::navigateVerifiedHydraulicAction`
-can also select an **individual archived hydraulic action boundary**, once
+clears the exact-checkpoint cursor. Native `annotations::navigateVerifiedCombinedAction`
+can also select an **individual archived action boundary**, once
 complete original MODEL replay and native-record coverage have been verified.
 It publishes the entire replacement overlay and archived-action coordinate together,
 with lease/generation/HEAD checks and exact-operation retry. An active journal may cross into archived

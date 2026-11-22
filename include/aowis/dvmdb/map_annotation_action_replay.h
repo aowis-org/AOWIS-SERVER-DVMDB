@@ -138,6 +138,17 @@ std::optional<WorkingCopyInfo> navigateVerifiedCombinedAction(
 // Read-only eligibility proof for the exact saved action boundary. Used by
 // the History cursor on unborn branches so it never advertises an Undo that
 // cannot reconstruct its nonjournaled initialization seed.
+// Read-only planners: the HEAD-relative native overlay that the matching
+// navigate function would publish (multi-domain mode: annotation, hydraulic
+// or mixed journals). Nothing is changed.
+std::optional<std::vector<ModelChange>> planVerifiedActiveDraftAction(
+    ProjectService& service, std::string_view draftId,
+    std::optional<RevisionId> expectedHead, std::size_t actionPosition,
+    std::uint64_t expectedGeneration, QString* error = nullptr);
+std::optional<std::vector<ModelChange>> planVerifiedArchivedAction(
+    ProjectService& service, std::string_view draftId, const RevisionId& expectedHead,
+    const RevisionId& revision, std::size_t actionPosition,
+    std::uint64_t expectedGeneration, QString* error = nullptr);
 bool canNavigateVerifiedActiveAnnotationDraftAction(
     ProjectService& service, std::string_view draftId,
     std::optional<RevisionId> expectedHead, std::size_t actionPosition,

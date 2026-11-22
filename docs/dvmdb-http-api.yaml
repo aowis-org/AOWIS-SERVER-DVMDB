@@ -355,13 +355,15 @@ paths:
         network. Verified mixed hydraulic/annotation archives can be navigated
         through the combined replay verifier. Unsupported or ambiguous archives
         remain checkpoints. Multiple NetworkHydraulicDistribution roots remain supported in storage,
-        but multi-network active draft navigation and unborn base replay are
-        deferred. Eligible position-zero active journals can cross into the
+        and active draft navigation replays on changes across several
+        networks. Eligible position-zero active journals can cross into the
         archived HEAD and return without losing Redo. Immutable HEAD never moves.
         Retrying an identical operation UUIDv7 and original request is
         idempotent. When networkId is provided the first successful response
-        includes historyDelta (canonical source/destination SHA-256, changed
-        entity before/after images, and sparse membership moves) instead of
+        includes historyDelta version 2 (changed entity before/after images,
+        sparse membership moves, orderedTypes, and source/destination
+        SHA-256 over the network settings and the member order of the
+        orderedTypes collections; see docs/history-transport.md) instead of
         an entire NetworkHydraulicDistribution. The preceding native candidate is kept
         as an atomically pinned file reference with the operation receipt.
         An identical retry of the most recent operation UUIDv7 and source

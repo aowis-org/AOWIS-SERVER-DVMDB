@@ -39,11 +39,10 @@ acceptance work is in [History acceptance](history-roadmap.md).
 | Preview exact committed checkpoint | `planHistoryCheckpoint` computes a full overlay against the current committed HEAD; read-only |
 | Select committed checkpoint | `navigateHistoryCheckpoint` atomically replaces the private candidate and stores an exact checkpoint marker; refuses an active MODEL journal |
 | Preview action frames | `readHistoryReverseActionWindow` returns original frames newest-first, not executable inverse records |
-| Verify one hydraulic action sequence | `previewVerifiedHydraulicActionBoundary` replays ordered insert/delete/update/root operations and checks byte-equal committed network |
-| Verify an entire revision | `verifiedRevisionNativeActionWitness` plus `verifyHydraulicRevisionActionCoverage` account for every changed native record across affected networks |
-| Plan archived action boundary | `planVerifiedHydraulicActionNavigation` builds an exact, **HEAD-relative replacement** candidate without mutation |
-| Select archived action boundary | `navigateVerifiedHydraulicAction` atomically publishes verified replacement state and durable cursor metadata under lease, HEAD and generation fences, idempotent by navigation operation UUID |
-| Navigate an existing network's active draft actions | `planVerifiedHydraulicDraftActionNavigation` verifies all retained MODEL frames against the persisted selected network state; `navigateVerifiedHydraulicDraftAction` publishes the rebuilt HEAD-relative candidate and cursor through the fenced/idempotent native writer. **Limited to one unambiguous hydraulic distribution network**; an unborn network initialized/imported before the first MODEL event can replay journaled creations/updates, but ambiguous unborn deletions are refused |
+| Verify an entire revision | `verifiedRevisionNativeActionWitness` plus `annotations::verifyIndexedCombinedActionBoundary`: the archive, replayed on changes, must reproduce every changed native record across affected networks and layers |
+| Plan archived action boundary | `annotations::planVerifiedArchivedAction` builds an exact, **HEAD-relative** candidate without mutation |
+| Select archived action boundary | `annotations::navigateVerifiedCombinedAction` atomically publishes verified replacement state and durable cursor metadata under lease, HEAD and generation fences, idempotent by navigation operation UUID |
+| Navigate active draft actions | `annotations::planVerifiedActiveDraftAction` replays all retained MODEL frames on changes and proves the saved draft at its cursor; `annotations::navigateVerifiedActiveDraftAction` publishes the HEAD-relative candidate and cursor through the fenced/idempotent native writer. Several networks are supported; a member created and deleted inside the journal needs one unambiguous network. An unborn network initialized/imported before the first MODEL event can replay journaled creations/updates, but unborn deletions are refused |
 | HTTP action navigation | `GET /working-copies/{draftId}/history/cursor` distinguishes an active journal cursor from an archived Commit coordinate and supplies bounded, server-resolved `previousAction`/`nextAction` coordinates (including adjacent Commit archives); fenced `POST /working-copies/{draftId}/history/navigate` selects a verified active boundary, or an indexed archived boundary when `revisionId` is supplied. Both use a UUIDv7 operation identity and server-built overlays |
 | Suspended draft / archived handoff | At active position zero, `previousAction` can address the last archived Commit action; the published cursor preserves original draft frames for Redo. From the newest Commit's final action, `nextAction` returns to the retained draft at zero, then continues to its first action. A new MODEL Save from an archived selection atomically creates a forked active action path and invalidates its forward Redo suffix; immutable Commits are not removed |
 | Unborn first-draft creation/update Undo/Redo | **Implemented for one verified initialized network; Qt/HTTP acceptance pending; ambiguous member deletions fail closed** |
@@ -77,10 +76,12 @@ coherent, durable action timeline.
 
 For incremental HTTP navigation, the caller identifies the loaded
 `networkId`. DVMDB still constructs and verifies the complete native candidate
-internally, but the successful reply carries `historyDelta`: SHA-256 digests of
-the canonical source and destination `NetworkHydraulicDistribution`, only changed entity
-before/after images (including root metadata), and sparse membership moves.
-Unchanged entities and the complete network are not transmitted. The GUI must
+internally, but the successful reply carries `historyDelta` (version 2, see
+[History transport](history-transport.md)): only changed entity before/after
+images (including root metadata), sparse membership moves, and source and
+destination SHA-256 digests over the network settings and the member order
+of the collections whose membership changed. Unchanged entities and the
+complete network are neither transmitted nor read by the server. The GUI must
 check the source digest and every before-image, reconstruct a temporary copy,
 verify the destination digest, then publish it locally. DVMDB retains the
 preceding native candidate overlay file as an atomic
