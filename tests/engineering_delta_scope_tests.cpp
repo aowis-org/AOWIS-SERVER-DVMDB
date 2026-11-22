@@ -577,6 +577,128 @@ void testPinnedReader() {
     }
 }
 
+// Network roots per revision (History witness) are derived from ancestors
+// plus revision differences. Compare with a brute-force scan on a chain that
+// adds, removes, modifies and re-kinds roots, longer than the 64-step walk,
+// with warm and cold caches; and check modelChangesBetweenRevisions.
+void testRootKeysAndRevisionChanges() {
+    const std::filesystem::path root = temporaryRoot();
+    const std::function<std::optional<std::string>(const db::MergeCandidate&)> accept =
+        [](const db::MergeCandidate&) { return std::optional<std::string>(); };
+    try {
+        std::string projectId;
+        std::vector<db::RevisionId> revisions;
+        std::vector<std::vector<db::ModelChange>> steps;
+        std::vector<std::map<db::Key, db::ModelRecord>> states;
+        {
+            db::ProjectService service(root / "projects");
+            service.configureRepositoryRole(db::RepositoryRole::Private);
+            projectId = service.createUnbornProject("roots").id;
+            std::map<db::Key, db::ModelRecord> state;
+            std::optional<db::RevisionId> head;
+            std::mt19937 random(0x2007U);
+            const std::function<void(std::vector<db::ModelChange>)> commit =
+                [&](std::vector<db::ModelChange> changes) {
+                    head = service.commitModelAtExpectedHead(projectId, "main", changes,
+                        db::test::commitMetadata("roots"), head, accept);
+                    for (const db::ModelChange& change : changes) {
+                        if (change.record) state[change.key] = *change.record;
+                        else state.erase(change.key);
+                    }
+                    revisions.push_back(*head);
+                    steps.push_back(changes);
+                    states.push_back(state);
+                };
+            commit({put(key(1), record(100, {})), put(key(2), record(100, {})),
+                    put(key(3), record(5, {}))});
+            // Modify a root, delete a root, add a root, turn a generic record
+            // into a root and back, generic-only change.
+            commit({put(key(1), record(100, {}, 2)), erase(key(2)), put(key(4), record(100, {}))});
+            commit({put(key(3), record(100, {}))});
+            commit({put(key(3), record(5, {}, 3))});
+            commit({put(key(5), record(5, {}))});
+            // A chain longer than the ancestor walk.
+            for (std::uint32_t step = 0; step < 70; ++step) {
+                std::vector<db::ModelChange> changes{put(key(1000 + step), record(100, {}))};
+                if (step % 3 == 0) changes.push_back(put(key(5), record(5, {}, static_cast<std::uint8_t>(step))));
+                if (step % 7 == 6) changes.push_back(erase(key(1000 + step - 3)));
+                if (random() % 2U) changes.push_back(put(key(2000 + step), record(5, {})));
+                commit(changes);
+            }
+        }
+        const std::function<std::vector<db::Key>(std::size_t)> expected = [&states](std::size_t index) {
+            std::vector<db::Key> keys;
+            for (const std::pair<const db::Key, db::ModelRecord>& entry : states[index])
+                if (entry.second.kind == 100) keys.push_back(entry.first);
+            return keys;
+        };
+        {
+            // Cold cache, newest first: walks 64 steps, scans, then derives.
+            db::ProjectService service(root / "projects");
+            service.configureRepositoryRole(db::RepositoryRole::Private);
+            require(service.hydraulicDistributionRootKeysAtRevision(projectId, revisions.back()) ==
+                        expected(revisions.size() - 1), "roots of the tip (cold cache)");
+            for (std::size_t index = 0; index < revisions.size(); ++index)
+                require(service.hydraulicDistributionRootKeysAtRevision(projectId, revisions[index]) ==
+                            expected(index), "roots of a revision (warm cache)");
+        }
+        {
+            // Cold cache, oldest first: each step derives from its parent.
+            db::ProjectService service(root / "projects");
+            service.configureRepositoryRole(db::RepositoryRole::Private);
+            for (std::size_t index = 0; index < revisions.size(); ++index)
+                require(service.hydraulicDistributionRootKeysAtRevision(projectId, revisions[index]) ==
+                            expected(index), "roots of a revision (forward)");
+            // Exact changes between arbitrary revisions.
+            const std::vector<std::pair<std::size_t, std::size_t>> pairs{
+                {0, 1}, {1, 0}, {0, 4}, {2, 3}, {4, 60}, {60, 4}, {0, revisions.size() - 1}};
+            for (const std::pair<std::size_t, std::size_t>& range : pairs) {
+                const std::map<db::Key, db::ModelRecord>& from = states[range.first];
+                const std::map<db::Key, db::ModelRecord>& to = states[range.second];
+                std::vector<db::ModelChange> reference;
+                std::set<db::Key> keys;
+                for (const auto& entry : from) keys.insert(entry.first);
+                for (const auto& entry : to) keys.insert(entry.first);
+                for (const db::Key& id : keys) {
+                    const auto before = from.find(id);
+                    const auto after = to.find(id);
+                    if (after == to.end()) {
+                        reference.push_back(erase(id));
+                    } else if (before == from.end() || before->second.kind != after->second.kind ||
+                               before->second.payload != after->second.payload ||
+                               before->second.references != after->second.references) {
+                        reference.push_back(put(id, after->second));
+                    }
+                }
+                const std::vector<db::ModelChange> actual = service.modelChangesBetweenRevisions(
+                    projectId, revisions[range.first], revisions[range.second], 100000);
+                require(actual.size() == reference.size(), "revision change count");
+                for (std::size_t index = 0; index < actual.size(); ++index) {
+                    require(actual[index].key == reference[index].key &&
+                                actual[index].record.has_value() == reference[index].record.has_value(),
+                            "revision change key or presence");
+                    if (actual[index].record)
+                        require(actual[index].record->kind == reference[index].record->kind &&
+                                    actual[index].record->payload == reference[index].record->payload,
+                                "revision change record");
+                }
+            }
+            bool limited = false;
+            try {
+                (void)service.modelChangesBetweenRevisions(projectId, revisions.front(),
+                                                           revisions.back(), 3);
+            } catch (const db::StorageError& error) {
+                limited = error.kind() == db::StorageErrorKind::LimitExceeded;
+            }
+            require(limited, "too many revision changes must be LimitExceeded");
+        }
+        std::filesystem::remove_all(root);
+    } catch (...) {
+        std::filesystem::remove_all(root);
+        throw;
+    }
+}
+
 } // namespace
 
 int main() {
@@ -588,6 +710,7 @@ int main() {
         testViewErrorsPropagate();
         testRandomDifferential();
         testPinnedReader();
+        testRootKeysAndRevisionChanges();
         std::cout << "DVMDB engineering delta scope tests passed\n";
         return 0;
     } catch (const std::exception& error) {

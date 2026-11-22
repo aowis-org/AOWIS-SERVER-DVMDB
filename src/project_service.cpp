@@ -3191,22 +3191,16 @@ RevisionNativeActionWitness ProjectService::verifiedRevisionNativeActionWitness(
         // roots whose typed members nevertheless changed. This list is
         // authoritative for later MODEL-aware attribution; a caller cannot
         // simply omit an affected hydraulic distribution network.
-        constexpr std::uint16_t hydraulicDistributionRootKind = 100;
-        constexpr std::size_t maxHydraulicSnapshotKeys = 65536;
+        // Derived from cached ancestors plus revision differences: no
+        // whole-revision scan per History request and no snapshot size cap.
+        const std::shared_ptr<Project> entry = findProject(projectId);
         std::set<Key> rootKeys;
         const std::function<void(const RevisionId&)> gatherRoots =
-            [&repository, &project, &rootKeys](const RevisionId& snapshot) {
-                const std::vector<std::pair<Key, Bytes>> records =
-                    translated<std::vector<std::pair<Key, Bytes>>>([&]() {
-                        return repository.scanAtRevision(*project, snapshot);
-                    });
-                check(records.size() <= maxHydraulicSnapshotKeys,
-                      "history snapshot exceeds bounded root scan");
-                for (const std::pair<Key, Bytes>& record : records) {
-                    const ModelRecord decoded = decodeModelRecord(record.second);
-                    if (decoded.kind == hydraulicDistributionRootKind)
-                        rootKeys.insert(record.first);
-                }
+            [this, &entry, &repository, &project, &rootKeys](const RevisionId& snapshot) {
+                const std::vector<Key> keys = translated<std::vector<Key>>([&]() {
+                    return rootKeysAtRevision(*entry, repository, *project, snapshot);
+                });
+                rootKeys.insert(keys.begin(), keys.end());
             };
         if (commit.info.expectedHead) gatherRoots(*commit.info.expectedHead);
         gatherRoots(revision);
@@ -4206,6 +4200,136 @@ RevisionId ProjectService::commitModelAtExpectedHead(
         });
     });
     return committed;
+}
+
+std::vector<Key> ProjectService::rootKeysAtRevision(Project& entry, Repository& repository,
+        const ProjectId& project, const RevisionId& revision) {
+    constexpr std::uint16_t rootKind = 100;
+    constexpr std::size_t maxCachedRevisions = 1024;
+    constexpr std::size_t maxAncestorSteps = 64;
+    constexpr std::size_t maxStepChanges = 262144;
+    const std::function<std::optional<std::vector<Key>>(const RevisionId&)> cached =
+        [&entry](const RevisionId& id) -> std::optional<std::vector<Key>> {
+            std::lock_guard<std::mutex> guard(entry.rootKeysMutex);
+            const std::map<RevisionId, std::vector<Key>>::const_iterator found =
+                entry.rootKeys.find(id);
+            if (found == entry.rootKeys.end()) return std::nullopt;
+            return found->second;
+        };
+    const std::function<void(const RevisionId&, const std::vector<Key>&)> remember =
+        [&entry](const RevisionId& id, const std::vector<Key>& keys) {
+            std::lock_guard<std::mutex> guard(entry.rootKeysMutex);
+            // Revision UUIDs are time-ordered: drop the oldest first.
+            while (entry.rootKeys.size() >= maxCachedRevisions)
+                entry.rootKeys.erase(entry.rootKeys.begin());
+            entry.rootKeys[id] = keys;
+        };
+    const std::function<std::vector<Key>(const RevisionId&)> scan =
+        [&repository, &project](const RevisionId& id) {
+            std::vector<Key> keys;
+            repository.forEachAtRevision(project, id, [&keys](const Key& key, const Bytes& value) {
+                if (decodeModelRecord(value).kind == rootKind) keys.push_back(key);
+            });
+            std::sort(keys.begin(), keys.end());
+            return keys;
+        };
+    // Walk the first-parent chain to the nearest revision with known roots.
+    std::vector<std::pair<RevisionId, RevisionId>> steps; // (child, parent), newest first
+    RevisionId current = revision;
+    std::vector<Key> roots;
+    for (;;) {
+        if (const std::optional<std::vector<Key>> known = cached(current)) {
+            roots = *known;
+            break;
+        }
+        const std::optional<Bytes> bytes = repository.readRevision(project, current);
+        if (!bytes) throw ProjectError(ProjectErrorKind::NotFound, "revision not found");
+        const RevisionRecord record = decodeRevisionRecord(*bytes);
+        check(record.modelIndexed, "network roots require a model-indexed revision",
+              StorageErrorKind::InvalidInput);
+        bool parentIndexed = false;
+        if (!record.parents.empty() && steps.size() < maxAncestorSteps) {
+            const std::optional<Bytes> parentBytes =
+                repository.readRevision(project, record.parents.front().id);
+            parentIndexed = parentBytes && decodeRevisionRecord(*parentBytes).modelIndexed;
+        }
+        if (!parentIndexed) {
+            roots = scan(current);
+            remember(current, roots);
+            break;
+        }
+        steps.emplace_back(current, record.parents.front().id);
+        current = record.parents.front().id;
+    }
+    for (std::size_t index = steps.size(); index > 0; --index) {
+        const RevisionId& child = steps[index - 1].first;
+        const RevisionId& parent = steps[index - 1].second;
+        std::set<Key> next(roots.begin(), roots.end());
+        try {
+            const std::vector<Difference> differences =
+                repository.diffRevisions(project, parent, child, maxStepChanges);
+            const Repository::PinnedModelRevision pinned = repository.pinModelRevision(project, child);
+            for (const Difference& difference : differences) {
+                next.erase(difference.key);
+                if (!difference.after) continue;
+                const std::optional<ModelRecord> stored =
+                    repository.getModelAtPinned(pinned, difference.key);
+                check(stored.has_value(), "revision difference names a missing record");
+                if (stored->kind == rootKind) next.insert(difference.key);
+            }
+            roots.assign(next.begin(), next.end());
+        } catch (const StorageError& error) {
+            if (error.kind() != StorageErrorKind::LimitExceeded) throw;
+            roots = scan(child); // a very large step (e.g. an import)
+        }
+        remember(child, roots);
+    }
+    return roots;
+}
+
+std::vector<Key> ProjectService::hydraulicDistributionRootKeysAtRevision(
+        std::string_view projectId, const RevisionId& revision) {
+    const std::optional<ProjectId> project = ProjectId::parse(projectId);
+    if (!project) throw ProjectError(ProjectErrorKind::InvalidInput, "UUIDv7 project required");
+    const std::shared_ptr<Project> entry = findProject(projectId);
+    std::vector<Key> result;
+    withRepository(projectId, [&](Repository& repository) {
+        result = translated<std::vector<Key>>([&]() {
+            return rootKeysAtRevision(*entry, repository, *project, revision);
+        });
+    });
+    return result;
+}
+
+std::vector<ModelChange> ProjectService::modelChangesBetweenRevisions(
+        std::string_view projectId, const RevisionId& from, const RevisionId& to,
+        std::size_t maxChanges) {
+    const std::optional<ProjectId> project = ProjectId::parse(projectId);
+    if (!project) throw ProjectError(ProjectErrorKind::InvalidInput, "UUIDv7 project required");
+    std::vector<ModelChange> result;
+    withRepository(projectId, [&](Repository& repository) {
+        result = translated<std::vector<ModelChange>>([&]() {
+            const std::vector<Difference> differences =
+                repository.diffRevisions(*project, from, to, maxChanges);
+            const Repository::PinnedModelRevision pinned = repository.pinModelRevision(*project, to);
+            std::vector<ModelChange> changes;
+            changes.reserve(differences.size());
+            for (const Difference& difference : differences) {
+                std::optional<ModelRecord> stored;
+                if (difference.after) {
+                    stored = repository.getModelAtPinned(pinned, difference.key);
+                    check(stored.has_value(), "revision difference names a missing record");
+                }
+                changes.push_back(ModelChange{difference.key, stored});
+            }
+            std::sort(changes.begin(), changes.end(),
+                      [](const ModelChange& first, const ModelChange& second) {
+                          return first.key < second.key;
+                      });
+            return changes;
+        });
+    });
+    return result;
 }
 
 std::vector<std::pair<Key, ModelRecord>> ProjectService::modelRecordsAtRevision(

@@ -257,8 +257,16 @@ checked:
   added, moved or changed owned record, no surviving reference to a deleted
   record (chunk entries, pipe end nodes, annotation anchors), and one layer
   per network for every network whose ownership is touched;
-- semantics of the touched scope only: each network whose root, chunk or
-  member changed is loaded by the canonical network loader; for each layer whose
+- semantics of the touched scope only: for each network whose root, chunk or
+  member changed, `checkDraftHydraulicNetworkDelta` checks the root manifest,
+  every new or rewritten membership chunk, and every changed or newly entered
+  member (canonical payload, value rules, every reference resolved to a
+  member of the right type in the same network, stored reference index equal
+  to the canonical dependencies, using the canonical network validator on the
+  member and its reference targets); demand points attached to a changed pipe
+  are re-checked, and members that left the network must not be used by the
+  network settings. The complete network loader runs only when the network
+  settings change or a member moves to another network. For each layer whose
   root or chunk changed, the root is decoded, the changed and newly listed
   chunks are decoded and checked, and only
   members that entered the layer through them have their anchors resolved
@@ -271,17 +279,40 @@ checked:
   validator.
 
 Reads go through a pinned base revision (`ProjectService::pinModelRevision`:
-resolved once, no project operation lock). A delta that touches a hydraulic
-network loads the base once in bulk, because the network has to be decoded
-completely anyway; annotation-only Saves read only the records they need.
+resolved once, no project operation lock). Saves read only the records they
+need; a delta that changes network settings loads the base once in bulk,
+because that network is then decoded completely.
 A candidate that was already invalid before the Save (for example written by
 a raw native caller) is still rejected at local Commit.
 
-Archived and live History replay applies every action with the Save
-materializers but runs the complete validator only on the parent, the child
-and the selected boundary; the endpoints are additionally proven equal to
-the immutable revisions. An archive whose intermediate state is invalid can
-therefore be navigated to its valid boundaries, never to the invalid one.
+Archived and live History replay works on changes, not on copies of
+revisions:
+
+- The replayed state is a native overlay on the pinned starting revision
+  (point reads, reverse-reference queries). Actions are applied with the Save
+  materializers.
+- The proven position (archive tip, or an active draft's saved cursor) must
+  reproduce the exact native difference: the local Commit witness (the
+  store's revision difference) or the saved draft overlay.
+- Stored revisions and saved drafts already passed the validators when they
+  were written and are not re-checked. The selected boundary, when it is
+  neither position 0 nor the proven position, is checked with the Save delta
+  validator against the starting revision. An archive whose intermediate
+  state is invalid can therefore be navigated to its valid boundaries, never
+  to the invalid one.
+- Annotation and hydraulic ownership of edited entities is looked up in the
+  two endpoints through the reverse index (member, chunk, layer or network).
+- Network roots of a revision come from `hydraulicDistributionRootKeysAtRevision`:
+  the nearest cached ancestor plus the store's revision differences, cached
+  per immutable revision. A revision without a usable ancestor is streamed
+  once.
+- Unborn drafts have no stored revision; their whole model is the draft
+  overlay (bounded by the draft change limit), and the reconstructed seed and
+  the saved draft are validated completely.
+
+There is no project-size limit. Remaining bounds: 4096 actions and 8 MiB per
+archive, 20,000 native changes per draft and per History overlay (also for
+the revision difference between an archived fork's parent and HEAD).
 
 ## Failure reporting and reads
 

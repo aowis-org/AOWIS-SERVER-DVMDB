@@ -4342,6 +4342,15 @@ std::optional<Bytes> Repository::getAtRevision(const ProjectId& project,
 
 std::vector<std::pair<Key, Bytes>> Repository::scanAtRevision(const ProjectId& project,
                                                                 const RevisionId& revisionId) {
+    std::vector<std::pair<Key, Bytes>> result;
+    forEachAtRevision(project, revisionId, [&result](const Key& key, const Bytes& value) {
+        result.emplace_back(key, value);
+    });
+    return result;
+}
+
+void Repository::forEachAtRevision(const ProjectId& project, const RevisionId& revisionId,
+                                   const std::function<void(const Key&, const Bytes&)>& visit) {
     std::lock_guard<std::mutex> guarded(this->mutex_);
     ScopedFileLock locked(this->lockFd_);
     refreshIndex();
@@ -4358,14 +4367,11 @@ std::vector<std::pair<Key, Bytes>> Repository::scanAtRevision(const ProjectId& p
                                               const std::pair<Key, Hash>& second) {
         return first.first < second.first;
     });
-    std::vector<std::pair<Key, Bytes>> result;
-    result.reserve(hashes.size());
     for (const std::pair<Key, Hash>& entry : hashes) {
         const Bytes encoded = load(entry.second);
         require(Err::Corruption, !encoded.empty() && encoded.front() == 'V', "invalid value object");
-        result.emplace_back(entry.first, Bytes(encoded.begin() + 1, encoded.end()));
+        visit(entry.first, Bytes(encoded.begin() + 1, encoded.end()));
     }
-    return result;
 }
 
 std::optional<ModelRecord> Repository::getModelAtRevision(const ProjectId& project,

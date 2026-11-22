@@ -2,8 +2,12 @@
 
 // B4.3: authenticated replay of annotation-only and bounded combined MODEL archives.
 //
-// This deliberately accepts COMPLETE immutable parent/child model candidates
-// plus the exact native delta proved by ProjectService's local Commit witness.
+// Replay works on changes: the replayed state is a native overlay on a pinned,
+// already validated revision (point reads and reverse-reference queries
+// only), compared with the exact native delta of ProjectService's local
+// Commit witness. Nothing is copied whole, so History has no project-size
+// limit. The two replayVerified*ActionBoundary functions below instead take
+// COMPLETE caller-supplied candidates and check them completely.
 // Neither user-selected layer IDs nor native manifest edits are trusted.
 // Each annotation edit includes a canonical ownerLayerId authenticated by the
 // immutable Commit action chain. Endpoint membership additionally proves that
@@ -48,8 +52,9 @@ struct VerifiedAnnotationActionBoundary final {
 // same endpoint snapshot. DVMDB's chain uses SHA-256 with a zero initial hash
 // and SHA-256(previous || raw MODEL frame) for each archived action.
 // The replay derives server-owned member/chunk/root changes with the Save
-// materializers, validates the parent, the child and the selected boundary
-// as complete candidates (not every intermediate action: A2), and proves
+// materializers, validates the complete parent and child candidates, checks
+// the selected boundary with the Save delta validator (not every
+// intermediate action: A2), and proves
 // exact equality with the immutable child AND the authenticated native
 // revision delta. actionPosition is a boundary
 // 0..actions.size(), not an array index.

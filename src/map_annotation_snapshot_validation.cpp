@@ -248,12 +248,15 @@ std::optional<std::string> validateAnnotationSnapshotDelta(
     try {
         const EngineeringDeltaScope scope = engineeringDeltaScope(before, after, delta);
         if (scope.fullValidationRequired) return completeValidation();
-        // Hydraulic semantics (values, topology, catalogue references) are
-        // proven by the canonical network loader, one touched network at a time.
+        // Hydraulic semantics (values, topology, catalogue references): the
+        // touched part of each network is checked through the reverse index;
+        // the canonical network loader runs only when the network settings
+        // changed or a member moved between networks.
         for (const Key& network : scope.networks) {
+            const QUuid networkId = record::uuidFromKey(network);
+            if (hydraulic::checkDraftHydraulicNetworkDelta(before, after, networkId, delta)) continue;
             const std::optional<NetworkHydraulicDistribution> loaded =
-                hydraulic::loadDraftHydraulicDistributionNetwork(
-                    after.get, record::uuidFromKey(network));
+                hydraulic::loadDraftHydraulicDistributionNetwork(after.get, networkId);
             ensure(loaded.has_value(), "invalid candidate distribution network");
         }
         // A5: a layer whose root or chunks changed is checked through its

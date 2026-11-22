@@ -416,6 +416,18 @@ public:
     // Resolve a model-indexed revision once for many point reads. NotFound for
     // an unknown revision, InvalidInput for a revision without a model index.
     PinnedModelReader pinModelRevision(std::string_view projectId, const RevisionId& revision);
+    // Sorted keys of every hydraulic distribution network root (kind 100) in
+    // a model-indexed revision. Derived from the nearest known ancestor plus
+    // the store's revision differences, so the work is proportional to the
+    // changes, not the project; a revision without a usable ancestor is
+    // streamed once. Results for immutable revisions are cached per project.
+    std::vector<Key> hydraulicDistributionRootKeysAtRevision(std::string_view projectId,
+                                                             const RevisionId& revision);
+    // Exact native model changes from `from` to `to` (store trie difference,
+    // records as stored in `to`, nullopt for a removal), in key order.
+    // LimitExceeded above maxChanges, before the records are read.
+    std::vector<ModelChange> modelChangesBetweenRevisions(std::string_view projectId,
+        const RevisionId& from, const RevisionId& to, std::size_t maxChanges);
     // Complete, revision-pinned MODEL snapshot for authenticated history
     // verification. This is a bounded native read; callers must not merge
     // results from a moving branch HEAD into the same candidate.
@@ -651,7 +663,13 @@ private:
         std::shared_ptr<Repository> repository;  // opened on first use
         std::mutex operationMutex;               // one scoped operation at a time
         std::atomic<std::size_t> pending{0};     // reserved Operations
+        // Immutable revision -> sorted network root keys (bounded).
+        std::mutex rootKeysMutex;
+        std::map<RevisionId, std::vector<Key>> rootKeys;
     };
+    // Called inside withRepository for `project`.
+    std::vector<Key> rootKeysAtRevision(Project& entry, Repository& repository,
+                                        const ProjectId& project, const RevisionId& revision);
     // Looks the project up under the catalogue mutex only.
     std::shared_ptr<Project> findProject(std::string_view id) const;
     std::shared_ptr<Repository> openRepository(Project& project) const;

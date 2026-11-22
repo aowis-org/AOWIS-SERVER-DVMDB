@@ -486,6 +486,11 @@ public:
     // Every key/value of a revision, in key order.
     std::vector<std::pair<Key, Bytes>> scanAtRevision(const ProjectId& project,
                                                         const RevisionId& revisionId);
+    // The same records in the same order, streamed: one value is held at a
+    // time. The visitor runs under the repository lock and must not call
+    // Repository methods.
+    void forEachAtRevision(const ProjectId& project, const RevisionId& revisionId,
+                           const std::function<void(const Key&, const Bytes&)>& visit);
     std::optional<ModelRecord> getModelAtRevision(const ProjectId& project,
                                                    const RevisionId& revisionId, const Key& key);
     // Sorted IDs of entities referring to key; O(log N + inbound references).

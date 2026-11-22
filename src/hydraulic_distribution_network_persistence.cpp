@@ -2643,6 +2643,220 @@ std::optional<NetworkHydraulicDistribution> loadDraftHydraulicDistributionNetwor
     return network;
 }
 
+namespace {
+
+// Path prefix the reference and value validators use for one entity, in
+// AOWIS_DVMDB_HYDRAULIC_COLLECTIONS order.
+constexpr std::array<const char*, collectionCount> entityPathNames = {
+    "pipe_material", "pattern_time", "curve_tank_volume", "curve_pump_head",
+    "curve_pump_efficiency", "curve_valve_headloss", "curve_valve_characteristic",
+    "curve_generic", "reservoir", "junction", "tank", "demand_point", "pipe",
+    "pump", "valve", "control_simple", "control_rule"};
+
+std::optional<std::size_t> collectionOfKind(std::uint16_t kind) {
+    std::size_t ordinal = 0;
+#define COLLECTION_OF_KIND(name, type, entityKind) \
+    if (kind == static_cast<std::uint16_t>(entityKind)) return ordinal; \
+    ++ordinal;
+    AOWIS_DVMDB_HYDRAULIC_COLLECTIONS(COLLECTION_OF_KIND)
+#undef COLLECTION_OF_KIND
+    return std::nullopt;
+}
+
+// Decodes a canonical member record into its collection of `network`.
+void appendDecodedMember(NetworkHydraulicDistribution& network, const ModelRecord& record,
+                         const QUuid& uuid) {
+    std::size_t ordinal = 0;
+#define APPEND_DECODED(name, type, entityKind) \
+    if (record.kind == static_cast<std::uint16_t>(entityKind)) { \
+        QString error; \
+        const std::optional<type> entity = \
+            ModelCodec<type>::decode(qByteArrayFromBytes(record.payload), &error); \
+        if (!entity || entity->uuid != uuid || \
+            ModelCodec<type>::encode(*entity) != qByteArrayFromBytes(record.payload)) \
+            throw StorageError(StorageErrorKind::InvalidInput, \
+                               "invalid draft hydraulic entity: " + error.toStdString()); \
+        network.name.append(*entity); \
+        return; \
+    } \
+    ++ordinal;
+    AOWIS_DVMDB_HYDRAULIC_COLLECTIONS(APPEND_DECODED)
+#undef APPEND_DECODED
+    (void)ordinal;
+    throw StorageError(StorageErrorKind::InvalidInput, "record is not a hydraulic entity");
+}
+
+QByteArray settingsBytes(const Manifest& manifest) {
+    const QByteArray bytes = ModelCodec<NetworkHydraulicDistribution>::encode(manifest.metadata);
+    if (bytes.isEmpty())
+        throw StorageError(StorageErrorKind::Internal, "cannot encode hydraulic network settings");
+    return bytes;
+}
+
+// The network owning member `key` in `view` (member -> chunk -> root).
+std::optional<Key> owningNetwork(const EngineeringCandidateView& view, const Key& key) {
+    std::optional<Key> owner;
+    for (const Key& chunk : engineeringReferrersOfKind(view, key, chunkKind))
+        for (const Key& root : engineeringReferrersOfKind(view, chunk, hydraulicDistributionNetworkKind)) {
+            if (owner && *owner != root)
+                throw StorageError(StorageErrorKind::InvalidInput,
+                                   "hydraulic entity belongs to multiple networks");
+            owner = root;
+        }
+    return owner;
+}
+
+// One changed or newly entered member: canonical payload, values, and every
+// reference, checked with the canonical network validator on a small network
+// holding the member and the members it references.
+void checkNetworkMember(const EngineeringCandidateView& after, const QUuid& networkId,
+                        const Key& networkKey, const Key& key) {
+    const std::optional<ModelRecord> record = after.get(key);
+    if (!record) throw StorageError(StorageErrorKind::InvalidInput, "missing hydraulic entity");
+    const std::optional<std::size_t> collection = collectionOfKind(record->kind);
+    if (!collection) throw StorageError(StorageErrorKind::InvalidInput, "record is not a hydraulic entity");
+    const QUuid uuid = uuidFromKey(key);
+    NetworkHydraulicDistribution local;
+    local.uuid = networkId;
+    appendDecodedMember(local, *record, uuid);
+    for (const Key& target : record->references) {
+        if (target == key) continue;
+        const std::optional<ModelRecord> referenced = after.get(target);
+        if (!referenced || !isHydraulicMemberKind(referenced->kind) ||
+            owningNetwork(after, target) != networkKey)
+            throw StorageError(StorageErrorKind::InvalidInput,
+                               "hydraulic reference target is not a member of this network");
+        appendDecodedMember(local, *referenced, uuidFromKey(target));
+    }
+    const aowis::dvmdb::HydraulicDependencyValidation validated =
+        aowis::dvmdb::validateHydraulicDistributionNetworkWithDependencies(local);
+    const QString prefix = QLatin1String(entityPathNames[*collection]) + QLatin1Char('[') +
+                           uuid.toString(QUuid::WithoutBraces) + QLatin1Char(']');
+    for (const aowis::dvmdb::ModelValidationIssue& issue : validated.report.issues) {
+        if (issue.path == prefix || issue.path.startsWith(prefix + QLatin1Char('.')))
+            throw StorageError(StorageErrorKind::InvalidInput,
+                               "draft hydraulic entity invalid: " + issue.path.toStdString() +
+                               ": " + issue.description.toStdString());
+    }
+    std::set<Key> canonical;
+    for (const aowis::dvmdb::HydraulicDependency& dependency : validated.dependencies)
+        if (dependency.source_uuid == uuid && !dependency.target_uuid.isNull())
+            canonical.insert(keyFromUuid(dependency.target_uuid));
+    if (std::vector<Key>(canonical.begin(), canonical.end()) != record->references)
+        throw StorageError(StorageErrorKind::InvalidInput,
+                           "draft hydraulic dependencies disagree with canonical model");
+}
+
+// UUIDs the network settings reference (options, report selection, MSX).
+std::set<Key> settingsReferences(const Manifest& manifest) {
+    NetworkHydraulicDistribution settings = manifest.metadata;
+    clearCollections(settings);
+    const aowis::dvmdb::HydraulicDependencyValidation validated =
+        aowis::dvmdb::validateHydraulicDistributionNetworkWithDependencies(settings);
+    std::set<Key> targets;
+    for (const aowis::dvmdb::HydraulicDependency& dependency : validated.dependencies)
+        if (dependency.source_uuid == settings.uuid && !dependency.target_uuid.isNull())
+            targets.insert(keyFromUuid(dependency.target_uuid));
+    return targets;
+}
+
+} // namespace
+
+bool hydraulicRootSettingsChanged(const std::optional<ModelRecord>& before,
+                                  const std::optional<ModelRecord>& after) {
+    if (!before || !after) return true;
+    if (before->kind != hydraulicDistributionNetworkKind ||
+        after->kind != hydraulicDistributionNetworkKind) return true;
+    return settingsBytes(decodeManifest(qByteArrayFromBytes(before->payload))) !=
+           settingsBytes(decodeManifest(qByteArrayFromBytes(after->payload)));
+}
+
+bool checkDraftHydraulicNetworkDelta(const EngineeringCandidateView& before,
+                                     const EngineeringCandidateView& after,
+                                     const QUuid& networkId,
+                                     const std::vector<ModelChange>& delta) {
+    const Key networkKey = keyFromUuid(networkId);
+    const std::optional<ModelRecord> oldRoot = before.get(networkKey);
+    const std::optional<ModelRecord> newRoot = after.get(networkKey);
+    if (hydraulicRootSettingsChanged(oldRoot, newRoot)) return false;
+    const Manifest old = decodeManifest(qByteArrayFromBytes(oldRoot->payload));
+    const Manifest now = decodeManifest(qByteArrayFromBytes(newRoot->payload));
+    if (now.metadata.uuid != networkId)
+        throw StorageError(StorageErrorKind::InvalidInput, "draft network root UUID mismatch");
+    checkRoot(now, *newRoot);
+    std::set<Key> changed;
+    for (const ModelChange& change : delta) changed.insert(change.key);
+
+    // Chunks: new, changed or listed under another collection are checked
+    // like the complete loader does; unchanged chunks keep their members.
+    std::map<Key, std::size_t> oldCollectionOf;
+    for (std::size_t index = 0; index < collectionCount; ++index)
+        for (const QUuid& id : old.chunks[index]) oldCollectionOf.emplace(keyFromUuid(id), index);
+    std::set<Key> newChunks;
+    std::set<Key> leftMembers;    // members of rewritten/dropped chunks (before)
+    std::set<Key> enteredMembers; // members of new/rewritten chunks (after)
+    for (std::size_t index = 0; index < collectionCount; ++index) {
+        for (const QUuid& id : now.chunks[index]) {
+            const Key chunkKey = keyFromUuid(id);
+            newChunks.insert(chunkKey);
+            const std::map<Key, std::size_t>::const_iterator previous = oldCollectionOf.find(chunkKey);
+            if (previous != oldCollectionOf.end() && previous->second == index &&
+                !changed.contains(chunkKey)) continue;
+            const std::optional<ModelRecord> chunkRecord = after.get(chunkKey);
+            if (!chunkRecord)
+                throw StorageError(StorageErrorKind::InvalidInput, "missing hydraulic membership chunk");
+            const MemberChunk chunk = decodeChunk(*chunkRecord, networkId, index);
+            const std::uint16_t memberKind = hydraulicMemberKindForCollection(index);
+            for (const QUuid& member : chunk.members) {
+                const std::optional<ModelRecord> memberRecord = after.get(keyFromUuid(member));
+                if (!memberRecord || memberRecord->kind != memberKind)
+                    throw StorageError(StorageErrorKind::InvalidInput,
+                                       "missing or wrong-type draft hydraulic entity");
+                enteredMembers.insert(keyFromUuid(member));
+            }
+        }
+    }
+    for (const std::pair<const Key, std::size_t>& entry : oldCollectionOf) {
+        if (newChunks.contains(entry.first) && !changed.contains(entry.first)) continue;
+        const std::optional<ModelRecord> chunkRecord = before.get(entry.first);
+        if (!chunkRecord)
+            throw StorageError(StorageErrorKind::Corruption, "missing hydraulic membership chunk in base");
+        for (const QUuid& member : decodeChunk(*chunkRecord, networkId, entry.second).members)
+            leftMembers.insert(keyFromUuid(member));
+    }
+    // Members that left the network (deleted, or moved to another one).
+    std::set<Key> removed;
+    for (const Key& member : leftMembers) {
+        if (enteredMembers.contains(member)) continue;
+        if (after.get(member)) return false; // moved: the complete loader decides
+        removed.insert(member);
+    }
+    if (!removed.empty()) {
+        for (const Key& target : settingsReferences(now))
+            if (removed.contains(target))
+                throw StorageError(StorageErrorKind::InvalidInput,
+                                   "network settings reference a removed hydraulic entity");
+    }
+
+    // Members to check: changed records of this network, members that newly
+    // entered it, and demand points attached to a changed pipe.
+    std::set<Key> toCheck;
+    for (const Key& member : enteredMembers)
+        if (!leftMembers.contains(member)) toCheck.insert(member);
+    for (const ModelChange& change : delta) {
+        if (!change.record || !isHydraulicMemberKind(change.record->kind)) continue;
+        if (owningNetwork(after, change.key) != networkKey) continue;
+        toCheck.insert(change.key);
+        if (change.record->kind == pipeKind) {
+            for (const Key& referrer : engineeringReferrersOfKind(
+                     after, change.key, 207)) // demand points
+                toCheck.insert(referrer);
+        }
+    }
+    for (const Key& member : toCheck) checkNetworkMember(after, networkId, networkKey, member);
+    return true;
+}
+
 void materializeDraftMembership(
     const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
     const std::vector<DraftMembershipIntent>& intents,

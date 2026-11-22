@@ -1024,10 +1024,10 @@ void validateDraftAnnotationCandidate(const CandidateRecords& records) {
 }
 
 // Base snapshot of a draft for incremental validation, resolved once and
-// read without the project operation lock. Point reads serve annotation and
-// other small deltas. A delta that touches a hydraulic network must load
-// that network completely; one bulk scan is cheaper than one point read per
-// member, so `bulk` loads the base records once (shared by both views).
+// read without the project operation lock. Point reads serve ordinary
+// deltas. A delta that changes network settings must load that network
+// completely; one bulk scan is cheaper than one point read per member, so
+// `bulk` loads the base records once (shared by both views).
 struct DraftBase final {
     std::function<std::optional<ModelRecord>(const Key&)> get;
     std::function<std::vector<Key>(const Key&)> referrers;
@@ -1071,15 +1071,17 @@ EngineeringCandidateView draftCandidateView(const DraftBase& base, const Working
                                            {draft.candidateChanges, extra});
 }
 
-bool touchesHydraulicNetwork(const EngineeringCandidateView& before,
-                             const std::vector<ModelChange>& delta) {
+// The Save validator checks touched networks through the reverse index; it
+// loads a network completely only when its settings change (or a root is
+// created or deleted). Only then is one bulk read of the base worth it.
+bool needsCompleteNetwork(const EngineeringCandidateView& before,
+                          const std::vector<ModelChange>& delta) {
     for (const ModelChange& change : delta) {
-        std::optional<ModelRecord> previous;
-        if (!change.record) previous = before.get(change.key);
-        const std::uint16_t kind = change.record ? change.record->kind
-                                                 : (previous ? previous->kind : 0);
-        if (kind == hydraulic::hydraulicDistributionNetworkKind ||
-            kind == engineeringNetworkChunkKind || isHydraulicMemberKind(kind))
+        const std::optional<ModelRecord> previous = before.get(change.key);
+        const bool wasRoot = previous && previous->kind == hydraulic::hydraulicDistributionNetworkKind;
+        const bool isRoot = change.record &&
+                            change.record->kind == hydraulic::hydraulicDistributionNetworkKind;
+        if ((wasRoot || isRoot) && hydraulic::hydraulicRootSettingsChanged(previous, change.record))
             return true;
     }
     return false;
@@ -1091,7 +1093,7 @@ bool touchesHydraulicNetwork(const EngineeringCandidateView& before,
 void validateDraftAnnotationDelta(ProjectService& service, const WorkingCopyInfo& draft,
                                   const EngineeringCandidateView& pointBefore,
                                   const std::vector<ModelChange>& delta) {
-    const DraftBase base = draftBase(service, draft, touchesHydraulicNetwork(pointBefore, delta));
+    const DraftBase base = draftBase(service, draft, needsCompleteNetwork(pointBefore, delta));
     const EngineeringCandidateView before = draftCandidateView(base, draft, {});
     const EngineeringCandidateView after = draftCandidateView(base, draft, delta);
     const std::optional<std::string> error = annotations::validateAnnotationSnapshotDelta(

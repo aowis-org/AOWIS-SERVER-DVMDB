@@ -16,6 +16,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -363,6 +364,287 @@ aowis::model::ModelEntityEdit annotationEdit(const std::optional<MapAnnotation>&
     return edit;
 }
 
+// ---- Indexed hydraulic Save check: must agree with the complete loader ----
+
+struct HydraulicScene final {
+    NetworkHydraulicDistribution a; // uuid 300, layer 301
+    NetworkHydraulicDistribution b; // uuid 400, layer 401
+};
+
+HydraulicScene hydraulicScene() {
+    HydraulicScene scene;
+    scene.a.uuid = uuid(300);
+    scene.a.id = QStringLiteral("A");
+    HydraulicPatternTime pattern;
+    pattern.uuid = uuid(310);
+    pattern.id = QStringLiteral("P");
+    pattern.multipliers = {1.0, 0.5};
+    HydraulicPatternTime settingsPattern = pattern;
+    settingsPattern.uuid = uuid(312);
+    settingsPattern.id = QStringLiteral("PS");
+    scene.a.patterns_time = {pattern, settingsPattern};
+    scene.a.options_hydraulic.default_demand_pattern_uuid = uuid(312);
+    HydraulicPipeMaterial material;
+    material.uuid = uuid(311);
+    material.id = QStringLiteral("M");
+    scene.a.pipe_materials = {material};
+    for (std::uint32_t ordinal = 320; ordinal < 324; ++ordinal) {
+        HydraulicNodeJunction junction;
+        junction.uuid = uuid(ordinal);
+        junction.id = QStringLiteral("J%1").arg(static_cast<int>(ordinal));
+        junction.coordinate_wgs84.longitude_deg = 14.0;
+        junction.coordinate_wgs84.latitude_deg = 11.0;
+        scene.a.nodes_junctions.append(junction);
+    }
+    const std::function<HydraulicLinkPipe(std::uint32_t, std::uint32_t, std::uint32_t)> pipe =
+        [](std::uint32_t ordinal, std::uint32_t from, std::uint32_t to) {
+            HydraulicLinkPipe value;
+            value.uuid = uuid(ordinal);
+            value.id = QStringLiteral("L%1").arg(static_cast<int>(ordinal));
+            value.node_uuid_from = uuid(from);
+            value.node_uuid_to = uuid(to);
+            value.material_uuid = uuid(311);
+            return value;
+        };
+    scene.a.links_pipes = {pipe(330, 320, 321), pipe(331, 321, 322)};
+    HydraulicDemandPoint point;
+    point.uuid = uuid(340);
+    point.id = QStringLiteral("D");
+    point.attachment.type = HydraulicDemandPointAttachmentType::Pipe;
+    point.attachment.pipe_uuid = uuid(330);
+    point.attachment.pipe_position = 0.5;
+    point.attachment.pipe_allocation_mode = HydraulicDemandPointPipeAllocationMode::AssignedJunction;
+    point.attachment.pipe_assigned_junction_uuid = uuid(320);
+    scene.a.demand_points = {point};
+    scene.b.uuid = uuid(400);
+    scene.b.id = QStringLiteral("B");
+    HydraulicNodeJunction other;
+    other.uuid = uuid(420);
+    other.id = QStringLiteral("JB");
+    scene.b.nodes_junctions = {other};
+    return scene;
+}
+
+Records hydraulicRecords(const HydraulicScene& scene) {
+    Records records;
+    append(records, hydraulic::fullDraftHydraulicDistributionNetworkChanges(scene.a));
+    append(records, ann::fullDraftAnnotationLayerChanges(distributionLayer(301, 300), {}));
+    append(records, hydraulic::fullDraftHydraulicDistributionNetworkChanges(scene.b));
+    append(records, ann::fullDraftAnnotationLayerChanges(distributionLayer(401, 400), {}));
+    return records;
+}
+
+template<typename T>
+aowis::model::ModelEntityEdit hydraulicEdit(const char* type, const T& value) {
+    aowis::model::ModelEntityEdit edit;
+    edit.entityId = value.uuid;
+    edit.entityType = QString::fromLatin1(type);
+    edit.after = aowis::model::ModelCodec<T>::encode(value);
+    return edit;
+}
+
+// Member record exactly as a Save stores it (payload + canonical references).
+template<typename T>
+db::ModelRecord memberRecord(const char* type, const T& value) {
+    const aowis::model::ModelEntityEdit edit = hydraulicEdit(type, value);
+    return hydraulic::canonicalHydraulicMemberImage(edit, *edit.after).record;
+}
+
+// Insertion or deletion through the Save membership materializer.
+Records membership(const Records& before, std::uint32_t network, const db::Key& member,
+                   std::optional<db::ModelRecord> inserted, std::uint16_t kind,
+                   std::uint16_t collection) {
+    std::vector<db::ModelChange> changes{db::ModelChange{member, inserted}};
+    const std::function<std::optional<db::ModelRecord>(const db::Key&)> read =
+        [&before](const db::Key& id) -> std::optional<db::ModelRecord> {
+        const Records::const_iterator found = before.find(id);
+        return found == before.end() ? std::nullopt : std::optional<db::ModelRecord>(found->second);
+    };
+    hydraulic::materializeDraftMembership(read,
+        {hydraulic::DraftMembershipIntent{key(uuid(network)), member, kind, collection,
+                                          inserted.has_value()}}, changes);
+    Records after = before;
+    for (const db::ModelChange& change : changes) {
+        if (change.record) after[change.key] = *change.record;
+        else after.erase(change.key);
+    }
+    return after;
+}
+
+// Both validators must give the same verdict; returns it.
+bool hydraulicAgree(const Records& before, const Records& after, const char* message) {
+    const bool completeValid = !validate(after).has_value();
+    const std::optional<std::string> incremental = ann::validateAnnotationSnapshotDelta(
+        engineeringView(before), engineeringView(after), difference(before, after),
+        [&after]() { return validate(after); });
+    if (incremental.has_value() == completeValid) {
+        std::cerr << message << ": complete " << (completeValid ? "accepts" : "rejects")
+                  << ", incremental " << incremental.value_or("accepts") << '\n';
+        throw std::runtime_error(std::string(message) + ": incremental hydraulic check disagrees");
+    }
+    return completeValid;
+}
+
+void testHydraulicDeltaMatchesComplete() {
+    const HydraulicScene scene = hydraulicScene();
+    const Records before = hydraulicRecords(scene);
+    valid(before, "hydraulic fixture must be valid");
+    const HydraulicLinkPipe& p1 = scene.a.links_pipes[0];
+    const HydraulicLinkPipe& p2 = scene.a.links_pipes[1];
+    const std::function<Records(const db::Key&, const db::ModelRecord&)> replaced =
+        [&before](const db::Key& id, const db::ModelRecord& record) {
+            Records after = before;
+            after[id] = record;
+            return after;
+        };
+    const std::function<void(bool, bool, const char*)> expect =
+        [](bool actual, bool wanted, const char* message) {
+            require(actual == wanted, (std::string(message) + ": unexpected verdict").c_str());
+        };
+    // Scalar edits.
+    HydraulicNodeJunction moved = scene.a.nodes_junctions[0];
+    moved.coordinate_wgs84.longitude_deg = 15.0;
+    moved.elevation_m = 42.0;
+    expect(hydraulicAgree(before, replaced(key(moved.uuid), memberRecord("HydraulicNodeJunction", moved)),
+                          "junction scalar edit"), true, "junction scalar edit");
+    HydraulicLinkPipe negative = p1;
+    negative.diameter_mm = -5.0;
+    expect(hydraulicAgree(before, replaced(key(p1.uuid), memberRecord("HydraulicLinkPipe", negative)),
+                          "negative pipe diameter"), false, "negative pipe diameter");
+    // Rewires.
+    HydraulicLinkPipe rewired = p2;
+    rewired.node_uuid_to = uuid(323);
+    expect(hydraulicAgree(before, replaced(key(p2.uuid), memberRecord("HydraulicLinkPipe", rewired)),
+                          "valid pipe rewire"), true, "valid pipe rewire");
+    HydraulicLinkPipe foreign = p2;
+    foreign.node_uuid_to = uuid(420);
+    expect(hydraulicAgree(before, replaced(key(p2.uuid), memberRecord("HydraulicLinkPipe", foreign)),
+                          "rewire into another network"), false, "rewire into another network");
+    HydraulicLinkPipe wrongType = p2;
+    wrongType.node_uuid_to = uuid(311);
+    expect(hydraulicAgree(before, replaced(key(p2.uuid), memberRecord("HydraulicLinkPipe", wrongType)),
+                          "rewire to a material"), false, "rewire to a material");
+    HydraulicLinkPipe missing = p2;
+    missing.node_uuid_to = uuid(999);
+    expect(hydraulicAgree(before, replaced(key(p2.uuid), memberRecord("HydraulicLinkPipe", missing)),
+                          "rewire to a missing node"), false, "rewire to a missing node");
+    // Moving P1 off the demand point's assigned junction breaks the demand point.
+    HydraulicLinkPipe detached = p1;
+    detached.node_uuid_from = uuid(323);
+    expect(hydraulicAgree(before, replaced(key(p1.uuid), memberRecord("HydraulicLinkPipe", detached)),
+                          "pipe rewire breaks demand point"), false, "pipe rewire breaks demand point");
+    // Stored references and payload must be canonical.
+    db::ModelRecord stale = memberRecord("HydraulicLinkPipe", rewired);
+    stale.references = before.at(key(p2.uuid)).references;
+    expect(hydraulicAgree(before, replaced(key(p2.uuid), stale), "stale reference index"),
+           false, "stale reference index");
+    db::ModelRecord padded = before.at(key(p1.uuid));
+    padded.payload.push_back(0);
+    expect(hydraulicAgree(before, replaced(key(p1.uuid), padded), "noncanonical payload"),
+           false, "noncanonical payload");
+    // Membership through the Save materializer.
+    HydraulicLinkPipe added;
+    added.uuid = uuid(332);
+    added.id = QStringLiteral("L332");
+    added.node_uuid_from = uuid(322);
+    added.node_uuid_to = uuid(323);
+    const std::uint16_t pipeCollection = 12;
+    const std::uint16_t junctionCollection = 9;
+    const std::uint16_t patternCollection = 1;
+    expect(hydraulicAgree(before, membership(before, 300, key(added.uuid),
+                              memberRecord("HydraulicLinkPipe", added), hydraulic::pipeKind, pipeCollection),
+                          "pipe insertion"), true, "pipe insertion");
+    HydraulicLinkPipe bridging = added;
+    bridging.node_uuid_to = uuid(420);
+    expect(hydraulicAgree(before, membership(before, 300, key(bridging.uuid),
+                              memberRecord("HydraulicLinkPipe", bridging), hydraulic::pipeKind, pipeCollection),
+                          "pipe insertion into another network"), false,
+           "pipe insertion into another network");
+    expect(hydraulicAgree(before, membership(before, 300, key(uuid(323)), std::nullopt,
+                              hydraulic::junctionKind, junctionCollection),
+                          "unreferenced junction deletion"), true, "unreferenced junction deletion");
+    expect(hydraulicAgree(before, membership(before, 300, key(uuid(322)), std::nullopt,
+                              hydraulic::junctionKind, junctionCollection),
+                          "deletion of a pipe end node"), false, "deletion of a pipe end node");
+    expect(hydraulicAgree(before, membership(before, 300, key(uuid(312)), std::nullopt,
+                              hydraulic::hydraulicMemberKindForCollection(patternCollection),
+                              patternCollection),
+                          "deletion of a pattern the settings use"), false,
+           "deletion of a pattern the settings use");
+    expect(hydraulicAgree(before, membership(before, 300, key(uuid(310)), std::nullopt,
+                              hydraulic::hydraulicMemberKindForCollection(patternCollection),
+                              patternCollection),
+                          "deletion of an unused pattern"), true, "deletion of an unused pattern");
+    // Network settings changes use the complete network loader.
+    HydraulicScene settings = scene;
+    settings.a.options_hydraulic.default_demand_pattern_uuid = uuid(310);
+    expect(hydraulicAgree(before, hydraulicRecords(settings), "settings change"), true,
+           "settings change");
+    settings.a.options_hydraulic.default_demand_pattern_uuid = QUuid();
+    expect(hydraulicAgree(before, hydraulicRecords(settings), "settings cleared"), true,
+           "settings cleared");
+}
+
+// Random record-level edits of the fixture: every verdict of the incremental
+// check must equal the complete loader's.
+void testRandomHydraulicDeltaAgreement() {
+    const HydraulicScene scene = hydraulicScene();
+    const Records base = hydraulicRecords(scene);
+    std::mt19937 random(0x4A11U);
+    const std::vector<std::uint32_t> pool{320, 321, 322, 323, 420, 311, 310, 312, 330, 999};
+    const std::function<QUuid()> anyTarget = [&]() { return uuid(pool[random() % pool.size()]); };
+    std::size_t accepted = 0;
+    std::size_t rejected = 0;
+    for (int round = 0; round < 3000; ++round) {
+        Records after = base;
+        const unsigned operation = static_cast<unsigned>(random() % 7U);
+        if (operation <= 1) {
+            HydraulicLinkPipe pipe = scene.a.links_pipes[random() % 2U];
+            if (random() % 2U) pipe.node_uuid_from = anyTarget();
+            if (random() % 2U) pipe.node_uuid_to = anyTarget();
+            if (random() % 3U == 0) pipe.material_uuid = random() % 2U ? QUuid() : anyTarget();
+            if (random() % 4U == 0) pipe.diameter_mm = random() % 2U ? -1.0 : 250.0;
+            db::ModelRecord record = memberRecord("HydraulicLinkPipe", pipe);
+            if (random() % 6U == 0) record.references = base.at(key(pipe.uuid)).references;
+            after[key(pipe.uuid)] = record;
+        } else if (operation == 2) {
+            HydraulicDemandPoint point = scene.a.demand_points[0];
+            if (random() % 2U) point.attachment.pipe_uuid = anyTarget();
+            if (random() % 2U) point.attachment.pipe_assigned_junction_uuid = anyTarget();
+            if (random() % 4U == 0) point.attachment.pipe_position = random() % 2U ? 1.5 : 0.25;
+            after[key(point.uuid)] = memberRecord("HydraulicDemandPoint", point);
+        } else if (operation == 3) {
+            HydraulicNodeJunction junction = scene.a.nodes_junctions[random() % 4U];
+            junction.elevation_m = static_cast<double>(random() % 100U);
+            if (random() % 3U == 0) {
+                HydraulicDemand demand;
+                demand.pattern_uuid = anyTarget();
+                junction.demands = {demand};
+            }
+            after[key(junction.uuid)] = memberRecord("HydraulicNodeJunction", junction);
+        } else if (operation == 4) {
+            HydraulicLinkPipe added;
+            added.uuid = uuid(5000 + static_cast<std::uint32_t>(round));
+            added.id = QStringLiteral("N%1").arg(round);
+            added.node_uuid_from = anyTarget();
+            added.node_uuid_to = anyTarget();
+            after = membership(base, 300, key(added.uuid), memberRecord("HydraulicLinkPipe", added),
+                               hydraulic::pipeKind, 12);
+        } else if (operation == 5) {
+            const std::uint32_t victim = std::vector<std::uint32_t>{320, 321, 322, 323}[random() % 4U];
+            after = membership(base, 300, key(uuid(victim)), std::nullopt, hydraulic::junctionKind, 9);
+        } else {
+            const std::uint32_t victim = random() % 2U ? 310 : 312;
+            after = membership(base, 300, key(uuid(victim)), std::nullopt,
+                               hydraulic::hydraulicMemberKindForCollection(1), 1);
+        }
+        if (hydraulicAgree(base, after, "random hydraulic delta")) ++accepted;
+        else ++rejected;
+    }
+    require(accepted > 200 && rejected > 200,
+            "random hydraulic deltas must exercise both valid and invalid edits");
+}
+
 void testDeltaMatchesCompleteValidation() {
     const Scene base;
     const Records before = build(base);
@@ -539,6 +821,8 @@ int main(int argc, char** argv) {
         testCrossLayerReferences();
         testTypedAnchors();
         testDeltaMatchesCompleteValidation();
+        testHydraulicDeltaMatchesComplete();
+        testRandomHydraulicDeltaAgreement();
         testUnreadableCandidateIsNotInvalid();
         std::cout << "DVMDB B2 annotation candidate integrity tests passed\n";
         return 0;

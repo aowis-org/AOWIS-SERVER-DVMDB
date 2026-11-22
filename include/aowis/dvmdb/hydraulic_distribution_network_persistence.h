@@ -7,6 +7,7 @@
 // Optional Qt/hydraulic persistence adapter for a complete NetworkHydraulicDistribution aggregate. The
 // authoritative entity bytes are encoded by the native-owned canonical ModelCodec;
 // ordered network membership is stored as bounded, individually versioned chunks.
+#include "aowis/dvmdb/engineering_delta_scope.h"
 #include "aowis/dvmdb/model_codec_adapter.h"
 #include "aowis/dvmdb/project_service.h"
 
@@ -48,6 +49,29 @@ std::vector<ModelChange> fullDraftHydraulicDistributionNetworkChanges(const Netw
 // Read one consistent working-copy view (immutable committed base overlaid by
 // the draft's complete candidate record map). Never reads a mutable HEAD.
 // Validates native chunks, canonical entity payloads and typed dependencies.
+// Save-time check of one network touched by a draft delta, WITHOUT loading
+// the whole network. `before` must be a candidate that passed the complete
+// network check; `after` is before + `delta`. Proves what the complete
+// loader proves for the touched part:
+// - root manifest and every new, changed or re-listed membership chunk
+//   (network, collection, member kinds);
+// - every changed or newly entered member: canonical payload, physical
+//   values, every reference resolved to a member of the right type in THIS
+//   network, stored reference index equal to the canonical dependencies;
+// - demand points attached to a changed pipe (endpoint rule);
+// - no member that left the network is referenced by the network settings.
+// Returns false when the complete loader is needed instead: root created or
+// deleted, network settings changed, or a member moved to another network.
+// Invalid data throws StorageError (InvalidInput or Corruption).
+bool checkDraftHydraulicNetworkDelta(const EngineeringCandidateView& before,
+                                     const EngineeringCandidateView& after,
+                                     const QUuid& networkId,
+                                     const std::vector<ModelChange>& delta);
+// True when a network root record was created, deleted, or its network
+// settings (everything except membership chunk lists) changed.
+bool hydraulicRootSettingsChanged(const std::optional<ModelRecord>& before,
+                                  const std::optional<ModelRecord>& after);
+
 std::optional<NetworkHydraulicDistribution> loadDraftHydraulicDistributionNetwork(
     const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
     const QUuid& networkId);
