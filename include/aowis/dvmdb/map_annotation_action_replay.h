@@ -89,7 +89,13 @@ std::optional<VerifiedAnnotationActionBoundary> replayVerifiedCombinedActionBoun
 struct VerifiedIndexedAnnotationActionBoundary final {
     std::string revisionId;
     std::string commitOperationId;
+    // `boundary.changesFromParent` is relative to the archive's starting
+    // state: `originRevision` + `originChanges`. Without a History fork that
+    // is the immutable first parent and no changes; after a fork it is the
+    // verified source boundary the archive started from.
     VerifiedAnnotationActionBoundary boundary;
+    std::optional<RevisionId> originRevision; // always set by the verifier
+    std::vector<ModelChange> originChanges;
 };
 std::optional<VerifiedIndexedAnnotationActionBoundary> verifyIndexedAnnotationActionBoundary(
     ProjectService& service, std::string_view projectId, std::string_view branch,

@@ -546,6 +546,64 @@ void testCombinedHydraulicMembershipReplay() {
            "mixed membership replay accepted a missing scalar action");
 }
 
+// Hydraulic-only archives replay on changes in the multi-domain mode too
+// (the History route sends them here); the annotation-only mode refuses them.
+void testHydraulicOnlyArchive() {
+    const Records parent = makeParent(false);
+    Records child = parent;
+    const HydraulicNodeJunction created = junction(75);
+    HydraulicNodeJunction raised = created;
+    raised.elevation_m = 21.5;
+    const model::ModelEntityEdit insertion = hydraulicJunctionEdit(std::nullopt, created);
+    const model::ModelEntityEdit update = hydraulicJunctionEdit(created, raised);
+    applyHydraulicMembershipEvent(child, insertion);
+    child[db::record::keyFromUuid(raised.uuid)] =
+        hydraulic::canonicalHydraulicMemberImage(update, *update.after).record;
+    const std::vector<db::WorkingCopyEvent> actions = {
+        event(97, {insertion}), event(98, {update})};
+    const std::function<std::optional<ann::VerifiedAnnotationActionBoundary>(std::size_t)> at =
+        [&](std::size_t boundary) {
+            QString error;
+            return ann::replayVerifiedCombinedActionBoundary(
+                view(parent), view(child), actions, difference(parent, child),
+                trustedActionChain(actions), boundary, &error);
+        };
+    const std::optional<ann::VerifiedAnnotationActionBoundary> start = at(0);
+    const std::optional<ann::VerifiedAnnotationActionBoundary> middle = at(1);
+    const std::optional<ann::VerifiedAnnotationActionBoundary> tip = at(2);
+    ensure(start && start->changesFromParent.empty() && start->changedLayerIds.empty(),
+           "hydraulic-only archive must start at the parent");
+    const std::function<std::optional<db::ModelRecord>(const ann::VerifiedAnnotationActionBoundary&)> node =
+        [&created](const ann::VerifiedAnnotationActionBoundary& boundary) -> std::optional<db::ModelRecord> {
+            for (const db::ModelChange& change : boundary.changesFromParent)
+                if (change.key == db::record::keyFromUuid(created.uuid)) return change.record;
+            return std::nullopt;
+        };
+    ensure(middle && node(*middle) &&
+           node(*middle)->payload == db::record::bytesFromQByteArray(*insertion.after),
+           "hydraulic-only archive lost the inserted junction at the middle boundary");
+    ensure(tip && node(*tip) &&
+           node(*tip)->payload == db::record::bytesFromQByteArray(*update.after) &&
+           tip->changesFromParent.size() == difference(parent, child).size(),
+           "hydraulic-only archive did not reproduce the child");
+    QString error;
+    ensure(!ann::replayVerifiedAnnotationActionBoundary(
+               view(parent), view(child), actions, difference(parent, child),
+               trustedActionChain(actions), 2, &error) && !error.isEmpty(),
+           "annotation-only mode accepted a hydraulic-only archive");
+    // An unjournaled extra hydraulic change is still refused.
+    Records extra = child;
+    HydraulicNodeJunction stray = raised;
+    stray.elevation_m = 99.0;
+    extra[db::record::keyFromUuid(stray.uuid)] =
+        hydraulic::canonicalHydraulicMemberImage(hydraulicJunctionEdit(raised, stray),
+            *hydraulicJunctionEdit(raised, stray).after).record;
+    ensure(!ann::replayVerifiedCombinedActionBoundary(
+               view(parent), view(extra), actions, difference(parent, extra),
+               trustedActionChain(actions), 2, &error),
+           "hydraulic-only archive accepted an unjournaled change");
+}
+
 void testHydraulicMembershipOrderPreserved() {
     Records parent = makeParent(false);
     NetworkHydraulicDistribution network;
@@ -674,6 +732,7 @@ int main(int argc, char** argv) {
         testTwoNetworkEndpointOwnedInsertion();
         testAmbiguousHydraulicMembershipOwnership();
         testOnlySelectedBoundaryIsValidated();
+        testHydraulicOnlyArchive();
         std::cout << "B4.3 annotation-only archive replay proofs passed\n";
         return 0;
     } catch (const std::exception& error) {

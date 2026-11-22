@@ -134,6 +134,7 @@ public:
     }
     // Complete candidate view (point reads and exact referrers).
     View view() const { return layeredView(*this->base_, this->changes()); }
+    const View& base() const { return *this->base_; }
 
 private:
     std::shared_ptr<const View> base_;
@@ -601,9 +602,10 @@ static std::optional<VerifiedAnnotationActionBoundary> replayActionBoundary(
             if (index + 1 == actionPosition) selected = current;
             if (persistedBoundary && index + 1 == *persistedBoundary) persisted = current;
         }
-        if (combined)
-            require(annotationSeen && hydraulicSeen,
-                    "combined history archive must contain both annotation and hydraulic edits");
+        // Multi-domain mode covers hydraulic-only, annotation-only and mixed
+        // archives alike; annotation-only mode refuses any hydraulic edit.
+        (void)annotationSeen;
+        (void)hydraulicSeen;
         // Membership manifests, member bytes and unrelated native records
         // must ALL match the proven end state, not just changed objects.
         const std::vector<ModelChange> reproduced =
@@ -696,13 +698,15 @@ std::optional<VerifiedAnnotationActionBoundary> replayVerifiedCombinedActionBoun
                                     authenticatedActionChain, actionPosition, true, error);
 }
 
-// First integration of standalone annotation proof with a REAL persisted
-// local Commit. All state comes from pinned immutable revision IDs; archived
-// forks are rejected until the mixed-domain ancestry planner can reconstruct
-// their logical (non-first-parent) starting coordinate.
+// Replay of a REAL persisted local Commit. All state comes from pinned
+// immutable revisions and the authenticated Commit witness. An archive that
+// started at an older History position (a fork) starts from that verified
+// source boundary instead of the first parent; the source is verified the
+// same way, and it must lie on the first-parent ancestry of this revision.
 static std::optional<VerifiedIndexedAnnotationActionBoundary> verifyIndexedActionBoundary(
         ProjectService& service, std::string_view projectId, std::string_view branch,
-        const RevisionId& revision, std::size_t actionPosition, bool combined, QString* error) {
+        const RevisionId& revision, std::size_t actionPosition, bool combined, QString* error,
+        std::size_t forkDepth = 0) {
     if (error) error->clear();
     const std::function<std::optional<VerifiedIndexedAnnotationActionBoundary>(const QString&)> fail =
         [error](const QString& reason) -> std::optional<VerifiedIndexedAnnotationActionBoundary> {
@@ -713,12 +717,9 @@ static std::optional<VerifiedIndexedAnnotationActionBoundary> verifyIndexedActio
         const RevisionNativeActionWitness witness =
             service.verifiedRevisionNativeActionWitness(projectId, branch, revision);
         if (!witness.parentRevision)
-            return fail(QStringLiteral("Initial annotation Commit has no immutable parent checkpoint"));
-        if (witness.historyForkRevision || witness.historyForkActionPosition ||
-            witness.historyForkArchiveCommitOperationId)
-            return fail(QStringLiteral("Forked annotation archive needs combined History replay"));
+            return fail(QStringLiteral("Initial Commit has no immutable parent checkpoint"));
         if (witness.actions.empty() || actionPosition > witness.actions.size())
-            return fail(QStringLiteral("Archived annotation action position is invalid"));
+            return fail(QStringLiteral("Archived action position is invalid"));
         // First-parent reachability alone is insufficient after History forks:
         // a discarded Redo suffix may remain in the immutable Commit archive.
         // Only a fully visible action path may be presented as verified.
@@ -727,20 +728,74 @@ static std::optional<VerifiedIndexedAnnotationActionBoundary> verifyIndexedActio
         if (!active.commitOperationId ||
             *active.commitOperationId != witness.commitOperationId ||
             active.total != witness.actions.size())
-            return fail(QStringLiteral("Annotation archive is not completely on the active History path"));
+            return fail(QStringLiteral("Archive is not completely on the active History path"));
 
-        // The witness is the store's exact revision difference and the
-        // complete set of network roots; the parent is read point by point.
         ReplayInput input;
-        input.parent = pinnedView(service.pinModelRevision(projectId, *witness.parentRevision));
-        input.nativeDelta = witness.actualNativeChanges;
         input.roots = witness.hydraulicDistributionRootKeys;
+        RevisionId originRevision = *witness.parentRevision;
+        std::vector<ModelChange> originChanges;
+        const bool forked = witness.historyForkRevision || witness.historyForkActionPosition ||
+                            witness.historyForkArchiveCommitOperationId;
+        if (!forked) {
+            // The witness is the store's exact revision difference; the
+            // parent is read point by point.
+            input.parent = pinnedView(service.pinModelRevision(projectId, *witness.parentRevision));
+            input.nativeDelta = witness.actualNativeChanges;
+        } else {
+            if (!witness.historyForkRevision || !witness.historyForkActionPosition ||
+                !witness.historyForkArchiveCommitOperationId)
+                return fail(QStringLiteral("Archived History fork provenance is incomplete"));
+            if (forkDepth >= 64)
+                return fail(QStringLiteral("Archived History forks are nested too deeply"));
+            // The fork source must be a first-parent ancestor: otherwise an
+            // invalid sidecar could create cycles in recursive replay.
+            std::optional<RevisionId> ancestor = witness.parentRevision;
+            bool onAncestry = false;
+            for (std::size_t depth = 0; ancestor && depth < 65536; ++depth) {
+                if (*ancestor == *witness.historyForkRevision) {
+                    onAncestry = true;
+                    break;
+                }
+                const RevisionGraphRevision prior = service.revision(projectId, *ancestor);
+                if (prior.parents.size() > 1) break;
+                ancestor = prior.parents.empty()
+                    ? std::nullopt : std::optional<RevisionId>(prior.parents.front().id);
+            }
+            if (!onAncestry)
+                return fail(QStringLiteral("Archived History fork does not follow immutable ancestry"));
+            QString sourceError;
+            const std::optional<VerifiedIndexedAnnotationActionBoundary> source =
+                verifyIndexedActionBoundary(service, projectId, branch, *witness.historyForkRevision,
+                    static_cast<std::size_t>(*witness.historyForkActionPosition), true,
+                    &sourceError, forkDepth + 1);
+            if (!source || source->commitOperationId != *witness.historyForkArchiveCommitOperationId ||
+                !source->originRevision)
+                return fail(QStringLiteral("Archived History fork source is not verified: ") + sourceError);
+            // Everything over the source's starting revision: the archive
+            // starts at source origin + source boundary, and ends at this
+            // revision (origin revision + the store's revision difference).
+            originRevision = *source->originRevision;
+            State origin(pinnedView(service.pinModelRevision(projectId, originRevision)));
+            origin.apply(source->originChanges);
+            origin.apply(source->boundary.changesFromParent);
+            State committed(origin.base());
+            committed.apply(service.modelChangesBetweenRevisions(
+                projectId, originRevision, revision, maximumHistoryChanges));
+            originChanges = origin.changes();
+            input.parent = origin.view();
+            input.nativeDelta = difference(origin, committed);
+        }
         const std::optional<VerifiedAnnotationActionBoundary> boundary =
             replayActionBoundary(input, witness.actions, witness.authenticatedActionChain,
                                  actionPosition, combined, error);
         if (!boundary) return std::nullopt;
-        return VerifiedIndexedAnnotationActionBoundary{
-            witness.revisionId, witness.commitOperationId, *boundary};
+        VerifiedIndexedAnnotationActionBoundary result;
+        result.revisionId = witness.revisionId;
+        result.commitOperationId = witness.commitOperationId;
+        result.boundary = *boundary;
+        result.originRevision = originRevision;
+        result.originChanges = std::move(originChanges);
+        return result;
     } catch (const std::exception& exception) {
         rethrowIfNotVerificationFailure(); // A3: environment errors keep their status
         return fail(QString::fromUtf8(exception.what()));
@@ -810,16 +865,19 @@ static std::optional<WorkingCopyInfo> navigateVerifiedAction(
             witness.commitOperationId != selected->commitOperationId ||
             witness.actions.size() != selected->boundary.actionCount)
             return fail(QStringLiteral("Annotation History witness changed during planning"));
+        if (!selected->originRevision)
+            return fail(QStringLiteral("Annotation History archive has no verified starting state"));
         const HistoryCheckpointPlan checkpoint = service.planHistoryCheckpoint(
-            draftId, *witness.parentRevision, expectedGeneration);
+            draftId, *selected->originRevision, expectedGeneration);
         if (checkpoint.expectedHead != draft.baseRevision ||
             checkpoint.projectId != draft.projectId ||
             checkpoint.branchId != draft.branchId)
             return fail(QStringLiteral("Annotation History checkpoint became stale"));
         // The checkpoint plan is the store's exact difference from HEAD to the
-        // immutable parent, built by the service (never by a client). HEAD +
-        // checkpoint is therefore the parent, and applying the verified
-        // boundary delta on top gives exactly the replayed boundary state.
+        // archive's starting revision, built by the service (never by a
+        // client). HEAD + checkpoint is that revision; the verified origin
+        // changes (a fork's source boundary) and the boundary delta on top give
+        // exactly the replayed boundary state.
         // Entries equal to HEAD are dropped, so returning to the archived tip
         // produces a clean draft when the revision is the current HEAD.
         std::set<Key> checkpointKeys;
@@ -828,6 +886,7 @@ static std::optional<WorkingCopyInfo> navigateVerifiedAction(
                     "duplicate annotation checkpoint change key");
         State candidate(pinnedView(service.pinModelRevision(draft.projectId, expectedHead)));
         candidate.apply(checkpoint.candidateChanges);
+        candidate.apply(selected->originChanges);
         candidate.apply(selected->boundary.changesFromParent);
         const std::vector<ModelChange> changes = candidate.changes();
         if (changes.size() > maximumHistoryChanges)
@@ -891,7 +950,6 @@ static std::optional<std::vector<ModelChange>> planVerifiedActiveAnnotationDraft
                 draft.journalCount <= maximumArchiveActions &&
                 actionPosition <= draft.journalCount,
                 "active annotation journal is incomplete or boundary is invalid");
-        bool hasAnnotation = false;
         bool hasHydraulic = false;
         for (const WorkingCopyEvent& event : draft.journal) {
             QString decodeError;
@@ -902,17 +960,20 @@ static std::optional<std::vector<ModelChange>> planVerifiedActiveAnnotationDraft
                     decoded->transactionId.toString(QUuid::WithoutBraces).toStdString() == event.id,
                     "active annotation journal contains invalid MODEL transaction");
             for (const aowis::model::ModelEntityEdit& edit : decoded->edits) {
-                if (edit.entityType == QStringLiteral("map.annotation")) hasAnnotation = true;
-                else hasHydraulic = true;
+                if (edit.entityType != QStringLiteral("map.annotation")) hasHydraulic = true;
             }
         }
-        require(hasAnnotation, "active journal has no annotation edits");
         require(draft.generation == expectedGeneration &&
                 draft.baseRevision == expectedHead,
                 "active annotation journal generation or committed base changed");
-        require(!draft.historyCheckpointRevisionId && !draft.historyActionPosition &&
-                !draft.historyArchiveCommitOperationId,
-                "active annotation journal is still at an archived checkpoint");
+        // While an archived position is shown, the journal is suspended at
+        // position 0 and the saved draft holds the archived state, not a
+        // journal state. Returning into the journal then starts from HEAD.
+        const bool atArchivedCheckpoint = draft.historyCheckpointRevisionId.has_value();
+        require(!atArchivedCheckpoint ||
+                (draft.historyActionPosition && draft.historyArchiveCommitOperationId &&
+                 draft.draftActionPosition == 0 && draft.baseRevision),
+                "active journal is at an incomplete archived checkpoint");
         const std::optional<RevisionGraphHead> branch =
             service.branchById(draft.projectId, draft.branchId);
         require(branch && branch->revision == draft.baseRevision,
@@ -964,7 +1025,7 @@ static std::optional<std::vector<ModelChange>> planVerifiedActiveAnnotationDraft
             // overlay (validated at each Save).
             const View head = pinnedView(service.pinModelRevision(draft.projectId, *draft.baseRevision));
             State saved(head);
-            saved.apply(draft.candidateChanges);
+            if (!atArchivedCheckpoint) saved.apply(draft.candidateChanges);
             input.parent = head;
             input.nativeDelta = saved.changes();
             input.roots = service.hydraulicDistributionRootKeysAtRevision(
@@ -980,48 +1041,41 @@ static std::optional<std::vector<ModelChange>> planVerifiedActiveAnnotationDraft
                     "active annotation History fork revision is invalid");
             QString sourceError;
             // The indexed verifier checks the authenticated action chain,
-            // exact native delta, ancestry visibility and the entire source
-            // revision. The combined form is needed when an archived source
-            // action also changed hydraulic membership or root metadata.
-            std::optional<VerifiedIndexedAnnotationActionBoundary> source =
-                verifyIndexedAnnotationActionBoundary(service, draft.projectId,
+            // exact native delta and ancestry visibility of the source, in
+            // the multi-domain mode (annotation, hydraulic or both).
+            const std::optional<VerifiedIndexedAnnotationActionBoundary> source =
+                verifyIndexedCombinedActionBoundary(service, draft.projectId,
                     branch->name, *sourceRevision,
                     static_cast<std::size_t>(*draft.historyForkActionPosition), &sourceError);
-            if (!source) {
-                source = verifyIndexedCombinedActionBoundary(service, draft.projectId,
-                    branch->name, *sourceRevision,
-                    static_cast<std::size_t>(*draft.historyForkActionPosition), &sourceError);
-            }
             require(source && source->commitOperationId ==
-                    *draft.historyForkArchiveCommitOperationId,
-                    "active annotation History fork source is not an authenticated action boundary");
-            const RevisionNativeActionWitness witness =
-                service.verifiedRevisionNativeActionWitness(
-                    draft.projectId, branch->name, *sourceRevision);
-            require(witness.parentRevision.has_value() &&
-                    witness.commitOperationId == source->commitOperationId &&
-                    source->boundary.actionCount == witness.actions.size(),
-                    "active annotation History fork source witness changed");
-            // Everything is expressed over the source's immutable parent: the
-            // journal origin is parent + verified source boundary, HEAD is
-            // parent + the store's revision difference, and the saved draft
-            // is HEAD + its overlay.
+                    *draft.historyForkArchiveCommitOperationId && source->originRevision,
+                    "active History fork source is not an authenticated action boundary");
+            // Everything is expressed over the source's starting revision:
+            // the journal origin is that revision + the verified source
+            // origin and boundary, HEAD is that revision + the store's
+            // revision difference, and the saved draft is HEAD + its overlay.
+            const RevisionId& sourceStart = *source->originRevision;
             const View forkParent =
-                pinnedView(service.pinModelRevision(draft.projectId, *witness.parentRevision));
+                pinnedView(service.pinModelRevision(draft.projectId, sourceStart));
             const std::vector<ModelChange> headFromForkParent =
-                service.modelChangesBetweenRevisions(draft.projectId, *witness.parentRevision,
+                service.modelChangesBetweenRevisions(draft.projectId, sourceStart,
                                                      *draft.baseRevision, maximumHistoryChanges);
             State origin(forkParent);
+            origin.apply(source->originChanges);
             origin.apply(source->boundary.changesFromParent);
             State head(forkParent);
             head.apply(headFromForkParent);
             State saved = head;
             saved.apply(draft.candidateChanges);
             input.parent = origin.view();
-            input.nativeDelta = difference(origin, saved);
+            // At an archived checkpoint the suspended journal is at position
+            // 0, i.e. at its origin.
+            input.nativeDelta = atArchivedCheckpoint ? std::vector<ModelChange>{}
+                                                     : difference(origin, saved);
             // The source replay refused network root creation, so the origin
             // has the parent's roots.
-            input.roots = witness.hydraulicDistributionRootKeys;
+            input.roots = service.hydraulicDistributionRootKeysAtRevision(
+                draft.projectId, *draft.baseRevision);
             relativeToHead = [origin, head](const std::vector<ModelChange>& boundary) {
                 State desired = origin;
                 desired.apply(boundary);
@@ -1090,22 +1144,8 @@ std::optional<WorkingCopyInfo> navigateVerifiedActiveDraftAction(
             return service.publishVerifiedDraftActionNavigation(
                 operationId, draftId, sessionId, fencingToken,
                 expectedGeneration, expectedHead, actionPosition, {});
-        bool containsAnnotation = false;
-        for (const WorkingCopyEvent& frame : draft.journal) {
-            QString decodeError;
-            const std::optional<aowis::model::ModelEditTransaction> transaction =
-                aowis::model::ModelEditTransactionCodec::decode(
-                    record::qByteArrayFromBytes(frame.encoded), &decodeError);
-            require(transaction && !transaction->edits.empty(),
-                    "invalid active MODEL History transaction");
-            for (const aowis::model::ModelEntityEdit& edit : transaction->edits)
-                if (edit.entityType == QStringLiteral("map.annotation"))
-                    containsAnnotation = true;
-        }
-        if (!containsAnnotation)
-            return hydraulic::navigateVerifiedHydraulicDraftAction(
-                service, operationId, draftId, sessionId, fencingToken,
-                expectedHead, actionPosition, expectedGeneration, error);
+        // Annotation, hydraulic and mixed journals all replay on changes
+        // through the same planner (the Save materializers and validators).
         const std::optional<std::vector<ModelChange>> changes =
             planVerifiedActiveAnnotationDraftAction(service, draftId, expectedHead,
                 actionPosition, expectedGeneration, error);

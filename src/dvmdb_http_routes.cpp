@@ -2175,11 +2175,9 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                             object.value("actionPosition").toString().toULongLong(&valid));
                         if (!valid) return false;
                         QString reason;
-                        return hydraulic::planVerifiedHydraulicDraftActionNavigation(
-                            service, draft.id, wanted, draft.generation, &reason).has_value() ||
-                            annotations::canNavigateVerifiedActiveAnnotationDraftAction(
-                                service, draft.id, draft.baseRevision, wanted,
-                                draft.generation, &reason);
+                        return annotations::canNavigateVerifiedActiveAnnotationDraftAction(
+                            service, draft.id, draft.baseRevision, wanted,
+                            draft.generation, &reason);
                     };
                 if (!previous.isNull() && !eligible(previous))
                     previous = QJsonValue(QJsonValue::Null);
@@ -2325,19 +2323,18 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 }
             }
             QString reason;
-            const std::optional<WorkingCopyInfo> result = archived && annotationArchive && hydraulicArchive
-                ? annotations::navigateVerifiedCombinedAction(service, operationId,
-                      draftId, sessionId, fencingToken, *expectedHead, *revision,
-                      static_cast<std::size_t>(position), generation, &reason)
-                : archived && annotationArchive
+            // All History replays on changes (Save materializers and
+            // validators); annotation-only archives use the stricter mode
+            // that refuses hydraulic edits.
+            const std::optional<WorkingCopyInfo> result = archived && annotationArchive && !hydraulicArchive
                 ? annotations::navigateVerifiedAnnotationAction(service, operationId,
                       draftId, sessionId, fencingToken, *expectedHead, *revision,
                       static_cast<std::size_t>(position), generation, &reason)
                 : archived
-                  ? hydraulic::navigateVerifiedHydraulicAction(service, operationId,
+                ? annotations::navigateVerifiedCombinedAction(service, operationId,
                       draftId, sessionId, fencingToken, *expectedHead, *revision,
                       static_cast<std::size_t>(position), generation, &reason)
-                  : annotations::navigateVerifiedActiveDraftAction(service, operationId,
+                : annotations::navigateVerifiedActiveDraftAction(service, operationId,
                       draftId, sessionId, fencingToken, expectedHead,
                       static_cast<std::size_t>(position), generation, &reason);
             if (!result)

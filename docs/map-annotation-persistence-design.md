@@ -286,7 +286,9 @@ A candidate that was already invalid before the Save (for example written by
 a raw native caller) is still rejected at local Commit.
 
 Archived and live History replay works on changes, not on copies of
-revisions:
+revisions, for annotation-only, hydraulic-only and mixed journals alike
+(the HTTP History routes use this one engine; the older whole-network
+hydraulic History functions remain only for their own tests):
 
 - The replayed state is a native overlay on the pinned starting revision
   (point reads, reverse-reference queries). Actions are applied with the Save
@@ -302,6 +304,10 @@ revisions:
   to the invalid one.
 - Annotation and hydraulic ownership of edited entities is looked up in the
   two endpoints through the reverse index (member, chunk, layer or network).
+- An archive that started at an older History position (a fork) starts from
+  that verified source boundary; the source must be a first-parent ancestor
+  and is verified the same way (nested forks up to 64 deep). Returning from
+  an archived position into a suspended draft journal starts at HEAD.
 - Network roots of a revision come from `hydraulicDistributionRootKeysAtRevision`:
   the nearest cached ancestor plus the store's revision differences, cached
   per immutable revision. A revision without a usable ancestor is streamed
