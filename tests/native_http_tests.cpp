@@ -335,6 +335,83 @@ QString historyDeltaDigestReference(const NetworkHydraulicDistribution& network,
     return QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
 }
 
+// Independent reference for the annotationDelta version 1 digest, computed
+// from the member array of a complete layer GET.
+QString annotationDeltaDigestReference(const QUuid& layerId, const QJsonArray& members,
+                                       bool orderChanged) {
+    QByteArray bytes("AOWIS-ANNOTATION-DELTA-1");
+    bytes.append(layerId.toRfc4122());
+    if (orderChanged) {
+        const quint32 count = static_cast<quint32>(members.size());
+        for (int shift = 24; shift >= 0; shift -= 8)
+            bytes.append(static_cast<char>((count >> shift) & 0xffU));
+        for (const QJsonValue& member : members)
+            bytes.append(QUuid(member.toObject().value("uuid").toString()).toRfc4122());
+    }
+    return QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
+}
+
+// Reference application of an annotationDelta to the member array of a
+// complete layer GET ({uuid, payloadBase64} objects). nullopt when a
+// before-image, an identity or the order does not fit.
+std::optional<QJsonArray> applyAnnotationDeltaReference(const QJsonArray& source,
+                                                        const QJsonObject& delta) {
+    QList<QString> ids;
+    std::map<QString, QString> payloads;
+    for (const QJsonValue& value : source) {
+        const QString id = value.toObject().value("uuid").toString();
+        if (!payloads.emplace(id, value.toObject().value("payloadBase64").toString()).second)
+            return std::nullopt;
+        ids.append(id);
+    }
+    std::map<QString, QString> created;
+    for (const QJsonValue& value : delta.value("edits").toArray()) {
+        const QJsonObject edit = value.toObject();
+        const QString id = edit.value("id").toString();
+        const std::map<QString, QString>::iterator found = payloads.find(id);
+        if (edit.value("beforeBase64").isNull() != (found == payloads.end())) return std::nullopt;
+        if (found != payloads.end() && found->second != edit.value("beforeBase64").toString())
+            return std::nullopt;
+        if (edit.value("afterBase64").isNull()) {
+            if (found == payloads.end()) return std::nullopt;
+            payloads.erase(found);
+            ids.removeAll(id);
+        } else if (found != payloads.end()) {
+            found->second = edit.value("afterBase64").toString();
+        } else if (!created.emplace(id, edit.value("afterBase64").toString()).second) {
+            return std::nullopt;
+        }
+    }
+    if (!delta.value("orderBase64").isNull()) {
+        for (const std::pair<const QString, QString>& entry : created) payloads.insert(entry);
+        const QByteArray order = QByteArray::fromBase64(delta.value("orderBase64").toString().toLatin1());
+        if (order.size() % 16 != 0 || static_cast<std::size_t>(order.size() / 16) != payloads.size())
+            return std::nullopt;
+        ids.clear();
+        for (qsizetype offset = 0; offset < order.size(); offset += 16) {
+            const QString id = QUuid::fromRfc4122(order.mid(offset, 16)).toString(QUuid::WithoutBraces);
+            if (!payloads.contains(id) || ids.contains(id)) return std::nullopt;
+            ids.append(id);
+        }
+    } else {
+        for (const QJsonValue& value : delta.value("insertions").toArray()) {
+            const QJsonObject insertion = value.toObject();
+            const QString id = insertion.value("id").toString();
+            const int position = insertion.value("position").toInt(-1);
+            const std::map<QString, QString>::iterator found = created.find(id);
+            if (found == created.end() || position < 0 || position > ids.size()) return std::nullopt;
+            payloads.insert(*found);
+            created.erase(found);
+            ids.insert(position, id);
+        }
+        if (!created.empty()) return std::nullopt;
+    }
+    QJsonArray result;
+    for (const QString& id : ids)
+        result.append(QJsonObject{{"uuid", id}, {"payloadBase64", payloads.at(id)}});
+    return result;
+}
+
 QString revisionText(const aowis::dvmdb::RevisionId& id) {
     return QString::fromStdString(id.toString());
 }
@@ -3491,19 +3568,323 @@ void exerciseUnbornAnnotationHistoryHttp() {
                        "8", "3")).status == 409 &&
           !service.optionalHead(project.id, "main"),
           "unborn annotation new edit did not abandon the Redo suffix");
+    // D3: the journal replays forward from its recorded seed, so a deletion
+    // in a never-committed draft is as reversible as a creation.
     const Response deleted = client.call("POST", draftPath + "/save-events",
         save("8", alternativeImage, std::nullopt));
+    const Response deletedCursor = client.call("GET", draftPath + "/history/cursor");
     check(deleted.status == 200 && deleted.json.value("generation") == "9" &&
-          client.call("GET", draftPath + "/history/cursor").json
-              .value("previousAction").isNull() &&
-          !client.call("GET", draftPath + "/history/cursor").json
-              .value("hasPreviousDraftAction").toBool() &&
-          client.call("POST", draftPath + "/history/navigate",
-              navigate(QString::fromStdString(native::UuidV7::generate().toString()),
-                       "9", "2")).status == 409 &&
           client.call("GET", layerPath).json.value("count") == 0 &&
+          deletedCursor.status == 200 && deletedCursor.json.value("journalCount") == "3" &&
+          deletedCursor.json.value("previousAction").toObject().value("actionPosition") == "2" &&
+          deletedCursor.json.value("nextAction").isNull(),
+          "unborn History did not offer Undo of a deletion");
+    const Response undoDelete = client.call("POST", draftPath + "/history/navigate",
+        navigate(QString::fromStdString(native::UuidV7::generate().toString()), "9", "2"));
+    const Response restoredLayer = client.call("GET", layerPath);
+    const Response restoredCursor = client.call("GET", draftPath + "/history/cursor");
+    check(undoDelete.status == 200 && undoDelete.json.value("generation") == "10" &&
+          restoredLayer.json.value("count") == 1 &&
+          restoredLayer.json.value("annotations").toArray().first().toObject()
+              .value("payloadBase64").toString().toLatin1() == alternativeImage.toBase64() &&
+          restoredCursor.json.value("previousAction").toObject().value("actionPosition") == "1" &&
+          restoredCursor.json.value("nextAction").toObject().value("actionPosition") == "3",
+          "unborn Undo of a deletion did not restore the deleted annotation");
+    const Response toSeed = client.call("POST", draftPath + "/history/navigate",
+        navigate(QString::fromStdString(native::UuidV7::generate().toString()), "10", "0"));
+    check(toSeed.status == 200 && toSeed.json.value("generation") == "11" &&
+          client.call("GET", layerPath).json.value("count") == 0,
+          "unborn Undo across a deletion did not reach the journal seed");
+    const Response redoDelete = client.call("POST", draftPath + "/history/navigate",
+        navigate(QString::fromStdString(native::UuidV7::generate().toString()), "11", "3"));
+    check(redoDelete.status == 200 && redoDelete.json.value("generation") == "12" &&
+          client.call("GET", layerPath).json.value("count") == 0,
+          "unborn Redo did not repeat the deletion");
+    const Response toCreated = client.call("POST", draftPath + "/history/navigate",
+        navigate(QString::fromStdString(native::UuidV7::generate().toString()), "12", "1"));
+    check(toCreated.status == 200 && toCreated.json.value("generation") == "13" &&
+          client.call("GET", layerPath).json.value("annotations").toArray().first().toObject()
+              .value("payloadBase64").toString().toLatin1() == createdImage.toBase64() &&
           !service.optionalHead(project.id, "main"),
-          "unborn deleted-member History fabricated missing membership provenance");
+          "unborn History across a deletion did not reproduce the created annotation");
+}
+
+// D1: large annotation layers are read in pages of membership chunks.
+// D2: History navigation with a networkId returns the changed annotations of
+// that network's layer (annotationDelta), so the client need not reload it.
+void exerciseAnnotationLayerPagesAndHistoryDeltaHttp() {
+    namespace native = aowis::dvmdb;
+    TemporaryRoot root;
+    native::ProjectService service(root.root());
+    const native::ProjectInfo project = service.createUnbornProject("annotation pages");
+    service.configureRepositoryRole(native::RepositoryRole::Private);
+    TestServer server(service, native::BundleLimits{4ULL * 1024ULL * 1024ULL,
+                                                    10000ULL, 1024ULL * 1024ULL});
+    Client client(server.port());
+    const QString session = QString::fromStdString(native::UuidV7::generate().toString());
+    const QString branchId = QString::fromStdString(service.branchId(project.id, "main")->toString());
+    const QString networkId = QString::fromStdString(native::UuidV7::generate().toString());
+    const QUuid layerUuid = native::annotations::distributionLayerUuid(QUuid(networkId));
+    const QString layerId = layerUuid.toString(QUuid::WithoutBraces);
+    const Response created = client.call("POST", "/dvmdb/v1/working-copies",
+        QJsonObject{{"projectId", QString::fromStdString(project.id)},
+                    {"branchId", branchId}, {"baseRevision", QJsonValue::Null},
+                    {"sessionId", session}});
+    check(created.status == 201, "annotation page draft creation failed");
+    const QString draftId = created.json.value("id").toString();
+    const QString draftPath = QStringLiteral("/dvmdb/v1/working-copies/") + draftId;
+    const QString layerPath = draftPath + QStringLiteral("/annotation-layers/") + layerId;
+    const Response lease = client.call("POST", draftPath + "/lease",
+        QJsonObject{{"sessionId", session}, {"seconds", 90}});
+    check(lease.status == 200, "annotation page draft lease failed");
+    const QString token = lease.json.value("token").toString();
+    check(client.call("POST", draftPath + "/initialize-network",
+              QJsonObject{{"sessionId", session}, {"fencingToken", token},
+                          {"expectedGeneration", "0"}, {"networkId", networkId},
+                          {"name", "Annotation pages"}}).status == 200,
+          "annotation page network initialization failed");
+
+    struct AnnotationEdit {
+        QUuid id;
+        std::optional<QByteArray> before;
+        std::optional<QByteArray> after;
+    };
+    const std::function<QJsonObject(const QString&, const QString&, const std::vector<AnnotationEdit>&)> save =
+        [&session, &layerId](const QString& fencing, const QString& generation,
+                             const std::vector<AnnotationEdit>& edits) -> QJsonObject {
+            aowis::model::ModelEditTransaction transaction;
+            transaction.transactionId = QUuid(QString::fromStdString(
+                aowis::dvmdb::UuidV7::generate().toString()));
+            transaction.operation = QStringLiteral("map.annotation.edit");
+            for (const AnnotationEdit& edit : edits)
+                transaction.edits.append(aowis::model::ModelEntityEdit{
+                    edit.id, QStringLiteral("map.annotation"), edit.before, edit.after, QUuid(layerId)});
+            const QByteArray frame = aowis::model::ModelEditTransactionCodec::encode(transaction);
+            check(!frame.isEmpty(), "annotation page event encoding failed");
+            return QJsonObject{{"sessionId", session}, {"fencingToken", fencing},
+                {"expectedGeneration", generation}, {"annotationLayerId", layerId},
+                {"changes", QJsonArray{}},
+                {"events", QJsonArray{QString::fromLatin1(frame.toBase64())}}};
+        };
+    // 300 annotations in one action: two membership chunks (256 + 44).
+    QList<MapAnnotation> annotations;
+    QList<QByteArray> images;
+    std::vector<AnnotationEdit> creations;
+    for (int number = 0; number < 300; ++number) {
+        MapAnnotation item;
+        item.uuid = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+        item.text = QStringLiteral("Page annotation %1").arg(number);
+        item.position_wgs84.longitude_deg = 14.0 + number * 0.001;
+        item.position_wgs84.latitude_deg = 11.0;
+        annotations.append(item);
+        images.append(native::ModelCodec<MapAnnotation>::encode(item));
+        check(!images.back().isEmpty(), "MODEL rejected a page annotation");
+        creations.push_back(AnnotationEdit{item.uuid, std::nullopt, images.back()});
+    }
+    check(client.call("POST", draftPath + "/save-events", save(token, "1", creations)).status == 200,
+          "300 annotations could not be saved in one action");
+
+    // D1 paging.
+    const Response whole = client.call("GET", layerPath);
+    const Response first = client.call("GET", layerPath + "?chunkLimit=1");
+    const Response second = client.call("GET", layerPath + "?fromChunk=1&chunkLimit=1");
+    const Response pastEnd = client.call("GET", layerPath + "?fromChunk=2&chunkLimit=39");
+    QJsonArray joined = first.json.value("annotations").toArray();
+    for (const QJsonValue& member : second.json.value("annotations").toArray()) joined.append(member);
+    check(whole.status == 200 && whole.json.value("generation") == "2" &&
+          whole.json.value("count") == 300 && whole.json.value("chunkCount") == 2 &&
+          whole.json.value("fromChunk") == 0 && whole.json.value("nextChunk").isNull() &&
+          whole.json.value("annotations").toArray().size() == 300 &&
+          whole.json.value("annotations").toArray().at(299).toObject().value("uuid") ==
+              annotations.at(299).uuid.toString(QUuid::WithoutBraces),
+          "unpaged annotation layer read lost members, order or page fields");
+    check(first.status == 200 && first.json.value("count") == 256 &&
+          first.json.value("chunkCount") == 2 && first.json.value("fromChunk") == 0 &&
+          first.json.value("nextChunk") == 1 && first.json.value("generation") == "2" &&
+          second.status == 200 && second.json.value("count") == 44 &&
+          second.json.value("fromChunk") == 1 && second.json.value("nextChunk").isNull() &&
+          second.json.value("generation") == "2" &&
+          joined == whole.json.value("annotations").toArray(),
+          "annotation layer pages did not join to the complete layer");
+    check(pastEnd.status == 200 && pastEnd.json.value("count") == 0 &&
+          pastEnd.json.value("fromChunk") == 2 && pastEnd.json.value("nextChunk").isNull() &&
+          pastEnd.json.value("annotations").toArray().isEmpty(),
+          "an annotation page at the end of the chunk list was not empty");
+    for (const QString& query : {QStringLiteral("?fromChunk=3"), QStringLiteral("?chunkLimit=0"),
+                                 QStringLiteral("?chunkLimit=40"), QStringLiteral("?fromChunk=01"),
+                                 QStringLiteral("?fromChunk=-1"), QStringLiteral("?chunkLimit=x"),
+                                 QStringLiteral("?fromChunk=1&fromChunk=1"),
+                                 QStringLiteral("?revision=x"), QStringLiteral("?limit=5")})
+        check(client.call("GET", layerPath + query).status == 400,
+              "malformed annotation layer page request was accepted");
+
+    // D2 on a never-committed draft: Undo of the 300 creations.
+    const std::function<QJsonObject(const QString&, const QString&, const QString&,
+                                    const QJsonValue&, bool)> navigate =
+        [&session, &networkId](const QString& fencing, const QString& generation,
+                               const QString& position, const QJsonValue& head,
+                               bool withNetwork) -> QJsonObject {
+            QJsonObject body{{"operationId", QString::fromStdString(native::UuidV7::generate().toString())},
+                {"sessionId", session}, {"fencingToken", fencing},
+                {"expectedGeneration", generation}, {"expectedHead", head},
+                {"actionPosition", position}};
+            if (withNetwork) body.insert("networkId", networkId);
+            return body;
+        };
+    const Response unbornUndo = client.call("POST", draftPath + "/history/navigate",
+        navigate(token, "2", "0", QJsonValue(QJsonValue::Null), true));
+    const QJsonObject unbornDelta = unbornUndo.json.value("annotationDelta").toObject();
+    const std::optional<QJsonArray> unbornApplied =
+        applyAnnotationDeltaReference(whole.json.value("annotations").toArray(), unbornDelta);
+    check(unbornUndo.status == 200 && unbornUndo.json.value("generation") == "3" &&
+          unbornUndo.json.contains("historyDelta") &&
+          unbornDelta.size() == 9 && unbornDelta.value("version") == 1 &&
+          unbornDelta.value("layerId") == layerId && unbornDelta.value("networkId") == networkId &&
+          unbornDelta.value("orderChanged") == true &&
+          unbornDelta.value("edits").toArray().size() == 300 &&
+          unbornDelta.value("insertions").toArray().isEmpty() &&
+          unbornDelta.value("orderBase64").isNull() &&
+          unbornDelta.value("fromSha256") ==
+              annotationDeltaDigestReference(layerUuid, whole.json.value("annotations").toArray(), true) &&
+          unbornDelta.value("toSha256") == annotationDeltaDigestReference(layerUuid, QJsonArray{}, true) &&
+          unbornApplied && unbornApplied->isEmpty() &&
+          client.call("GET", layerPath).json.value("count") == 0,
+          "unborn annotationDelta did not undo 300 creations");
+    const Response unbornRedo = client.call("POST", draftPath + "/history/navigate",
+        navigate(token, "3", "1", QJsonValue(QJsonValue::Null), true));
+    const std::optional<QJsonArray> unbornRedone =
+        applyAnnotationDeltaReference(QJsonArray{}, unbornRedo.json.value("annotationDelta").toObject());
+    check(unbornRedo.status == 200 && unbornRedo.json.value("generation") == "4" &&
+          unbornRedone && *unbornRedone == whole.json.value("annotations").toArray() &&
+          unbornRedo.json.value("annotationDelta").toObject().value("insertions").toArray().size() == 300,
+          "unborn annotationDelta did not redo 300 creations in layer order");
+    const Response plainUndo = client.call("POST", draftPath + "/history/navigate",
+        navigate(token, "4", "0", QJsonValue(QJsonValue::Null), false));
+    const Response plainRedo = client.call("POST", draftPath + "/history/navigate",
+        navigate(token, "5", "1", QJsonValue(QJsonValue::Null), false));
+    check(plainUndo.status == 200 && !plainUndo.json.contains("annotationDelta") &&
+          !plainUndo.json.contains("historyDelta") &&
+          plainRedo.status == 200 && plainRedo.json.value("generation") == "6" &&
+          !plainRedo.json.contains("annotationDelta"),
+          "History without networkId returned an annotationDelta");
+
+    // Commit, then read the branch layer in pages of the pinned revision.
+    const Response committed = client.call("POST", "/dvmdb/v1/local-commits",
+        QJsonObject{{"operationId", QString::fromStdString(native::UuidV7::generate().toString())},
+                    {"draftId", draftId}, {"sessionId", session}, {"fencingToken", token},
+                    {"expectedGeneration", "6"}, {"expectedHead", QJsonValue(QJsonValue::Null)},
+                    {"author", Client::testAuthor()}, {"message", "Annotation pages"}});
+    const QString revision = committed.json.value("revision").toString();
+    check(committed.status == 200 && !revision.isEmpty(), "annotation page Commit failed");
+    const QString branchLayer = QStringLiteral("/dvmdb/v1/projects/") +
+        QString::fromStdString(project.id) + "/branches/main/annotation-layers/" + layerId;
+    const Response branchWhole = client.call("GET", branchLayer);
+    const Response branchFirst = client.call("GET", branchLayer + "?revision=" + revision + "&chunkLimit=1");
+    const Response branchSecond = client.call("GET", branchLayer + "?fromChunk=1&chunkLimit=1&revision=" + revision);
+    QJsonArray branchJoined = branchFirst.json.value("annotations").toArray();
+    for (const QJsonValue& member : branchSecond.json.value("annotations").toArray())
+        branchJoined.append(member);
+    check(branchWhole.status == 200 && branchWhole.json.value("revision") == revision &&
+          branchWhole.json.value("count") == 300 && branchWhole.json.value("chunkCount") == 2 &&
+          branchWhole.json.value("nextChunk").isNull() &&
+          branchWhole.json.value("annotations").toArray() == whole.json.value("annotations").toArray() &&
+          branchFirst.status == 200 && branchFirst.json.value("revision") == revision &&
+          branchFirst.json.value("nextChunk") == 1 && branchFirst.json.value("count") == 256 &&
+          branchSecond.status == 200 && branchSecond.json.value("nextChunk").isNull() &&
+          branchJoined == whole.json.value("annotations").toArray(),
+          "branch annotation layer pages did not join to the committed layer");
+    check(client.call("GET", branchLayer + "?fromChunk=3").status == 400 &&
+          client.call("GET", branchLayer + "?chunkLimit=40").status == 400 &&
+          client.call("GET", branchLayer + "?draftId=" + draftId).status == 400,
+          "malformed branch annotation layer page request was accepted");
+
+    // D2 on a committed base: deletion, update, creation, and a member that
+    // is deleted and re-created (its position changes).
+    const std::optional<native::RevisionId> base = native::RevisionId::parse(revision.toStdString());
+    check(base.has_value(), "annotation page revision is not a UUIDv7");
+    const native::WorkingCopyInfo editing = service.createWorkingCopy(
+        project.id, "main", base, session.toStdString());
+    const native::WorkingCopyLease editingLease = service.acquireWorkingCopyLease(
+        editing.id, session.toStdString(), 90);
+    const QString editingToken = QString::fromStdString(editingLease.token);
+    const QString editingPath = QStringLiteral("/dvmdb/v1/working-copies/") +
+        QString::fromStdString(editing.id);
+    const QString editingLayer = editingPath + "/annotation-layers/" + layerId;
+    MapAnnotation fresh;
+    fresh.uuid = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+    fresh.text = QStringLiteral("Fresh page annotation");
+    fresh.position_wgs84.longitude_deg = 15.5;
+    fresh.position_wgs84.latitude_deg = 11.5;
+    const QByteArray freshImage = native::ModelCodec<MapAnnotation>::encode(fresh);
+    const std::function<QByteArray(int, const QString&)> renamed =
+        [&annotations](int index, const QString& text) {
+            MapAnnotation item = annotations.at(index);
+            item.text = text;
+            return native::ModelCodec<MapAnnotation>::encode(item);
+        };
+    const QByteArray tenRenamed = renamed(10, QStringLiteral("Renamed ten"));
+    const QByteArray twentyRenamed = renamed(20, QStringLiteral("Renamed twenty"));
+    check(!freshImage.isEmpty() && !tenRenamed.isEmpty() && !twentyRenamed.isEmpty(),
+          "MODEL rejected an edited page annotation");
+    check(client.call("POST", editingPath + "/save-events", save(editingToken, "0", {
+              AnnotationEdit{annotations.at(5).uuid, images.at(5), std::nullopt},
+              AnnotationEdit{annotations.at(10).uuid, images.at(10), tenRenamed},
+              AnnotationEdit{fresh.uuid, std::nullopt, freshImage}})).status == 200 &&
+          client.call("POST", editingPath + "/save-events", save(editingToken, "1", {
+              AnnotationEdit{annotations.at(20).uuid, images.at(20), twentyRenamed}})).status == 200 &&
+          client.call("POST", editingPath + "/save-events", save(editingToken, "2", {
+              AnnotationEdit{annotations.at(30).uuid, images.at(30), std::nullopt}})).status == 200 &&
+          client.call("POST", editingPath + "/save-events", save(editingToken, "3", {
+              AnnotationEdit{annotations.at(30).uuid, std::nullopt, images.at(30)}})).status == 200,
+          "annotation page edits could not be saved");
+    const QJsonArray atFour = client.call("GET", editingLayer).json.value("annotations").toArray();
+    check(atFour.size() == 300 &&
+          atFour.last().toObject().value("uuid") == annotations.at(30).uuid.toString(QUuid::WithoutBraces),
+          "a re-created annotation was not appended to its layer");
+    struct Step {
+        QString generation;
+        QString position;
+        bool orderChanged;
+        int edits;
+        int insertions;
+        bool fullOrder;
+        const char* message;
+    };
+    const std::vector<Step> steps{
+        {"4", "3", true, 1, 0, false, "annotationDelta Undo of a re-creation failed"},
+        {"5", "2", true, 1, 1, false, "annotationDelta Undo of a deletion did not restore its position"},
+        {"6", "1", false, 1, 0, false, "annotationDelta Undo of a pure update failed"},
+        {"7", "0", true, 3, 1, false, "annotationDelta Undo of a mixed action failed"},
+        {"8", "4", true, 4, 0, true, "annotationDelta Redo across a reorder did not send the full order"},
+    };
+    QJsonArray current = atFour;
+    QJsonObject lastBody;
+    QJsonObject lastDelta;
+    for (const Step& step : steps) {
+        lastBody = navigate(editingToken, step.generation, step.position, QJsonValue(revision), true);
+        const Response moved = client.call("POST", editingPath + "/history/navigate", lastBody);
+        const QJsonArray destination = client.call("GET", editingLayer).json.value("annotations").toArray();
+        lastDelta = moved.json.value("annotationDelta").toObject();
+        const std::optional<QJsonArray> applied = applyAnnotationDeltaReference(current, lastDelta);
+        check(moved.status == 200 &&
+              moved.json.value("generation") == QString::number(step.generation.toInt() + 1) &&
+              moved.json.contains("historyDelta") && lastDelta.size() == 9 &&
+              lastDelta.value("orderChanged") == step.orderChanged &&
+              lastDelta.value("edits").toArray().size() == step.edits &&
+              lastDelta.value("insertions").toArray().size() == step.insertions &&
+              lastDelta.value("orderBase64").isNull() == !step.fullOrder &&
+              lastDelta.value("fromSha256") ==
+                  annotationDeltaDigestReference(layerUuid, current, step.orderChanged) &&
+              lastDelta.value("toSha256") ==
+                  annotationDeltaDigestReference(layerUuid, destination, step.orderChanged) &&
+              applied && *applied == destination, step.message);
+        current = destination;
+    }
+    check(current == atFour, "annotationDelta navigation did not return to the saved layer");
+    const Response replayed = client.call("POST", editingPath + "/history/navigate", lastBody);
+    check(replayed.status == 200 && replayed.json.value("generation") == "9" &&
+          replayed.json.value("annotationDelta").toObject() == lastDelta,
+          "lost-reply History replay did not return the same annotationDelta");
 }
 
 void exerciseCompleteNetworkDraftImportHttp() {
@@ -4858,6 +5239,7 @@ int main(int argc, char** argv) {
         exerciseUnbornNetworkInitializationHttp();
         exerciseAnnotationDraftHttp();
         exerciseUnbornAnnotationHistoryHttp();
+        exerciseAnnotationLayerPagesAndHistoryDeltaHttp();
         exerciseCompleteNetworkDraftImportHttp();
         exerciseHydraulicDraftMembershipHttp();
 #endif

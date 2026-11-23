@@ -1,4 +1,4 @@
-# Sparse hydraulic History transport and reconciliation
+# Sparse hydraulic and annotation History transport and reconciliation
 
 DVMDB owns the authoritative working-copy content, saved generation,
 History cursor, immutable revisions and original MODEL action archives.
@@ -60,6 +60,47 @@ differ.
   with the same `orderedTypes`. The GUI computes both from its own network:
   the settings image plus the member order of the listed collections. All
   other content is checked through the before-images of `edits`.
+
+### annotationDelta version 1
+
+The same reply also carries `annotationDelta` for the network's
+Distribution annotation layer, so the GUI does not reload the layer after
+Undo/Redo. It is absent when the layer is missing at either draft (the
+client then reloads the layer) and when `networkId` was not sent.
+
+```json
+{"version": 1, "layerId": "<uuid>", "networkId": "<uuid>",
+ "orderChanged": true, "fromSha256": "<hex>", "toSha256": "<hex>",
+ "edits": [{"id": "<uuid>", "beforeBase64": ..., "afterBase64": ...}],
+ "insertions": [{"id": "<uuid>", "position": 5}],
+ "orderBase64": null}
+```
+
+- `edits`: canonical MODEL `MapAnnotation` images; `beforeBase64` null is a
+  creation, `afterBase64` null a deletion. With `orderChanged` false: updates
+  only, in UUID byte order. With `orderChanged` true: deletions and updates
+  in source layer order, then creations in destination order.
+- `orderChanged`: the layer's membership or member order changed (a
+  membership chunk or the root's chunk list differs).
+- `insertions` (only when `orderBase64` is null): the final index of every
+  created member, ascending. Members that stay keep their relative order, so
+  the client removes the deletions, then inserts the creations at their
+  positions in ascending order.
+- `orderBase64`: null, or, when members that stay changed their relative
+  order (an action deleted and re-created a member), the complete destination
+  order as base64 of the concatenated 16-byte RFC 4122 UUIDs. `insertions`
+  is then empty and the client arranges all members in this order.
+- Digest: SHA-256, lowercase hex, of ASCII `AOWIS-ANNOTATION-DELTA-1`, the
+  16-byte layer UUID, then only when `orderChanged` is true `u32be(count)`
+  and the 16-byte UUID of every member in layer order. `fromSha256` uses the
+  source order and `toSha256` the destination order. Content is checked
+  through the before-images.
+
+The server reads the member order from the membership chunks only when
+`orderChanged` is true; member records are never decoded. The layer's
+metadata never changes through History. A distant jump may carry many edits;
+a reorder of a very large layer sends its complete order (16 bytes per
+member).
 
 Version 1 hashed the complete canonical network, which forced the server to
 load and encode the whole network on every Undo/Redo. The reconciliation

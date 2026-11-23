@@ -135,8 +135,8 @@ With an archived `revisionId`, the same POST endpoint selects verified
 immutable Commit action boundaries when the live journal is empty or is suspended at its verified zero position.
 The cursor GET now resolves `previousAction` and `nextAction` coordinates,
 including across adjacent archived Commits. At a verified live position zero it can enter archived history without
-erasing the Redo journal, and the cursor supplies the return step. An unborn initialized single-network draft supports verified journaled creations/updates;
-ambiguous member deletions remain ineligible. Multi-network navigation is deferred;
+erasing the Redo journal, and the cursor supplies the return step. An unborn draft replays forward from its recorded journal seed, so journaled creations,
+updates and deletions are all navigable. Multi-network navigation is deferred;
 DVMDB's multi-network storage capability is unchanged.
 
 ## Limits and interpretation
@@ -156,14 +156,14 @@ DVMDB's multi-network storage capability is unchanged.
   present canonical network before publishing any cursor change. The native
   publisher retains the journal and records `draft-action-position` across
   restart. One unambiguous existing network in a committed base or initialized unborn
-  draft is supported (unborn deletions require additional ordering proof); unjournaled native changes and ambiguous ownership fail closed.
+  draft is supported (an unborn journal replays from its recorded seed); unjournaled native changes and ambiguous ownership fail closed.
   Navigation preserves future Redo frames. A **new** atomic MODEL event
   Save behind the tip branches the journal: retains the selected prefix,
   replaces the redo tail with new actions, and publishes the model candidate
   and journal metadata together. Commit still refuses a non-tip cursor.
 - The remaining scope is deliberate: multi-network action navigation is
-  deferred, and unborn member deletions without exact original membership
-  order remain ineligible. HTTP active/archived action selection and adjacent
+  deferred, and only unborn journals begun before seeds were stored still
+  refuse deletions. HTTP active/archived action selection and adjacent
   cross-Commit coordinates are implemented. End-to-end editor, power-loss
   and browser storage acceptance are tracked in
   [History acceptance](history-roadmap.md).

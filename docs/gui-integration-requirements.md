@@ -66,7 +66,11 @@ network settings and the member order of the collections listed in
 `orderedTypes` (exact byte layout in [History transport](history-transport.md);
 version 1 hashed the whole network). The GUI verifies source digest,
 before-images, and destination digest before changing the editor. It does
-**not** download the complete network for routine Undo/Redo.
+**not** download the complete network for routine Undo/Redo. The same reply
+carries `annotationDelta` (version 1) for the network's annotation layer;
+the GUI applies it the same way instead of reloading the layer. Annotation
+layers are read in pages of membership chunks (`fromChunk`, `chunkLimit` at
+most 39), all of one draft generation.
 
 On lost acknowledgements the client retries only the original UUID, then
 reconciles against read-only `/history/reconcile` (operation UUID, generation,

@@ -88,6 +88,25 @@ def main() -> None:
     require(routes, r"server\.Post\(routeModelCommits.*?service\.commitModel\(.*?"
             r"validateEngineeringCandidateIfNeeded\(candidate\)",
             "direct MODEL HTTP Commit lost semantic candidate validation")
+    # D1: annotation layers are read in pages of membership chunks.
+    require(routes, r"layerPageRequest\(request, true\).*?layerPageRequest\(request, false\)",
+            "annotation layer routes lost their page parameters")
+    require(routes, r"annotations::loadAnnotationLayerPage\(read, layerId, page\.fromChunk",
+            "annotation layer pages must check the member limit before reading members")
+    # D2: History returns the changed annotations of the network's layer.
+    require(routes, r"changeBasedHistoryAnnotationDelta\(service, \*before, \*result, \*networkId\)"
+            r".*?QStringLiteral\(\"annotationDelta\"\)",
+            "History navigation lost its annotationDelta")
+    require(tests, r"void\s+exerciseAnnotationLayerPagesAndHistoryDeltaHttp\s*\(",
+            "missing annotation page/delta HTTP test definition")
+    require(tests, r"(?<!void\s)exerciseAnnotationLayerPagesAndHistoryDeltaHttp\s*\(\s*\)\s*;",
+            "annotation page/delta HTTP test is not invoked")
+    require(tests, r"annotationDelta Redo across a reorder did not send the full order",
+            "annotationDelta full-order regression was removed")
+    require(tests, r"annotation layer pages did not join to the complete layer",
+            "annotation layer paging regression was removed")
+    require(api, r"name: chunkLimit, in: query", "annotation layer paging missing from OpenAPI")
+    require(api, r"annotationDelta version 1", "annotationDelta missing from OpenAPI")
     require(tests, r"void\s+exerciseAnnotationDraftHttp\s*\(",
             "missing annotation HTTP integration test definition")
     require(tests, r"(?<!void\s)exerciseAnnotationDraftHttp\s*\(\s*\)\s*;",

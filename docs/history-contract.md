@@ -42,10 +42,10 @@ acceptance work is in [History acceptance](history-roadmap.md).
 | Verify an entire revision | `verifiedRevisionNativeActionWitness` plus `annotations::verifyIndexedCombinedActionBoundary`: the archive, replayed on changes, must reproduce every changed native record across affected networks and layers |
 | Plan archived action boundary | `annotations::planVerifiedArchivedAction` builds an exact, **HEAD-relative** candidate without mutation |
 | Select archived action boundary | `annotations::navigateVerifiedCombinedAction` atomically publishes verified replacement state and durable cursor metadata under lease, HEAD and generation fences, idempotent by navigation operation UUID |
-| Navigate active draft actions | `annotations::planVerifiedActiveDraftAction` replays all retained MODEL frames on changes and proves the saved draft at its cursor; `annotations::navigateVerifiedActiveDraftAction` publishes the HEAD-relative candidate and cursor through the fenced/idempotent native writer. Several networks are supported; a member created and deleted inside the journal needs one unambiguous network. An unborn network initialized/imported before the first MODEL event can replay journaled creations/updates, but unborn deletions are refused |
+| Navigate active draft actions | `annotations::planVerifiedActiveDraftAction` replays all retained MODEL frames on changes and proves the saved draft at its cursor; `annotations::navigateVerifiedActiveDraftAction` publishes the HEAD-relative candidate and cursor through the fenced/idempotent native writer. Several networks are supported; a member created and deleted inside the journal needs one unambiguous network. An unborn draft replays its journal forward from the journal seed recorded when the journal started, so creations, updates and deletions are all reversible; a journal begun before seeds existed falls back to reversal and refuses deletions |
 | HTTP action navigation | `GET /working-copies/{draftId}/history/cursor` distinguishes an active journal cursor from an archived Commit coordinate and supplies bounded, server-resolved `previousAction`/`nextAction` coordinates (including adjacent Commit archives); fenced `POST /working-copies/{draftId}/history/navigate` selects a verified active boundary, or an indexed archived boundary when `revisionId` is supplied. Both use a UUIDv7 operation identity and server-built overlays |
 | Suspended draft / archived handoff | At active position zero, `previousAction` can address the last archived Commit action; the published cursor preserves original draft frames for Redo. From the newest Commit's final action, `nextAction` returns to the retained draft at zero, then continues to its first action. A new MODEL Save from an archived selection atomically creates a forked active action path and invalidates its forward Redo suffix; immutable Commits are not removed |
-| Unborn first-draft creation/update Undo/Redo | **Implemented for one verified initialized network; Qt/HTTP acceptance pending; ambiguous member deletions fail closed** |
+| Unborn first-draft Undo/Redo (creations, updates, deletions) | **Implemented from the recorded journal seed; ambiguous member ownership fails closed** |
 | GUI Undo/Redo and restart reconciliation | **GUI integration and durable local navigation intent implemented; process-kill/Standalone/WASM deployment acceptance outstanding** |
 
 The **archived** HTTP/native action selector requires an indexed, complete,
@@ -80,7 +80,8 @@ internally, but the successful reply carries `historyDelta` (version 2, see
 [History transport](history-transport.md)): only changed entity before/after
 images (including root metadata), sparse membership moves, and source and
 destination SHA-256 digests over the network settings and the member order
-of the collections whose membership changed. Unchanged entities and the
+of the collections whose membership changed, plus `annotationDelta`
+(version 1) for the network's annotation layer. Unchanged entities and the
 complete network are neither transmitted nor read by the server. The GUI must
 check the source digest and every before-image, reconstruct a temporary copy,
 verify the destination digest, then publish it locally. DVMDB retains the
@@ -121,9 +122,11 @@ new actions, making the former redo tail ineligible without changing any
 immutable Commit. This Save/cursor transition is atomic and crash-safe;
 Commit still rejects an unapplied redo tail. Navigation is currently
 limited to one unambiguous hydraulic distribution network. For an unborn private draft,
-its initialized/imported network is the unjournaled seed: journaled creations
-and updates may be undone/redone without fabricating a Commit. Deletions whose
-original membership order cannot be proved fail closed. Multi-network
+the draft overlay at journal position 0 (its initialized/imported network) is
+stored as the journal seed when the journal starts, and History replays the
+journal forward from it: creations, updates and deletions may be undone and
+redone without fabricating a Commit. Only a journal begun before seeds were
+stored falls back to reversal, where deletions fail closed. Multi-network
 navigation remains deferred. HTTP adjacent navigation crosses eligible Commit
 markers. GUI restart has a client-side durable pending intent and SHA-256
 reconciliation path; real process-kill and multi-platform acceptance remain

@@ -246,6 +246,31 @@ Chunk checkedChunk(const std::function<std::optional<ModelRecord>(const Key&)>& 
     return chunk;
 }
 
+void checkLayerOwner(const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
+                     const Root& root) {
+    if (!root.layer.owner_network_uuid) return;
+    const std::optional<ModelRecord> owner = readCurrent(key(*root.layer.owner_network_uuid));
+    reject(!owner || owner->kind != engineeringNetworkKind,
+           "missing or invalid distribution network owner");
+}
+
+// One member listed by `root`: canonical record and an existing anchor target.
+// B2 must prove that anchor targets have the declared type and belong to this
+// layer's owner; never silently drop missing ones.
+MapAnnotation listedMember(const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
+                           const Root& root, const QUuid& id) {
+    const std::optional<ModelRecord> item = readCurrent(key(id));
+    reject(!item, "missing annotation member");
+    const MapAnnotation decoded = decodeMember(*item, id);
+    if (decoded.anchor) {
+        reject(root.layer.domain != MapAnnotationDomain::Distribution,
+               "unowned/drainage annotation cannot have an anchor");
+        const std::optional<ModelRecord> anchor = readCurrent(key(decoded.anchor->entity_uuid));
+        reject(!anchor, "annotation anchor target is missing");
+    }
+    return decoded;
+}
+
 } // namespace
 
 QUuid distributionLayerUuid(const QUuid& networkId) {
@@ -548,11 +573,7 @@ std::optional<AnnotationLayerSnapshot> loadAnnotationLayer(
     const std::optional<ModelRecord> found = readCurrent(key(layerId));
     if (!found) return std::nullopt;
     const Root root = decodeRoot(*found, layerId);
-    if (root.layer.owner_network_uuid) {
-        const std::optional<ModelRecord> owner = readCurrent(key(*root.layer.owner_network_uuid));
-        reject(!owner || owner->kind != engineeringNetworkKind,
-               "missing or invalid distribution network owner");
-    }
+    checkLayerOwner(readCurrent, root);
     AnnotationLayerSnapshot result;
     result.layer = root.layer;
     result.chunkIds = root.chunkIds;
@@ -564,21 +585,70 @@ std::optional<AnnotationLayerSnapshot> loadAnnotationLayer(
         const QList<QUuid> members = checkedChunk(readCurrent, layerId, chunkId).members;
         for (const QUuid& id : members) {
             reject(!seen.insert(key(id)).second, "duplicate annotation member UUID");
-            const std::optional<ModelRecord> item = readCurrent(key(id));
-            reject(!item, "missing annotation member");
-            const MapAnnotation decoded = decodeMember(*item, id);
-            // B2 must prove that anchor targets have the declared type and
-            // belong to this layer's owner; never silently drop missing ones.
-            if (decoded.anchor) {
-                reject(root.layer.domain != MapAnnotationDomain::Distribution,
-                       "unowned/drainage annotation cannot have an anchor");
-                const std::optional<ModelRecord> anchor = readCurrent(key(decoded.anchor->entity_uuid));
-                reject(!anchor, "annotation anchor target is missing");
-            }
-            result.annotations.append(decoded);
+            result.annotations.append(listedMember(readCurrent, root, id));
         }
     }
     return result;
+}
+
+std::optional<AnnotationLayerPage> loadAnnotationLayerPage(
+    const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
+    const QUuid& layerId, std::size_t fromChunk, std::optional<std::size_t> chunkLimit,
+    std::size_t memberLimit) {
+    if (chunkLimit && *chunkLimit == 0)
+        throw StorageError(StorageErrorKind::InvalidInput,
+                           "annotation layer page needs at least one chunk");
+    const std::optional<ModelRecord> found = readCurrent(key(layerId));
+    if (!found) return std::nullopt;
+    const Root root = decodeRoot(*found, layerId);
+    const std::size_t chunkCount = static_cast<std::size_t>(root.chunkIds.size());
+    if (fromChunk > chunkCount)
+        throw StorageError(StorageErrorKind::InvalidInput,
+                           "annotation layer page starts after the last chunk");
+    checkLayerOwner(readCurrent, root);
+    const std::size_t remaining = chunkCount - fromChunk;
+    const std::size_t taken = chunkLimit ? std::min(remaining, *chunkLimit) : remaining;
+    AnnotationLayerPage page;
+    page.layer = root.layer;
+    page.chunkCount = chunkCount;
+    page.fromChunk = fromChunk;
+    page.nextChunk = fromChunk + taken;
+    QList<QUuid> members;
+    for (std::size_t index = fromChunk; index < page.nextChunk; ++index) {
+        members.append(checkedChunk(readCurrent, layerId,
+                                    root.chunkIds.at(static_cast<qsizetype>(index))).members);
+        if (static_cast<std::size_t>(members.size()) > memberLimit)
+            throw StorageError(StorageErrorKind::InvalidInput,
+                               "annotation layer exceeds HTTP listing limit");
+    }
+    std::set<Key> seen;
+    for (const QUuid& id : members) {
+        reject(!seen.insert(key(id)).second, "duplicate annotation member UUID");
+        page.annotations.append(listedMember(readCurrent, root, id));
+    }
+    return page;
+}
+
+std::optional<AnnotationLayerOrder> loadAnnotationLayerOrder(
+    const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
+    const QUuid& layerId, bool includeMembers) {
+    const std::optional<ModelRecord> found = readCurrent(key(layerId));
+    if (!found) return std::nullopt;
+    const Root root = decodeRoot(*found, layerId);
+    AnnotationLayerOrder order;
+    order.layer = root.layer;
+    order.chunkIds = root.chunkIds;
+    if (!includeMembers) return order;
+    QSet<QUuid> seen;
+    for (const QUuid& chunkId : root.chunkIds) {
+        const Chunk chunk = checkedChunk(readCurrent, layerId, chunkId);
+        for (const QUuid& member : chunk.members) {
+            reject(seen.contains(member), "duplicate annotation member UUID");
+            seen.insert(member);
+            order.members.append(member);
+        }
+    }
+    return order;
 }
 
 std::optional<AnnotationLayerSummary> loadAnnotationLayerSummary(

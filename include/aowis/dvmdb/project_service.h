@@ -83,6 +83,14 @@ struct WorkingCopyInfo {
     // just persisted (or replayed). journalCount is always the full count.
     std::vector<WorkingCopyEvent> journal;
     std::uint64_t journalCount = 0;
+    // Exact draft overlay at journal position 0 of an UNBORN draft, recorded
+    // when its journal started (first event Save, or an event Save that
+    // replaced the journal from position 0). History replays the journal
+    // forward from it, so deletions are as reversible as creations. Filled
+    // with the journal (workingCopy() with includeJournal). nullopt: not
+    // recorded (a draft with a committed base, or a journal begun before
+    // the seed was stored).
+    std::optional<std::vector<ModelChange>> journalSeed;
     std::optional<std::string> lastSaveFingerprint; // Last journalled batch for idempotency.
     // HIST-03b: exact snapshot selected in this private draft. These fields
     // are part of the same atomic meta publication as candidateChanges.

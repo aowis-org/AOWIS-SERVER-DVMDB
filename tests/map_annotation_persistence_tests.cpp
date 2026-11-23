@@ -8,6 +8,7 @@
 #include <QCoreApplication>
 #include <QString>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -172,6 +173,113 @@ void testLayerSummaryReadsNoMembers() {
     }
 }
 
+// D1/D2: pages of membership chunks and the member order without members.
+void testLayerPagesAndOrder() {
+    for (const int count : {0, 1, 256, 257, 600}) {
+        const MapAnnotationLayer layer = distributionLayer();
+        QList<MapAnnotation> annotations;
+        std::set<db::Key> memberKeys;
+        for (int number = 0; number < count; ++number) {
+            annotations.append(annotation(static_cast<std::uint32_t>(number)));
+            memberKeys.insert(db::record::keyFromUuid(annotations.back().uuid));
+        }
+        std::map<db::Key, db::ModelRecord> model =
+            records(ann::fullDraftAnnotationLayerChanges(layer, annotations));
+        db::ModelRecord owner;
+        owner.kind = 100;
+        owner.payload = {1};
+        model.emplace(db::record::keyFromUuid(uuid(1)), owner);
+        const std::size_t chunks = static_cast<std::size_t>((count + 255) / 256);
+        std::vector<db::Key> visited;
+        const std::function<std::optional<db::ModelRecord>(const db::Key&)> base = reader(model);
+        const std::function<std::optional<db::ModelRecord>(const db::Key&)> counted =
+            [&visited, &base](const db::Key& key) {
+                visited.push_back(key);
+                return base(key);
+            };
+
+        const std::optional<ann::AnnotationLayerPage> whole =
+            ann::loadAnnotationLayerPage(base, layer.uuid, 0, std::nullopt, 100000);
+        require(whole && whole->chunkCount == chunks && whole->fromChunk == 0 &&
+                whole->nextChunk == chunks && whole->annotations.size() == count &&
+                whole->layer.uuid == layer.uuid,
+                "unlimited layer page is not the whole layer");
+        QList<QUuid> joined;
+        std::size_t next = 0;
+        std::size_t pages = 0;
+        do {
+            const std::optional<ann::AnnotationLayerPage> page =
+                ann::loadAnnotationLayerPage(base, layer.uuid, next, 1, 256);
+            require(page && page->fromChunk == next && page->chunkCount == chunks &&
+                    page->nextChunk == std::min(next + 1, chunks) &&
+                    page->annotations.size() <= 256,
+                    "one-chunk layer page has wrong page fields");
+            for (const MapAnnotation& item : page->annotations) joined.append(item.uuid);
+            next = page->nextChunk;
+            ++pages;
+        } while (next < chunks);
+        require(pages == std::max<std::size_t>(chunks, 1), "layer was not read in one page per chunk");
+        for (int index = 0; index < count; ++index)
+            require(joined.at(index) == annotations.at(index).uuid,
+                    "layer pages lost members or their order");
+        require(joined.size() == count, "layer pages hold extra members");
+
+        const std::optional<ann::AnnotationLayerPage> atEnd =
+            ann::loadAnnotationLayerPage(base, layer.uuid, chunks, 39, 10000);
+        require(atEnd && atEnd->annotations.isEmpty() && atEnd->nextChunk == chunks,
+                "a page at the end of the chunk list must be empty");
+        mustReject([&]() { (void)ann::loadAnnotationLayerPage(base, layer.uuid, chunks + 1, 1, 10000); },
+                   "a page after the last chunk was accepted");
+        mustReject([&]() { (void)ann::loadAnnotationLayerPage(base, layer.uuid, 0, 0, 10000); },
+                   "a zero chunk limit was accepted");
+        require(!ann::loadAnnotationLayerPage(base, uuid(987654), 0, 1, 10000),
+                "page of a nonexistent layer must be absent");
+
+        const std::optional<ann::AnnotationLayerOrder> rootOnly =
+            ann::loadAnnotationLayerOrder(counted, layer.uuid, false);
+        require(rootOnly && rootOnly->members.isEmpty() &&
+                static_cast<std::size_t>(rootOnly->chunkIds.size()) == chunks &&
+                visited.size() == 1, "root-only layer order read more than the root");
+        visited.clear();
+        const std::optional<ann::AnnotationLayerOrder> order =
+            ann::loadAnnotationLayerOrder(counted, layer.uuid, true);
+        require(order && order->members.size() == count && visited.size() == 1 + chunks,
+                "layer order must read exactly the root and its chunks");
+        for (int index = 0; index < count; ++index)
+            require(order->members.at(index) == annotations.at(index).uuid,
+                    "layer order lost a member or its position");
+        for (const db::Key& key : visited)
+            require(!memberKeys.contains(key), "layer order read an annotation member");
+        require(!ann::loadAnnotationLayerOrder(base, uuid(987654), true),
+                "order of a nonexistent layer must be absent");
+
+        if (count < 257) continue;
+        // The member limit is checked before any member record is read.
+        visited.clear();
+        mustReject([&]() { (void)ann::loadAnnotationLayerPage(counted, layer.uuid, 0, 2, 255); },
+                   "a page above the member limit was accepted");
+        require(!visited.empty(), "the member limit test read nothing");
+        for (const db::Key& key : visited)
+            require(!memberKeys.contains(key), "member limit was checked after reading members");
+        require(ann::loadAnnotationLayerPage(base, layer.uuid, 0, 1, 256).has_value(),
+                "a page exactly at the member limit was refused");
+        mustReject([&]() { (void)ann::loadAnnotationLayerPage(base, layer.uuid, 0, std::nullopt, 256); },
+                   "an unlimited page above the member limit was accepted");
+        // A missing owner and a missing member fail closed.
+        std::map<db::Key, db::ModelRecord> ownerless = model;
+        ownerless.erase(db::record::keyFromUuid(uuid(1)));
+        mustReject([&]() { (void)ann::loadAnnotationLayerPage(reader(ownerless), layer.uuid, 0, 1, 256); },
+                   "a page of a layer without its owner network was accepted");
+        std::map<db::Key, db::ModelRecord> memberless = model;
+        memberless.erase(db::record::keyFromUuid(annotations.last().uuid));
+        require(ann::loadAnnotationLayerPage(reader(memberless), layer.uuid, 0, 1, 256).has_value(),
+                "a page without the missing member must still load");
+        mustReject([&]() { (void)ann::loadAnnotationLayerPage(reader(memberless), layer.uuid,
+                                                             chunks - 1, 1, 256); },
+                   "a page with a missing member was accepted");
+    }
+}
+
 void testDrainageAndInvalidInput() {
     MapAnnotationLayer drainage;
     drainage.uuid = uuid(888);
@@ -298,6 +406,7 @@ int main(int argc, char** argv) {
         testDeterministicDistributionLayerIdentity();
         testMembershipSizes();
         testLayerSummaryReadsNoMembers();
+        testLayerPagesAndOrder();
         testDrainageAndInvalidInput();
         testCorruptReferences();
         testNativeRevisionRoundtrip();

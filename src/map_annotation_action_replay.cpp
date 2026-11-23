@@ -479,8 +479,10 @@ static void applyVerifiedActionEdits(State& current,
     if (!reversing) materializeAnnotations();
 }
 
-// An unborn draft has no immutable parent. Reverse ONLY the actions that led
-// to its saved cursor, retaining its unjournaled network/layer initialization.
+// Fallback for an unborn journal begun before journal seeds were stored (a
+// draft with a seed replays forward from it instead). An unborn draft has no
+// immutable parent. Reverse ONLY the actions that led to its saved cursor,
+// retaining its unjournaled network/layer initialization.
 // Deletions cannot be inverted without the original membership insertion
 // index, so they fail closed rather than manufacturing a different seed.
 // Unborn drafts have no stored revision: everything is in the draft overlay,
@@ -1093,9 +1095,24 @@ planVerifiedActiveDraftActions(
             Records saved;
             for (const ModelChange& change : draft.candidateChanges)
                 if (change.record) saved.emplace(change.key, *change.record);
-            const std::shared_ptr<const Records> seed = std::make_shared<const Records>(
-                reconstructUnbornJournalSeed(saved, draft.journal, currentPosition, hasHydraulic));
-            // The reconstructed seed is not a stored, validated state.
+            // The journal starts at its recorded seed (the draft at journal
+            // position 0), and the replay below proves it: the journal applied
+            // to the seed must reproduce the saved draft at its cursor. Only a
+            // journal begun before seeds were stored falls back to reversing
+            // the journal, which cannot undo deletions.
+            Records start;
+            if (draft.journalSeed) {
+                std::set<Key> seedKeys;
+                for (const ModelChange& change : *draft.journalSeed) {
+                    require(seedKeys.insert(change.key).second,
+                            "duplicate native key in unborn journal seed");
+                    if (change.record) start.emplace(change.key, *change.record);
+                }
+            } else {
+                start = reconstructUnbornJournalSeed(saved, draft.journal, currentPosition, hasHydraulic);
+            }
+            const std::shared_ptr<const Records> seed = std::make_shared<const Records>(std::move(start));
+            // Neither seed is a stored, validated revision.
             validate(*seed);
             validate(saved);
             input.parent = recordsView(seed);

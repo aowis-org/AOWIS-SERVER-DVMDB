@@ -612,6 +612,8 @@ std::string saveBatchFingerprint(const std::vector<ModelChange>& changes,
 //   meta                  small text record, atomically replaced; authoritative
 //   candidate-<uuidv7>    immutable binary candidate overlay (sorted changes)
 //   journal-<uuidv7>      append-only binary MODEL event journal
+//   seed-<uuidv7>         immutable overlay at journal position 0 (unborn
+//                         drafts only; same encoding as a candidate)
 // `meta` names the current candidate and journal files and records their
 // counts, lengths and digests. Leases, releases and listings touch only
 // `meta`; a Save writes a new candidate file only when the candidate changes
@@ -640,6 +642,13 @@ struct DraftFiles {
     std::string journal = "-";            // file name or "-" for an empty journal
     std::uint64_t journalBytes = 0;       // acknowledged prefix length
     std::string journalDigest = "-";      // chained SHA-256 over the frames, hex
+    // Journal seed (unborn drafts). Written as an optional last meta line, so
+    // a meta written before seeds existed reads as "not recorded".
+    bool seedRecorded = false;
+    std::string seed = "-";               // file name or "-" for an empty overlay
+    std::uint64_t seedCount = 0;
+    std::uint64_t seedBytes = 0;
+    std::string seedDigest = "-";
 };
 
 struct StoredDraft {
@@ -702,7 +711,11 @@ std::string metaBody(const WorkingCopyInfo& draft, const DraftFiles& files) {
         + "fork-revision\t" + draft.historyForkRevisionId.value_or("-") + "\n"
         + "fork-action-position\t" + (draft.historyForkActionPosition
             ? std::to_string(*draft.historyForkActionPosition) : "-") + "\n"
-        + "fork-archive-operation\t" + draft.historyForkArchiveCommitOperationId.value_or("-") + "\n";
+        + "fork-archive-operation\t" + draft.historyForkArchiveCommitOperationId.value_or("-") + "\n"
+        + (files.seedRecorded
+            ? "journal-seed\t" + files.seed + "\t" + std::to_string(files.seedCount) + "\t" +
+                  std::to_string(files.seedBytes) + "\t" + files.seedDigest + "\n"
+            : std::string());
 }
 
 Bytes encodeCandidate(const std::vector<ModelChange>& changes) {
@@ -994,6 +1007,23 @@ std::optional<StoredDraft> readDraftMeta(const std::filesystem::path& directory)
            *draft.lastHistoryNavigationSourceGeneration + 1 == draft.generation),
           "orphaned history source candidate reference");
     std::string extra;
+    if (std::getline(lines, extra)) {
+        check(extra.starts_with("journal-seed\t"), "trailing working-copy record content");
+        const std::vector<std::string> seed = split(extra.substr(std::string_view("journal-seed\t").size()));
+        check(seed.size() == 4 && fileReference(seed[0], "seed-"), "invalid draft journal seed reference");
+        stored.files.seedRecorded = true;
+        stored.files.seed = seed[0];
+        stored.files.seedCount = decimalField(seed[1]);
+        stored.files.seedBytes = decimalField(seed[2]);
+        stored.files.seedDigest = seed[3];
+        check(stored.files.seedCount <= workingCopyMaxChanges &&
+              stored.files.seedBytes <= workingCopyMaxBytes &&
+              ((seed[0] == "-" && stored.files.seedCount == 0 && stored.files.seedBytes == 0 &&
+                seed[3] == "-") ||
+               (seed[0] != "-" && stored.files.seedCount > 0 && hexDigest(seed[3]))) &&
+              draft.journalCount > 0 && base == "-",
+              "invalid draft journal seed reference");
+    }
     check(!std::getline(lines, extra) && lines.eof(), "trailing working-copy record content");
     check((draft.journalCount == 0 && !draft.lastSaveFingerprint) ||
           (draft.journalCount > 0 && draft.lastSaveFingerprint && draft.generation > 0),
@@ -1074,6 +1104,18 @@ std::optional<StoredDraft> readDraft(const std::filesystem::path& directory, Dra
                       "draft journal digest mismatch");
             }
         }
+        if (load == DraftLoad::Full && stored->files.seedRecorded) {
+            stored->info.journalSeed = std::vector<ModelChange>{};
+            if (stored->files.seed != "-") {
+                const std::optional<Bytes> bytes =
+                    readPrefix(directory / stored->files.seed, stored->files.seedBytes);
+                if (!bytes) continue;
+                const Hash digest = sha256(*bytes);
+                check(hexBytes(digest.data(), digest.size()) == stored->files.seedDigest,
+                      "draft journal seed digest mismatch");
+                *stored->info.journalSeed = decodeCandidate(*bytes, stored->files.seedCount);
+            }
+        }
         return stored;
     }
     throw StorageError(StorageErrorKind::Busy, "draft changed repeatedly while reading");
@@ -1131,13 +1173,23 @@ struct DraftUpdate {
     std::optional<std::vector<ModelChange>> candidate; // replaces the overlay when set
     std::vector<WorkingCopyEvent> appended;            // appended to the journal
     bool resetJournal = false;                         // starts an empty journal
+    // Replaces the journal seed: `seed` set records it (possibly empty),
+    // unset clears it. A journal reset without a replacement clears it too,
+    // unless keepSeed: a rewrite that retains a journal prefix keeps the seed
+    // that prefix started from.
+    bool replaceSeed = false;
+    bool keepSeed = false;
+    std::optional<std::vector<ModelChange>> seed;
     Bytes candidateBytes;                              // filled by prepareDraftUpdate
+    Bytes seedBytes;                                   // filled by prepareDraftUpdate
     Bytes frames;                                      // filled by prepareDraftUpdate
 };
 
 void prepareDraftUpdate(const StoredDraft& stored, DraftUpdate& update) {
     if (update.candidate && !update.candidate->empty())
         update.candidateBytes = encodeCandidate(*update.candidate);
+    if (update.replaceSeed && update.seed && !update.seed->empty())
+        update.seedBytes = encodeCandidate(*update.seed);
     if (!update.appended.empty()) {
         update.frames = encodeJournalFrames(update.appended);
         const std::uint64_t kept = update.resetJournal ? 0 : stored.files.journalBytes;
@@ -1221,6 +1273,25 @@ void updateDraft(const std::filesystem::path& directory, StoredDraft& stored,
         files.journalBytes = 0;
         files.journalDigest = "-";
     }
+    if ((update.replaceSeed || update.resetJournal) && !update.keepSeed) {
+        if (stored.files.seed != "-") superseded.push_back(directory / stored.files.seed);
+        files.seedRecorded = false;
+        files.seed = "-";
+        files.seedCount = 0;
+        files.seedBytes = 0;
+        files.seedDigest = "-";
+        if (update.replaceSeed && update.seed) {
+            files.seedRecorded = true;
+            if (!update.seed->empty()) {
+                files.seed = "seed-" + UuidV7::generate().toString();
+                writeNewFile(directory / files.seed, update.seedBytes);
+                const Hash digest = sha256(update.seedBytes);
+                files.seedCount = update.seed->size();
+                files.seedBytes = update.seedBytes.size();
+                files.seedDigest = hexBytes(digest.data(), digest.size());
+            }
+        }
+    }
     if (!update.appended.empty()) {
         const Hash chain = chainJournal(digestFromHex(files.journalDigest), update.appended);
         if (files.journal == "-") {
@@ -1238,7 +1309,7 @@ void updateDraft(const std::filesystem::path& directory, StoredDraft& stored,
     for (const std::filesystem::path& path : superseded) {
         const std::string name = path.filename().string();
         if (name != files.candidate && name != files.navigationSourceCandidate &&
-            name != files.journal)
+            name != files.journal && name != files.seed)
             (void)sys::unlink(path.c_str());
     }
 }
@@ -1297,7 +1368,8 @@ void tidyDraftDirectory(const std::filesystem::path& directory) {
         const bool unreferenced =
             (name.starts_with("candidate-") && name != stored->files.candidate &&
              name != stored->files.navigationSourceCandidate) ||
-            (name.starts_with("journal-") && name != stored->files.journal);
+            (name.starts_with("journal-") && name != stored->files.journal) ||
+            (name.starts_with("seed-") && name != stored->files.seed);
         if (!(name.starts_with(".meta-") || unreferenced) || entry.is_symlink() ||
             !entry.is_regular_file())
             continue;
@@ -2718,6 +2790,12 @@ WorkingCopyInfo ProjectService::saveWorkingCopyTransactions(
             complete.info.journal.begin() + static_cast<std::ptrdiff_t>(retainedCount));
         replacementJournal.insert(replacementJournal.end(), events.begin(), events.end());
     }
+    // An unborn draft's journal starts here when nothing is retained: record
+    // the overlay before the new events as the journal seed. A retained
+    // prefix keeps the seed it started from.
+    const bool journalStarts = retainedCount == 0;
+    std::optional<std::vector<ModelChange>> seed;
+    if (journalStarts && !draft.baseRevision) seed = draft.candidateChanges;
     draft.candidateChanges = mergedCandidate(draft.candidateChanges, changes);
     draft.journal = events; // Save acknowledgement reports only the incoming actions.
     draft.journalCount = retainedCount + events.size();
@@ -2739,6 +2817,14 @@ WorkingCopyInfo ProjectService::saveWorkingCopyTransactions(
     if (!changes.empty()) update.candidate = draft.candidateChanges;
     update.resetJournal = invalidateRedo;
     update.appended = invalidateRedo ? std::move(replacementJournal) : events;
+    if (journalStarts) {
+        update.replaceSeed = true;
+        update.seed = std::move(seed);
+    } else {
+        // Branching after Undo rewrites the journal file with the retained
+        // prefix; that prefix still starts at the recorded seed.
+        update.keepSeed = invalidateRedo;
+    }
     prepareDraftUpdate(stored, update); // Limits are checked BEFORE publishing.
     try { updateDraft(workingCopyDirectory(this->root_) / draft.id, stored, draft, update); }
     catch (...) { markUncertain(); throw; }

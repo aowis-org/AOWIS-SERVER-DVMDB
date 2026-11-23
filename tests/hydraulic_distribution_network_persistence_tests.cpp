@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
+#include <fstream>
 #include <iterator>
 #include <iostream>
 #include <limits>
@@ -2747,12 +2748,105 @@ void exerciseUnbornFirstTankHistory() {
         require(readDraft().nodes_tanks.size() == 1 &&
                 readDraft().nodes_tanks.first().uuid == tank.uuid,
                 "Unborn History Redo did not restore the original tank");
+        // D3: delete the tank in a third action. The journal replays forward
+        // from its recorded seed, so Undo and Redo work across the deletion.
+        require(service->workingCopy(draftId, true).journalSeed.has_value(),
+                "Unborn History journal has no recorded seed");
+        aowis::model::ModelEditTransaction removal;
+        removal.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+        removal.operation = QStringLiteral("hydraulic.tank.delete");
+        removal.edits.append(aowis::model::ModelEntityEdit{
+            tank.uuid, QStringLiteral("HydraulicNodeTank"),
+            native::ModelCodec<HydraulicNodeTank>::encode(tank), std::nullopt});
+        const QByteArray removalFrame = aowis::model::ModelEditTransactionCodec::encode(removal);
+        require(!removalFrame.isEmpty(), "Unborn History tank deletion cannot be encoded");
+        std::map<native::Key, std::optional<native::ModelRecord>> beforeRemoval;
+        for (const native::ModelChange& change : service->workingCopy(draftId, false).candidateChanges)
+            beforeRemoval.emplace(change.key, change.record);
+        const std::function<std::optional<native::ModelRecord>(const native::Key&)> current =
+            [&beforeRemoval](const native::Key& key) -> std::optional<native::ModelRecord> {
+                const std::map<native::Key, std::optional<native::ModelRecord>>::const_iterator
+                    found = beforeRemoval.find(key);
+                return found == beforeRemoval.end() ? std::nullopt : found->second;
+            };
+        std::vector<native::ModelChange> removals{
+            native::ModelChange{hydraulic::keyFromUuid(tank.uuid), std::nullopt}};
+        hydraulic::materializeDraftMembership(current,
+            {hydraulic::DraftMembershipIntent{
+                hydraulic::keyFromUuid(networkId), hydraulic::keyFromUuid(tank.uuid),
+                203, 10, false}}, removals);
+        require(service->saveWorkingCopyTransactions(draftId, session, token, 4,
+                    removals, {hydraulic::bytesFromQByteArray(removalFrame)}).generation == 5,
+                "Unborn History could not save tank deletion");
+        require(readDraft().nodes_tanks.isEmpty(), "Unborn History tank deletion was not saved");
+        require(native::annotations::canNavigateVerifiedActiveDraftActions(
+                    *service, draftId, std::nullopt, {0, 1, 2}, 5, &error) ==
+                    std::vector<bool>({true, true, true}),
+                "Unborn History did not prove every position across a deletion");
+        const std::optional<native::WorkingCopyInfo> undoRemoval =
+            native::annotations::navigateVerifiedActiveDraftAction(
+                *service, native::UuidV7::generate().toString(), draftId,
+                session, token, std::nullopt, 1, 5, &error);
+        require(undoRemoval && undoRemoval->generation == 6 && undoRemoval->draftActionPosition == 1 &&
+                readDraft().nodes_tanks.size() == 1 &&
+                native::ModelCodec<HydraulicNodeTank>::encode(readDraft().nodes_tanks.first()) ==
+                    native::ModelCodec<HydraulicNodeTank>::encode(tank),
+                "Unborn History Undo of a deletion did not restore the exact tank");
+        const std::optional<native::WorkingCopyInfo> toSeed =
+            native::annotations::navigateVerifiedActiveDraftAction(
+                *service, native::UuidV7::generate().toString(), draftId,
+                session, token, std::nullopt, 0, 6, &error);
+        require(toSeed && toSeed->generation == 7 && readDraft().nodes_tanks.isEmpty(),
+                "Unborn History Undo across a deletion did not reach the seed");
+        const std::optional<native::WorkingCopyInfo> redoRemoval =
+            native::annotations::navigateVerifiedActiveDraftAction(
+                *service, native::UuidV7::generate().toString(), draftId,
+                session, token, std::nullopt, 2, 7, &error);
+        require(redoRemoval && redoRemoval->generation == 8 && redoRemoval->draftActionPosition == 2 &&
+                readDraft().nodes_tanks.isEmpty(),
+                "Unborn History Redo did not repeat the deletion");
+        const std::optional<native::WorkingCopyInfo> backToTank =
+            native::annotations::navigateVerifiedActiveDraftAction(
+                *service, native::UuidV7::generate().toString(), draftId,
+                session, token, std::nullopt, 1, 8, &error);
+        require(backToTank && backToTank->generation == 9 && readDraft().nodes_tanks.size() == 1,
+                "Unborn History could not return to the tank after the deletion");
         service.reset();
         native::ProjectService recovered(folder);
         const native::WorkingCopyInfo after = recovered.workingCopy(draftId, true);
-        require(!after.baseRevision && after.journalCount == 1 &&
-                after.draftActionPosition == 1 && after.generation == 4,
-                "Unborn History position was not recovered after restart");
+        require(!after.baseRevision && after.journalCount == 2 &&
+                after.draftActionPosition == 1 && after.generation == 9 && after.journalSeed,
+                "Unborn History position or seed was not recovered after restart");
+        QString recoveredError;
+        require(native::annotations::canNavigateVerifiedActiveDraftActions(
+                    recovered, draftId, std::nullopt, {0, 2}, 9, &recoveredError) ==
+                    std::vector<bool>({true, true}),
+                "Unborn History across a deletion was not navigable after restart");
+        // A journal begun before seeds were stored (no seed line) falls back
+        // to reversing the actions before the cursor, which still refuses a
+        // deletion. Move the cursor past the deletion first.
+        const std::optional<native::WorkingCopyInfo> pastRemoval =
+            native::annotations::navigateVerifiedActiveDraftAction(
+                recovered, native::UuidV7::generate().toString(), draftId,
+                session, token, std::nullopt, 2, 9, &recoveredError);
+        require(pastRemoval && pastRemoval->generation == 10 && pastRemoval->draftActionPosition == 2,
+                "Unborn History could not move past the deletion after restart");
+        {
+            const std::filesystem::path metaPath = folder / "working-copies" / draftId / "meta";
+            std::ifstream in(metaPath, std::ios::binary);
+            std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            in.close();
+            const std::size_t line = body.find("journal-seed\t");
+            require(line != std::string::npos, "Unborn History meta lacks its seed line");
+            body.erase(line);
+            std::ofstream out(metaPath, std::ios::binary | std::ios::trunc);
+            out << body;
+        }
+        require(!recovered.workingCopy(draftId, true).journalSeed &&
+                native::annotations::canNavigateVerifiedActiveDraftActions(
+                    recovered, draftId, std::nullopt, {0, 1}, 10, &recoveredError) ==
+                    std::vector<bool>({false, false}) && !recoveredError.isEmpty(),
+                "Unborn History without a seed did not fall back to fail-closed reversal");
     } catch (...) {
         std::error_code ignored;
         std::filesystem::remove_all(folder, ignored);

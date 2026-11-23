@@ -978,6 +978,182 @@ QJsonObject changeBasedHistoryNetworkDelta(ProjectService& service, const Workin
                        {"edits", edits}, {"moves", moves}};
 }
 
+// ---- annotationDelta version 1 (D2) ---------------------------------------
+//
+// The changed members of the network's Distribution annotation layer between
+// the two drafts, built like historyDelta version 2 from the records that
+// differ in the two candidate overlays. Member payloads are the canonical
+// MODEL images and are never decoded. The layer's member order is read from
+// its membership chunks, and only when membership or order changed.
+
+// SHA-256 (hex) of: "AOWIS-ANNOTATION-DELTA-1", the 16-byte RFC 4122 layer
+// UUID, then only when the member order changed: u32be member count and the
+// 16-byte UUID of every member in layer order. See docs/history-transport.md.
+QString annotationDeltaDigest(const QUuid& layerId, const std::optional<QList<QUuid>>& order) {
+    QByteArray bytes("AOWIS-ANNOTATION-DELTA-1");
+    bytes.append(layerId.toRfc4122());
+    if (order) {
+        const quint32 count = static_cast<quint32>(order->size());
+        for (int shift = 24; shift >= 0; shift -= 8)
+            bytes.append(static_cast<char>((count >> shift) & 0xffU));
+        for (const QUuid& member : *order) bytes.append(member.toRfc4122());
+    }
+    return QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
+}
+
+// A member belongs to the layer when a chunk listed by the layer root lists it.
+bool historyAnnotationOwned(const EngineeringCandidateView& view, const Key& member,
+                            const QSet<QUuid>& layerChunks) {
+    for (const Key& referrer : view.referrers(member)) {
+        if (!layerChunks.contains(record::uuidFromKey(referrer))) continue;
+        const std::optional<ModelRecord> chunk = view.get(referrer);
+        if (chunk && chunk->kind == annotations::annotationChunkKind) return true;
+    }
+    return false;
+}
+
+QJsonObject historyAnnotationChange(const QUuid& id, const std::optional<QByteArray>& before,
+                                    const std::optional<QByteArray>& after) {
+    return QJsonObject{
+        {"id", uuidString(id)},
+        {"beforeBase64", before ? QJsonValue(encodePayload(*before))
+                                 : QJsonValue(QJsonValue::Null)},
+        {"afterBase64", after ? QJsonValue(encodePayload(*after))
+                                : QJsonValue(QJsonValue::Null)}};
+}
+
+// nullopt when the layer is missing at either draft (the client then reloads
+// the layer). Both drafts share one base revision.
+std::optional<QJsonObject> changeBasedHistoryAnnotationDelta(
+    ProjectService& service, const WorkingCopyInfo& source,
+    const WorkingCopyInfo& destination, const QUuid& networkId) {
+    requireInput(source.projectId == destination.projectId &&
+                 source.baseRevision == destination.baseRevision,
+                 "History base changed during navigation");
+    const QUuid layerId = annotations::distributionLayerUuid(networkId);
+    const EngineeringCandidateView before = historyDraftView(service, source);
+    const EngineeringCandidateView after = historyDraftView(service, destination);
+    const std::optional<annotations::AnnotationLayerOrder> rootBefore =
+        annotations::loadAnnotationLayerOrder(before.get, layerId, false);
+    const std::optional<annotations::AnnotationLayerOrder> rootAfter =
+        annotations::loadAnnotationLayerOrder(after.get, layerId, false);
+    if (!rootBefore || !rootAfter) return std::nullopt;
+    requireInput(ModelCodec<MapAnnotationLayer>::encode(rootBefore->layer) ==
+                 ModelCodec<MapAnnotationLayer>::encode(rootAfter->layer),
+                 "History changed annotation layer metadata");
+    const QSet<QUuid> chunksBefore(rootBefore->chunkIds.cbegin(), rootBefore->chunkIds.cend());
+    const QSet<QUuid> chunksAfter(rootAfter->chunkIds.cbegin(), rootAfter->chunkIds.cend());
+    bool orderChanged = rootBefore->chunkIds != rootAfter->chunkIds;
+    const std::function<bool(const std::optional<ModelRecord>&, const std::optional<ModelRecord>&)> same =
+        [](const std::optional<ModelRecord>& first, const std::optional<ModelRecord>& second) {
+            return first.has_value() == second.has_value() &&
+                   (!first || (first->kind == second->kind && first->payload == second->payload &&
+                               first->references == second->references));
+        };
+    // Changed members of this layer: before/after canonical images.
+    std::map<Key, std::pair<std::optional<QByteArray>, std::optional<QByteArray>>> changed;
+    std::set<Key> keys;
+    for (const ModelChange& change : source.candidateChanges) keys.insert(change.key);
+    for (const ModelChange& change : destination.candidateChanges) keys.insert(change.key);
+    const Key layerKey = record::keyFromUuid(layerId);
+    for (const Key& key : keys) {
+        if (key == layerKey) continue; // metadata and chunk list compared above
+        const std::optional<ModelRecord> old = before.get(key);
+        const std::optional<ModelRecord> now = after.get(key);
+        if (same(old, now)) continue;
+        const QUuid id = record::uuidFromKey(key);
+        if ((old && old->kind == annotations::annotationChunkKind && chunksBefore.contains(id)) ||
+            (now && now->kind == annotations::annotationChunkKind && chunksAfter.contains(id))) {
+            orderChanged = true;
+            continue;
+        }
+        const bool ownedBefore = old && old->kind == annotations::annotationMemberKind &&
+                                 historyAnnotationOwned(before, key, chunksBefore);
+        const bool ownedAfter = now && now->kind == annotations::annotationMemberKind &&
+                                historyAnnotationOwned(after, key, chunksAfter);
+        if (!ownedBefore && !ownedAfter) continue;
+        if (ownedBefore != ownedAfter) orderChanged = true;
+        changed[key] = {
+            ownedBefore ? std::optional<QByteArray>(record::qByteArrayFromBytes(old->payload)) : std::nullopt,
+            ownedAfter ? std::optional<QByteArray>(record::qByteArrayFromBytes(now->payload)) : std::nullopt};
+    }
+
+    QJsonArray edits;
+    QJsonArray insertions;
+    QJsonValue orderBase64(QJsonValue::Null);
+    std::optional<QList<QUuid>> orderBefore;
+    std::optional<QList<QUuid>> orderAfter;
+    if (!orderChanged) {
+        for (const std::pair<const Key, std::pair<std::optional<QByteArray>,
+                                                  std::optional<QByteArray>>>& entry : changed) {
+            requireInput(entry.second.first && entry.second.second,
+                         "History annotation membership change without a chunk change");
+            edits.append(historyAnnotationChange(record::uuidFromKey(entry.first),
+                                                 entry.second.first, entry.second.second));
+        }
+    } else {
+        orderBefore = annotations::loadAnnotationLayerOrder(before.get, layerId, true)->members;
+        orderAfter = annotations::loadAnnotationLayerOrder(after.get, layerId, true)->members;
+        const QSet<QUuid> beforeSet(orderBefore->cbegin(), orderBefore->cend());
+        const QSet<QUuid> afterSet(orderAfter->cbegin(), orderAfter->cend());
+        for (const std::pair<const Key, std::pair<std::optional<QByteArray>,
+                                                  std::optional<QByteArray>>>& entry : changed) {
+            const QUuid id = record::uuidFromKey(entry.first);
+            requireInput(entry.second.first.has_value() == beforeSet.contains(id) &&
+                         entry.second.second.has_value() == afterSet.contains(id),
+                         "History annotation ownership disagrees with the layer order");
+        }
+        const std::function<QByteArray(const EngineeringCandidateView&, const QUuid&)> image =
+            [](const EngineeringCandidateView& view, const QUuid& member) {
+                const std::optional<ModelRecord> stored = view.get(record::keyFromUuid(member));
+                requireInput(stored.has_value() && stored->kind == annotations::annotationMemberKind,
+                             "History annotation image is missing");
+                return record::qByteArrayFromBytes(stored->payload);
+            };
+        // Deletions and updates in source order, then insertions in
+        // destination order.
+        QList<QUuid> survivorsBefore;
+        for (const QUuid& member : *orderBefore) {
+            if (!afterSet.contains(member)) {
+                edits.append(historyAnnotationChange(member, image(before, member), std::nullopt));
+                continue;
+            }
+            survivorsBefore.append(member);
+            const std::map<Key, std::pair<std::optional<QByteArray>, std::optional<QByteArray>>>::const_iterator
+                found = changed.find(record::keyFromUuid(member));
+            if (found != changed.end())
+                edits.append(historyAnnotationChange(member, found->second.first, found->second.second));
+        }
+        QList<QUuid> survivorsAfter;
+        for (qsizetype index = 0; index < orderAfter->size(); ++index) {
+            const QUuid& member = orderAfter->at(index);
+            if (beforeSet.contains(member)) {
+                survivorsAfter.append(member);
+                continue;
+            }
+            edits.append(historyAnnotationChange(member, std::nullopt, image(after, member)));
+            insertions.append(QJsonObject{{"id", uuidString(member)},
+                                          {"position", static_cast<int>(index)}});
+        }
+        // Members that stay keep their relative order unless an action
+        // deleted and re-created one; then the complete order is sent.
+        if (survivorsBefore != survivorsAfter) {
+            QByteArray order;
+            order.reserve(orderAfter->size() * 16);
+            for (const QUuid& member : *orderAfter) order.append(member.toRfc4122());
+            orderBase64 = QString::fromLatin1(order.toBase64());
+            insertions = QJsonArray();
+        }
+    }
+    return QJsonObject{{"version", 1}, {"layerId", uuidString(layerId)},
+                       {"networkId", uuidString(networkId)},
+                       {"orderChanged", orderChanged},
+                       {"fromSha256", annotationDeltaDigest(layerId, orderBefore)},
+                       {"toSha256", annotationDeltaDigest(layerId, orderAfter)},
+                       {"edits", edits}, {"insertions", insertions},
+                       {"orderBase64", orderBase64}};
+}
+
 QByteArray encodeEntity(const HydraulicEntity& entity) {
     return std::visit([]<typename Type>(const Type& item) {
         return ModelCodec<Type>::encode(item);
@@ -1234,27 +1410,31 @@ std::vector<ModelChange> emptyDistributionAnnotationLayer(const QUuid& networkId
     return annotations::fullDraftAnnotationLayerChanges(layer, {});
 }
 
-QJsonObject layerJson(const annotations::AnnotationLayerSnapshot& snapshot,
-                      bool includeMembers) {
-    QJsonObject result{{"id", uuidString(snapshot.layer.uuid)},
-                       {"domain", snapshot.layer.domain == MapAnnotationDomain::Distribution
+// One page of a layer (D1). Without query parameters the page is the whole
+// layer, as before paging existed. `count` is the number of members in this
+// page; `nextChunk` is null on the last page.
+QJsonObject layerPageJson(const annotations::AnnotationLayerPage& page) {
+    QJsonArray members;
+    for (const MapAnnotation& item : page.annotations)
+        members.append(QJsonObject{{"uuid", uuidString(item.uuid)},
+            {"payloadBase64", QString::fromLatin1(
+                ModelCodec<MapAnnotation>::encode(item).toBase64())}});
+    return QJsonObject{{"id", uuidString(page.layer.uuid)},
+                       {"domain", page.layer.domain == MapAnnotationDomain::Distribution
                            ? QStringLiteral("distribution") : QStringLiteral("drainage")},
-                       {"ownerNetworkId", snapshot.layer.owner_network_uuid
-                           ? QJsonValue(uuidString(*snapshot.layer.owner_network_uuid))
+                       {"ownerNetworkId", page.layer.owner_network_uuid
+                           ? QJsonValue(uuidString(*page.layer.owner_network_uuid))
                            : QJsonValue(QJsonValue::Null)},
-                       {"count", static_cast<int>(snapshot.annotations.size())}};
-    if (includeMembers) {
-        QJsonArray members;
-        for (const MapAnnotation& item : snapshot.annotations)
-            members.append(QJsonObject{{"uuid", uuidString(item.uuid)},
-                {"payloadBase64", QString::fromLatin1(
-                    ModelCodec<MapAnnotation>::encode(item).toBase64())}});
-        result.insert(QStringLiteral("annotations"), members);
-    }
-    return result;
+                       {"count", static_cast<int>(page.annotations.size())},
+                       {"chunkCount", static_cast<int>(page.chunkCount)},
+                       {"fromChunk", static_cast<int>(page.fromChunk)},
+                       {"nextChunk", page.nextChunk < page.chunkCount
+                           ? QJsonValue(static_cast<int>(page.nextChunk))
+                           : QJsonValue(QJsonValue::Null)},
+                       {"annotations", members}};
 }
 
-// Listing entry from root and chunks only; the same fields as layerJson
+// Listing entry from root and chunks only; the layer fields of layerPageJson
 // without members, so a listing never decodes annotation payloads (A6).
 QJsonObject layerSummaryJson(const annotations::AnnotationLayerSummary& summary) {
     return QJsonObject{{"id", uuidString(summary.layer.uuid)},
@@ -1266,16 +1446,52 @@ QJsonObject layerSummaryJson(const annotations::AnnotationLayerSummary& summary)
                        {"count", static_cast<int>(summary.memberCount)}};
 }
 
-// One annotation layer with members, limited BEFORE any member record is
-// read: the summary decodes only the root and the membership chunks (A6).
-std::optional<annotations::AnnotationLayerSnapshot> loadLayerWithinHttpLimit(
-    const std::function<std::optional<ModelRecord>(const Key&)>& read, const QUuid& layerId) {
-    const std::optional<annotations::AnnotationLayerSummary> summary =
-        annotations::loadAnnotationLayerSummary(read, layerId);
-    if (!summary) return std::nullopt;
-    requireInput(summary->memberCount <= maxHttpEntityIds,
-                 "annotation layer exceeds HTTP listing limit");
-    return annotations::loadAnnotationLayer(read, layerId);
+// D1: a page holds at most this many chunks, so a full page stays within
+// maxHttpEntityIds members (39 x 256 = 9,984).
+constexpr std::size_t maxAnnotationPageChunks =
+    maxHttpEntityIds / annotations::annotationChunkCapacity;
+
+struct LayerPageRequest final {
+    std::size_t fromChunk = 0;
+    std::optional<std::size_t> chunkLimit;
+};
+
+std::size_t layerPageNumber(const std::string& text, std::size_t maximum, const char* message) {
+    requireInput(!text.empty() && text.size() <= 5 && (text.size() == 1 || text.front() != '0') &&
+                 std::all_of(text.begin(), text.end(), [](char ch) { return ch >= '0' && ch <= '9'; }),
+                 message);
+    std::size_t parsed = 0;
+    const std::from_chars_result result =
+        std::from_chars(text.data(), text.data() + text.size(), parsed);
+    requireInput(result.ec == std::errc() && result.ptr == text.data() + text.size() &&
+                 parsed <= maximum, message);
+    return parsed;
+}
+
+// `fromChunk` (default 0) and `chunkLimit` (1..39, default: to the end).
+LayerPageRequest layerPageRequest(const httplib::Request& request, bool allowRevision) {
+    for (const httplib::Params::value_type& item : request.params)
+        requireInput(item.first == "fromChunk" || item.first == "chunkLimit" ||
+                     (allowRevision && item.first == "revision"),
+                     "unknown annotation layer query parameter");
+    LayerPageRequest page;
+    if (const std::optional<std::string> value = queryValue(request, "fromChunk"))
+        page.fromChunk = layerPageNumber(*value, 4096, "invalid annotation layer fromChunk");
+    if (const std::optional<std::string> value = queryValue(request, "chunkLimit")) {
+        page.chunkLimit = layerPageNumber(*value, maxAnnotationPageChunks,
+                                          "invalid annotation layer chunkLimit");
+        requireInput(*page.chunkLimit > 0, "invalid annotation layer chunkLimit");
+    }
+    return page;
+}
+
+// One page of an annotation layer, limited BEFORE any member record is read:
+// only the root and the page's membership chunks are decoded first (A6).
+std::optional<annotations::AnnotationLayerPage> loadLayerPageWithinHttpLimit(
+    const std::function<std::optional<ModelRecord>(const Key&)>& read, const QUuid& layerId,
+    const LayerPageRequest& page) {
+    return annotations::loadAnnotationLayerPage(read, layerId, page.fromChunk, page.chunkLimit,
+                                                maxHttpEntityIds);
 }
 
 // The MODEL event journal is the undo/redo history of exactly the saved
@@ -1568,6 +1784,7 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
         guarded(response, [&]() {
             const ProjectId project = requestProject(request);
             const QUuid layerId = parseUuid(pathParam(request, "layer"));
+            const LayerPageRequest page = layerPageRequest(request, true);
             // Only the branch/revision resolution needs the project lock; the
             // layer is read through the pinned immutable revision (A6).
             std::optional<RevisionId> revision;
@@ -1582,11 +1799,11 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
                 [&pinned](const Key& key) -> std::optional<ModelRecord> {
                 return pinned.get(key);
             };
-            const std::optional<annotations::AnnotationLayerSnapshot> layer =
-                loadLayerWithinHttpLimit(read, layerId);
+            const std::optional<annotations::AnnotationLayerPage> layer =
+                loadLayerPageWithinHttpLimit(read, layerId, page);
             if (!layer) throw ProjectError(ProjectErrorKind::NotFound,
                                            "annotation layer not found in revision");
-            QJsonObject result = layerJson(*layer, true);
+            QJsonObject result = layerPageJson(*layer);
             result.insert(QStringLiteral("revision"), revisionIdString(*revision));
             return Reply{200, result};
         });
@@ -1594,18 +1811,19 @@ void registerHydraulicRoutes(httplib::Server& server, ProjectService& service) {
     server.Get(routeDraftAnnotationLayer, [&service](const httplib::Request& request,
                                                    httplib::Response& response) {
         guarded(response, [&]() {
-            const WorkingCopyInfo draft = service.workingCopy(pathParam(request, "draft"), false);
             const QUuid layerId = parseUuid(pathParam(request, "layer"));
+            const LayerPageRequest page = layerPageRequest(request, false);
+            const WorkingCopyInfo draft = service.workingCopy(pathParam(request, "draft"), false);
             // The draft candidate was validated when it was saved; the layer
             // loader still checks this layer's structure and references. Point
             // reads only: no project scan and no project operation lock (A1).
             const EngineeringCandidateView read =
                 draftCandidateView(draftBase(service, draft, false), draft, {});
-            const std::optional<annotations::AnnotationLayerSnapshot> layer =
-                loadLayerWithinHttpLimit(read.get, layerId);
+            const std::optional<annotations::AnnotationLayerPage> layer =
+                loadLayerPageWithinHttpLimit(read.get, layerId, page);
             if (!layer) throw ProjectError(ProjectErrorKind::NotFound,
                                            "annotation layer not found in working copy");
-            QJsonObject result = layerJson(*layer, true);
+            QJsonObject result = layerPageJson(*layer);
             result.insert(QStringLiteral("generation"),
                           QString::number(static_cast<qulonglong>(draft.generation)));
             result.insert(QStringLiteral("draftId"), QString::fromStdString(draft.id));
@@ -2449,6 +2667,12 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
                 }
                 answer.insert(QStringLiteral("historyDelta"),
                               changeBasedHistoryNetworkDelta(service, *before, *result, *networkId));
+                // D2: the network's annotation layer, so the client need not
+                // reload it. Absent when the layer is missing on either side.
+                const std::optional<QJsonObject> annotationDelta =
+                    changeBasedHistoryAnnotationDelta(service, *before, *result, *networkId);
+                if (annotationDelta)
+                    answer.insert(QStringLiteral("annotationDelta"), *annotationDelta);
             }
             return Reply{200, answer};
         });

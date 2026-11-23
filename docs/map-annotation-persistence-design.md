@@ -181,7 +181,10 @@ mixes in an implicit latest HEAD.
 
 - Library: `loadAnnotationLayer` (any candidate reader),
   `loadAnnotationLayerAtRevision`, `loadAnnotationLayerSummary` (root and
-  chunks only), `loadAnnotationMember`, `loadAnnotationLayerMetadata`;
+  chunks only), `loadAnnotationLayerPage` (members of a range of chunks,
+  member limit checked first), `loadAnnotationLayerOrder` (root and member
+  UUIDs, no member records), `loadAnnotationMember`,
+  `loadAnnotationLayerMetadata`;
   writes go through `materializeDraftAnnotationEdits` inside the
   `save-events` route and `saveWorkingCopyTransactions`.
 - HTTP (see `dvmdb-http-api.yaml`):
@@ -191,6 +194,10 @@ mixes in an implicit latest HEAD.
     one layer with members;
   - `GET /working-copies/{draftId}/annotation-layers/{layer}`: one layer of a
     draft;
+  - both layer reads accept `fromChunk` and `chunkLimit` (1..39 chunks, so a
+    page stays within 10,000 members) and return `chunkCount`, `fromChunk`
+    and `nextChunk` (null on the last page). Without them the whole layer is
+    returned, refused above 10,000 members;
   - edits: `map.annotation` events in
     `POST /working-copies/{draftId}/save-events`, with the existing lease,
     generation and retry semantics.

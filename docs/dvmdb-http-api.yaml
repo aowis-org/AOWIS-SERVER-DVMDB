@@ -32,10 +32,16 @@ paths:
         Return canonical MODEL MapAnnotation payloadBase64 for each ordered
         member in a pinned immutable revision, plus layer metadata. The
         member limit is checked from the membership chunks before any member
-        record is read.
+        record is read. Large layers are read in pages of membership chunks
+        (fromChunk, chunkLimit); every page names the revision, so a client
+        reading several pages passes that revision to the following ones.
+      parameters:
+        - {name: revision, in: query, required: false, schema: {type: string, format: uuid}}
+        - {name: fromChunk, in: query, required: false, schema: {type: integer, minimum: 0, maximum: 4096, default: 0}}
+        - {name: chunkLimit, in: query, required: false, description: "Chunks per page (at most 256 members each); default to the end of the layer", schema: {type: integer, minimum: 1, maximum: 39}}
       responses:
-        '200': {description: Immutable annotation layer snapshot}
-        '400': {description: Layer has more than 10000 members}
+        '200': {description: "One page: id, domain, ownerNetworkId, count (members in this page), chunkCount, fromChunk, nextChunk (null on the last page), annotations, revision"}
+        '400': {description: "Page has more than 10000 members, fromChunk after the last chunk, or a malformed or unknown query parameter"}
         '404': {description: Layer not found at the selected revision}
   /working-copies/{draftId}/annotation-layers/{layer}:
     get:
@@ -44,10 +50,16 @@ paths:
         Return the canonical annotation records visible at one pinned draft
         generation (base plus its candidate overlay). Reading is allowed in
         read-only inspection, but editing uses the fenced save-events route.
-        The member limit is checked before any member record is read.
+        The member limit is checked before any member record is read. Large
+        layers are read in pages of membership chunks (fromChunk,
+        chunkLimit); every page carries the draft generation, and a client
+        must discard pages of different generations and start again.
+      parameters:
+        - {name: fromChunk, in: query, required: false, schema: {type: integer, minimum: 0, maximum: 4096, default: 0}}
+        - {name: chunkLimit, in: query, required: false, description: "Chunks per page (at most 256 members each); default to the end of the layer", schema: {type: integer, minimum: 1, maximum: 39}}
       responses:
-        '200': {description: Draft generation and annotation members}
-        '400': {description: Layer has more than 10000 members}
+        '200': {description: "One page: id, domain, ownerNetworkId, count (members in this page), chunkCount, fromChunk, nextChunk (null on the last page), annotations, generation, draftId"}
+        '400': {description: "Page has more than 10000 members, fromChunk after the last chunk, or a malformed or unknown query parameter"}
         '404': {description: Draft or layer not found}
   /health:
     get:
@@ -364,7 +376,12 @@ paths:
         sparse membership moves, orderedTypes, and source/destination
         SHA-256 over the network settings and the member order of the
         orderedTypes collections; see docs/history-transport.md) instead of
-        an entire NetworkHydraulicDistribution. The preceding native candidate is kept
+        an entire NetworkHydraulicDistribution. It also includes
+        annotationDelta version 1 for the network's Distribution annotation
+        layer (changed annotation before/after images, insertion positions or
+        the complete member order, and source/destination SHA-256 over the
+        layer UUID and, when it changed, the member order), unless the layer
+        is missing at either draft. The preceding native candidate is kept
         as an atomically pinned file reference with the operation receipt.
         An identical retry of the most recent operation UUIDv7 and source
         generation returns the same verified sparse delta, even after a

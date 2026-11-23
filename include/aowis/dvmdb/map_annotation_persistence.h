@@ -91,6 +91,40 @@ std::optional<AnnotationLayerSummary> loadAnnotationLayerSummary(
     const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
     const QUuid& layerId);
 
+// D1: one page of a layer, for HTTP reads of large layers. The members of
+// the chunks [fromChunk, fromChunk + chunkLimit) in layer order (no limit:
+// to the end). The root and the page's chunks are decoded first and
+// `memberLimit` is checked before any member record is read (A6), then every
+// member is checked as in loadAnnotationLayer. A page that starts at the end
+// of the chunk list is empty. Absent layer returns nullopt; a start after the
+// end, a zero chunk limit or too many members throw InvalidInput. Members are
+// unique within a page; across pages that is guaranteed by the candidate
+// validator, so a reader holding several pages must use one draft generation
+// or one revision for all of them.
+struct AnnotationLayerPage final {
+    MapAnnotationLayer layer;
+    QList<MapAnnotation> annotations;
+    std::size_t chunkCount = 0;  // chunks listed by the root
+    std::size_t fromChunk = 0;
+    std::size_t nextChunk = 0;   // first chunk of the next page; == chunkCount on the last
+};
+std::optional<AnnotationLayerPage> loadAnnotationLayerPage(
+    const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
+    const QUuid& layerId, std::size_t fromChunk, std::optional<std::size_t> chunkLimit,
+    std::size_t memberLimit);
+
+// D2: the layer root (metadata, chunk list) and, with includeMembers, the
+// member UUIDs in layer order read from the membership chunks. Member records
+// are never read. Absent layer returns nullopt; damage throws Corruption.
+struct AnnotationLayerOrder final {
+    MapAnnotationLayer layer;
+    QList<QUuid> chunkIds;
+    QList<QUuid> members; // empty unless includeMembers
+};
+std::optional<AnnotationLayerOrder> loadAnnotationLayerOrder(
+    const std::function<std::optional<ModelRecord>(const Key&)>& readCurrent,
+    const QUuid& layerId, bool includeMembers);
+
 // A5: Save-time check of a layer whose root or chunks changed, WITHOUT
 // decoding its unchanged members. `before` must be a candidate that satisfied
 // the complete validator and `changedKeys` the keys the delta changed.

@@ -10,6 +10,7 @@
 #include <thread>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -704,6 +705,210 @@ void testLockFreeReadersSeeWholeSaves() {
             "concurrent reads did not run or the journal is incomplete");
 }
 
+// D3: an unborn draft records the overlay at journal position 0 when its
+// journal starts, so History can replay forward from it (deletions
+// included) instead of reversing the journal.
+std::vector<std::string> draftFiles(const std::filesystem::path& root, const std::string& draftId,
+                                    const std::string& prefix) {
+    std::vector<std::string> names;
+    for (const std::filesystem::directory_entry& entry :
+         std::filesystem::directory_iterator(root / "working-copies" / draftId))
+        if (entry.path().filename().string().starts_with(prefix))
+            names.push_back(entry.path().filename().string());
+    return names;
+}
+
+bool sameChanges(const std::vector<ModelChange>& left, const std::vector<ModelChange>& right) {
+    if (left.size() != right.size()) return false;
+    for (std::size_t index = 0; index < left.size(); ++index) {
+        if (left[index].key != right[index].key ||
+            left[index].record.has_value() != right[index].record.has_value())
+            return false;
+        if (left[index].record && (left[index].record->kind != right[index].record->kind ||
+                                   left[index].record->payload != right[index].record->payload ||
+                                   left[index].record->references != right[index].record->references))
+            return false;
+    }
+    return true;
+}
+
+void testUnbornJournalSeed() {
+    TemporaryRoot root;
+    const std::string session = UuidV7::generate().toString();
+    const UuidV7 initialized = UuidV7::generate();
+    const UuidV7 edited = UuidV7::generate();
+    const std::function<ModelChange(const UuidV7&, std::uint8_t)> change =
+        [](const UuidV7& id, std::uint8_t payload) {
+            ModelRecord record;
+            record.kind = 5;
+            record.payload = {payload};
+            return ModelChange{id.bytes, record};
+        };
+    std::string projectId;
+    std::string draftId;
+    std::vector<ModelChange> initialization;
+    std::string firstSeedFile;
+    {
+        ProjectService service(root.path);
+        service.configureRepositoryRole(RepositoryRole::Private);
+        projectId = service.createUnbornProject("journal seed").id;
+        draftId = service.createWorkingCopy(projectId, "main", std::nullopt, session).id;
+        std::string token = service.acquireWorkingCopyLease(draftId, session, 120).token;
+        // Unjournaled initialization, then the first journaled Save.
+        initialization = service.saveWorkingCopyChanges(
+            draftId, session, token, 0, {change(initialized, 1)}).candidateChanges;
+        require(!service.workingCopy(draftId).journalSeed.has_value(),
+                "a draft without a journal has a journal seed");
+        (void)service.saveWorkingCopyTransactions(draftId, session, token, 1,
+            {change(edited, 2)}, {aowis::dvmdb::test::editEvent(UuidV7::generate(), edited, 1, 2)});
+        WorkingCopyInfo full = service.workingCopy(draftId);
+        require(full.journalSeed && sameChanges(*full.journalSeed, initialization),
+                "first journaled Save did not record the overlay before it as seed");
+        firstSeedFile = draftFileName(root.path, draftId, "journal-seed");
+        require(firstSeedFile.starts_with("seed-") && draftFiles(root.path, draftId, "seed-").size() == 1,
+                "journal seed file is missing");
+        // A continuing journal keeps its seed.
+        (void)service.saveWorkingCopyTransactions(draftId, session, token, 2,
+            {change(edited, 3)}, {aowis::dvmdb::test::editEvent(UuidV7::generate(), edited, 2, 3)});
+        require(draftFileName(root.path, draftId, "journal-seed") == firstSeedFile &&
+                sameChanges(*service.workingCopy(draftId).journalSeed, initialization),
+                "appending to the journal changed its seed");
+        // Listings and lease renewals carry no seed and keep it on disk.
+        token = service.acquireWorkingCopyLease(draftId, session, 120).token;
+        require(draftFileName(root.path, draftId, "journal-seed") == firstSeedFile,
+                "a lease renewal dropped the journal seed");
+    }
+    {
+        // Survives a restart; a Save from position 0 starts a new journal
+        // whose seed is the overlay published at position 0.
+        ProjectService service(root.path);
+        service.configureRepositoryRole(RepositoryRole::Private);
+        require(sameChanges(*service.workingCopy(draftId).journalSeed, initialization),
+                "journal seed did not survive a restart");
+        const std::string token = service.acquireWorkingCopyLease(draftId, session, 120).token;
+        // A Save after an Undo that retains a prefix rewrites the journal
+        // file, but the prefix still starts at the same seed.
+        const WorkingCopyInfo atOne = service.publishVerifiedDraftActionNavigation(
+            UuidV7::generate().toString(), draftId, session, token, 3, std::nullopt, 1,
+            {change(initialized, 1), change(edited, 2)});
+        const std::string journalBefore = draftFileName(root.path, draftId, "journal");
+        (void)service.saveWorkingCopyTransactions(draftId, session, token, atOne.generation,
+            {change(edited, 6)}, {aowis::dvmdb::test::editEvent(UuidV7::generate(), edited, 2, 6)});
+        const WorkingCopyInfo branchedOnce = service.workingCopy(draftId);
+        require(branchedOnce.journalCount == 2 &&
+                draftFileName(root.path, draftId, "journal") != journalBefore &&
+                draftFileName(root.path, draftId, "journal-seed") == firstSeedFile &&
+                branchedOnce.journalSeed && sameChanges(*branchedOnce.journalSeed, initialization),
+                "a Save after a partial Undo dropped the journal seed");
+        const std::vector<ModelChange> atZero{change(initialized, 7)};
+        const WorkingCopyInfo navigated = service.publishVerifiedDraftActionNavigation(
+            UuidV7::generate().toString(), draftId, session, token, branchedOnce.generation,
+            std::nullopt, 0, atZero);
+        require(navigated.draftActionPosition == 0 &&
+                draftFileName(root.path, draftId, "journal-seed") == firstSeedFile,
+                "History navigation changed the journal seed");
+        (void)service.saveWorkingCopyTransactions(draftId, session, token, navigated.generation,
+            {change(edited, 4)}, {aowis::dvmdb::test::editEvent(UuidV7::generate(), edited, 3, 4)});
+        const WorkingCopyInfo branched = service.workingCopy(draftId);
+        require(branched.journalCount == 1 && branched.journalSeed &&
+                sameChanges(*branched.journalSeed, atZero),
+                "a Save from position 0 did not record the position-0 overlay as seed");
+        require(draftFileName(root.path, draftId, "journal-seed") != firstSeedFile &&
+                draftFiles(root.path, draftId, "seed-").size() == 1,
+                "the superseded journal seed file was not removed");
+    }
+    // A journal begun before seeds were stored: no seed line.
+    {
+        const std::filesystem::path metaPath = root.path / "working-copies" / draftId / "meta";
+        std::ifstream in(metaPath, std::ios::binary);
+        std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        in.close();
+        const std::size_t line = body.find("journal-seed\t");
+        require(line != std::string::npos, "meta lacks the journal seed line");
+        const std::string original = body;
+        // Opening the store removes the then unreferenced seed file; keep a copy.
+        const std::filesystem::path seedPath = root.path / "working-copies" / draftId /
+            draftFileName(root.path, draftId, "journal-seed");
+        const std::filesystem::path backup = root.path / "seed-backup";
+        std::filesystem::copy_file(seedPath, backup);
+        body.erase(line);
+        {
+            std::ofstream out(metaPath, std::ios::binary | std::ios::trunc);
+            out << body;
+        }
+        {
+            ProjectService service(root.path);
+            const WorkingCopyInfo legacy = service.workingCopy(draftId);
+            require(!legacy.journalSeed && legacy.journalCount == 1,
+                    "a meta without a seed line did not read as an unrecorded seed");
+        }
+        require(!std::filesystem::exists(seedPath),
+                "a seed file no meta references was kept");
+        std::filesystem::rename(backup, seedPath);
+        std::ofstream out(metaPath, std::ios::binary | std::ios::trunc);
+        out << original;
+    }
+    // A damaged seed file is refused, a stray seed file is removed on open.
+    {
+        const std::filesystem::path seedPath = root.path / "working-copies" / draftId /
+            draftFileName(root.path, draftId, "journal-seed");
+        std::fstream seed(seedPath, std::ios::binary | std::ios::in | std::ios::out);
+        seed.seekg(-1, std::ios::end);
+        char byte = 0;
+        seed.get(byte);
+        seed.seekp(-1, std::ios::end);
+        seed.put(static_cast<char>(byte ^ 0x01));
+        seed.close();
+        {
+            ProjectService service(root.path);
+            bool rejected = false;
+            try { (void)service.workingCopy(draftId); }
+            catch (const std::exception&) { rejected = true; }
+            require(rejected, "a damaged journal seed was accepted");
+        }
+        std::fstream repair(seedPath, std::ios::binary | std::ios::in | std::ios::out);
+        repair.seekp(-1, std::ios::end);
+        repair.put(byte);
+        repair.close();
+        std::ofstream(root.path / "working-copies" / draftId /
+                      ("seed-" + UuidV7::generate().toString())) << "stray";
+    }
+    {
+        ProjectService service(root.path);
+        service.configureRepositoryRole(RepositoryRole::Private);
+        require(draftFiles(root.path, draftId, "seed-").size() == 1,
+                "an unreferenced seed file survived opening the draft store");
+        // Commit: the draft continues from the new HEAD without a seed, and a
+        // journal on a committed base never records one.
+        const WorkingCopyInfo current = service.workingCopy(draftId);
+        const std::string token = service.acquireWorkingCopyLease(draftId, session, 120).token;
+        (void)service.commitWorkingCopy(UuidV7::generate().toString(), draftId, session, token,
+                                        current.generation + 0, std::nullopt, commitMetadata());
+        const WorkingCopyInfo rebased = service.workingCopy(draftId);
+        require(rebased.baseRevision && !rebased.journalSeed &&
+                draftFiles(root.path, draftId, "seed-").empty(),
+                "Commit kept the journal seed of the unborn journal");
+        (void)service.saveWorkingCopyTransactions(draftId, session, token, rebased.generation,
+            {change(edited, 5)}, {aowis::dvmdb::test::editEvent(UuidV7::generate(), edited, 4, 5)});
+        require(!service.workingCopy(draftId).journalSeed &&
+                draftFiles(root.path, draftId, "seed-").empty(),
+                "a journal on a committed base recorded a seed");
+    }
+    {
+        // A seed line is only valid for an unborn draft with a journal.
+        const std::filesystem::path metaPath = root.path / "working-copies" / draftId / "meta";
+        {
+            std::ofstream out(metaPath, std::ios::binary | std::ios::app);
+            out << "journal-seed\t-\t0\t0\t-\n";
+        }
+        ProjectService service(root.path);
+        bool rejected = false;
+        try { (void)service.workingCopy(draftId); }
+        catch (const std::exception&) { rejected = true; }
+        require(rejected, "a journal seed on a committed draft was accepted");
+    }
+}
+
 int main() {
     try {
         testWorkingCopyCreationAndRecovery();
@@ -714,6 +919,7 @@ int main() {
         testDraftWritesAreIncremental();
         testUnsupportedAndOversizedDrafts();
         testLockFreeReadersSeeWholeSaves();
+        testUnbornJournalSeed();
         std::cout << "VC-04 persistent working-copy bootstrap passed\n";
     } catch (const std::exception& error) {
         std::cerr << "VC-04 working-copy bootstrap failed: " << error.what() << '\n';

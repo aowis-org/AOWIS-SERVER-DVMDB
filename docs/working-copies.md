@@ -162,6 +162,19 @@ count, digest and cleared cursor together. It never truncates the previously
 acknowledged journal file in place. Leases, releases and listings touch only
 the small `meta` record. The response follows durable publication.
 
+**Journal seed (unborn drafts).** When the journal of a draft without a
+committed base starts (the first event Save, or an event Save that branches
+from position 0), the overlay just before the new events is written once to
+an immutable `seed-<uuidv7>` file (same encoding as a candidate) and named by
+an optional last `meta` line `journal-seed <file|-> <count> <bytes> <sha256|->`
+(`-`: an empty overlay). A Save that keeps a journal prefix keeps the seed;
+History navigation never changes it; a Commit (rebase) or any journal reset
+removes it. History replays the journal forward from the seed, so creations,
+updates and deletions are all reversible before the first Commit. A `meta`
+without the line (a journal begun before seeds existed) reads as "no seed",
+and History then falls back to reversing the journal, which refuses
+deletions. Unreferenced `seed-*` files are removed when the store opens.
+
 `initialize-network` creates the first, empty hydraulic distribution network in an
 untouched unborn draft: it writes a server-built network root through the
 fenced Save path and leaves the branch HEAD null. Repeating it at exactly the
