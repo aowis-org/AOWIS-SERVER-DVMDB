@@ -3981,6 +3981,161 @@ void exerciseCompleteNetworkDraftImportHttp() {
     }
 }
 
+// D5: a member deleted and re-created in a later action moves to the end of
+// its collection; History across those actions sends forward-placement moves
+// (each desired member in turn moved from its later index to its final one).
+void exerciseHydraulicHistoryReorderHttp() {
+    namespace native = aowis::dvmdb;
+    TemporaryRoot root;
+    native::ProjectService service(root.root());
+    const native::ProjectInfo project = service.createUnbornProject("history-reorder-test");
+    const native::ProjectId projectUuid = *native::ProjectId::parse(project.id);
+    const QUuid networkUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+    const QString networkId = networkUuid.toString(QUuid::WithoutBraces);
+    NetworkHydraulicDistribution network;
+    network.uuid = networkUuid;
+    network.id = QStringLiteral("history-reorder");
+    for (int index = 0; index < 5; ++index) {
+        HydraulicNodeJunction junction;
+        junction.uuid = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+        junction.id = QStringLiteral("J%1").arg(index);
+        junction.elevation_m = 10 + index;
+        network.nodes_junctions.append(junction);
+    }
+    const native::RevisionId head = service.commitModel(project.id, "main", {}, commitMetadata());
+    native::RevisionId base = head;
+    service.withRepository(project.id, [&](native::Repository& repository) {
+        MapAnnotationLayer layer;
+        layer.uuid = native::annotations::distributionLayerUuid(networkUuid);
+        layer.domain = MapAnnotationDomain::Distribution;
+        layer.owner_network_uuid = networkUuid;
+        std::vector<native::ModelChange> changes =
+            native::hydraulic::fullDraftHydraulicDistributionNetworkChanges(network);
+        std::vector<native::ModelChange> layerChanges =
+            native::annotations::fullDraftAnnotationLayerChanges(layer, {});
+        changes.insert(changes.end(), layerChanges.begin(), layerChanges.end());
+        base = repository.commitModel(projectUuid, "main",
+            std::move(changes), commitMetadata(), head, true, std::nullopt,
+            native::annotations::validateAnnotationSnapshot);
+    });
+    service.configureRepositoryRole(native::RepositoryRole::Private);
+    TestServer server(service, native::BundleLimits{4ULL * 1024ULL * 1024ULL,
+                                                     10000ULL, 1024ULL * 1024ULL});
+    Client client(server.port());
+    const QString session = QString::fromStdString(native::UuidV7::generate().toString());
+    const Response created = client.call("POST", "/dvmdb/v1/working-copies",
+        QJsonObject{{"projectId", QString::fromStdString(project.id)},
+                    {"branchId", QString::fromStdString(service.branchId(project.id, "main")->toString())},
+                    {"baseRevision", QString::fromStdString(base.toString())},
+                    {"sessionId", session}});
+    check(created.status == 201, "History reorder draft checkout failed");
+    const QString path = QStringLiteral("/dvmdb/v1/working-copies/") + created.json.value("id").toString();
+    const Response leased = client.call("POST", path + "/lease",
+                                        QJsonObject{{"sessionId", session}, {"seconds", 60}});
+    check(leased.status == 200, "History reorder draft lease failed");
+    const QString token = leased.json.value("token").toString();
+    const HydraulicNodeJunction moved = network.nodes_junctions.at(1);
+    const QString movedId = moved.uuid.toString(QUuid::WithoutBraces);
+    const QByteArray movedImage = native::ModelCodec<HydraulicNodeJunction>::encode(moved);
+    const std::function<QJsonObject(const QString&, bool)> action =
+        [&](const QString& generation, bool create) {
+            aowis::model::ModelEditTransaction transaction;
+            transaction.transactionId = QUuid(QString::fromStdString(native::UuidV7::generate().toString()));
+            transaction.operation = create ? QStringLiteral("hydraulic.junction.create")
+                                           : QStringLiteral("hydraulic.junction.delete");
+            transaction.edits.append(aowis::model::ModelEntityEdit{
+                moved.uuid, QStringLiteral("HydraulicNodeJunction"),
+                create ? std::nullopt : std::optional<QByteArray>(movedImage),
+                create ? std::optional<QByteArray>(movedImage) : std::nullopt});
+            const QByteArray frame = aowis::model::ModelEditTransactionCodec::encode(transaction);
+            check(!frame.isEmpty(), "History reorder event encoding failed");
+            const QJsonObject change = create
+                ? QJsonObject{{"uuid", movedId}, {"kind", 201}, {"references", QJsonArray{}},
+                              {"payloadBase64", QString::fromLatin1(movedImage.toBase64())}}
+                : QJsonObject{{"uuid", movedId}, {"delete", true}};
+            return QJsonObject{{"sessionId", session}, {"fencingToken", token},
+                {"expectedGeneration", generation}, {"changes", QJsonArray{change}},
+                {"events", QJsonArray{QString::fromLatin1(frame.toBase64())}},
+                {"membership", QJsonArray{QJsonObject{
+                    {"networkId", networkId}, {"entityId", movedId}, {"kind", 201},
+                    {"collectionIndex", 9}, {"inserted", create}}}}};
+        };
+    check(client.call("POST", path + "/save-events", action("0", false)).status == 200 &&
+          client.call("POST", path + "/save-events", action("1", true)).status == 200,
+          "History reorder delete/re-create could not be saved");
+    const std::function<std::optional<NetworkHydraulicDistribution>()> current = [&]() {
+        const Response view = client.call("GET", path + "/networks/" + networkId);
+        return native::ModelCodec<NetworkHydraulicDistribution>::decode(
+            QByteArray::fromBase64(view.json.value("payloadBase64").toString().toLatin1()));
+    };
+    const std::function<QList<QUuid>(const NetworkHydraulicDistribution&)> order =
+        [](const NetworkHydraulicDistribution& state) {
+            QList<QUuid> ids;
+            for (const HydraulicNodeJunction& junction : state.nodes_junctions) ids.append(junction.uuid);
+            return ids;
+        };
+    const std::optional<NetworkHydraulicDistribution> atTwo = current();
+    const QList<QUuid> j = order(network);
+    check(atTwo && order(*atTwo) == QList<QUuid>{j[0], j[2], j[3], j[4], j[1]},
+          "a re-created junction was not appended to its collection");
+    struct Step {
+        QString generation;
+        QString position;
+        std::vector<std::pair<QUuid, int>> moves;
+        int edits;
+        const char* message;
+    };
+    const std::vector<Step> steps{
+        {"2", "0", {{j[1], 1}}, 0, "Undo across a re-creation did not move it back in one move"},
+        {"3", "2", {{j[2], 1}, {j[3], 2}, {j[4], 3}}, 0,
+         "Redo across a re-creation did not send forward-placement moves"},
+        {"4", "1", {}, 1, "Undo of a re-creation sent moves"},
+        {"5", "2", {}, 1, "Redo of a re-creation sent moves"},
+    };
+    NetworkHydraulicDistribution state = *atTwo;
+    for (const Step& step : steps) {
+        const Response navigated = client.call("POST", path + "/history/navigate",
+            QJsonObject{{"operationId", QString::fromStdString(native::UuidV7::generate().toString())},
+                        {"sessionId", session}, {"fencingToken", token},
+                        {"expectedGeneration", step.generation},
+                        {"expectedHead", QString::fromStdString(base.toString())},
+                        {"actionPosition", step.position}, {"networkId", networkId}});
+        const std::optional<NetworkHydraulicDistribution> destination = current();
+        const QJsonObject delta = navigated.json.value("historyDelta").toObject();
+        const QJsonArray orderedTypes = delta.value("orderedTypes").toArray();
+        QJsonArray expectedMoves;
+        for (const std::pair<QUuid, int>& move : step.moves)
+            expectedMoves.append(QJsonObject{{"type", "HydraulicNodeJunction"},
+                                             {"id", move.first.toString(QUuid::WithoutBraces)},
+                                             {"position", move.second}});
+        // Reference application: deletions, appended creations, then each
+        // move one by one.
+        QList<QUuid> applied = order(state);
+        for (const QJsonValue& value : delta.value("edits").toArray()) {
+            const QJsonObject edit = value.toObject();
+            const QUuid id(edit.value("id").toString());
+            if (edit.value("afterBase64").isNull()) applied.removeAll(id);
+            else if (edit.value("beforeBase64").isNull()) applied.append(id);
+        }
+        for (const QJsonValue& value : delta.value("moves").toArray()) {
+            const QJsonObject move = value.toObject();
+            const qsizetype from = applied.indexOf(QUuid(move.value("id").toString()));
+            check(from >= 0, step.message);
+            applied.move(from, move.value("position").toInt());
+        }
+        check(navigated.status == 200 && destination &&
+              navigated.json.value("generation") == QString::number(step.generation.toInt() + 1) &&
+              orderedTypes == QJsonArray{QStringLiteral("HydraulicNodeJunction")} &&
+              delta.value("moves").toArray() == expectedMoves &&
+              delta.value("edits").toArray().size() == step.edits &&
+              delta.value("fromSha256") == historyDeltaDigestReference(state, orderedTypes) &&
+              delta.value("toSha256") == historyDeltaDigestReference(*destination, orderedTypes) &&
+              applied == order(*destination), step.message);
+        state = *destination;
+    }
+    check(order(state) == order(*atTwo), "History reorder did not return to the saved order");
+}
+
 void exerciseHydraulicDraftMembershipHttp() {
     namespace native = aowis::dvmdb;
     TemporaryRoot root;
@@ -5244,6 +5399,7 @@ int main(int argc, char** argv) {
         exerciseAnnotationLayerPagesAndHistoryDeltaHttp();
         exerciseCompleteNetworkDraftImportHttp();
         exerciseHydraulicDraftMembershipHttp();
+        exerciseHydraulicHistoryReorderHttp();
 #endif
         exerciseUuidv7HistoryHttp();
         exerciseCommitMetadataHttp();

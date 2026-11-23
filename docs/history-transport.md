@@ -44,7 +44,13 @@ differ.
   updates in source order, then insertions in destination order. In any
   other collection: updates only, in UUID byte order.
 - `moves`: unchanged from version 1. Apply deletions, append insertions in
-  edit order, then each move in order (`position` = final index).
+  edit order, then each move in order (`position` = final index). The moves
+  are a forward placement: for each destination index in turn, if the first
+  member not yet moved is not the one wanted there, the wanted member is
+  moved forward from its later index. So within a collection positions
+  ascend and no member is moved twice or moved from before its final
+  position. The server builds and the GUI applies such a list in one pass
+  per collection (D5); the GUI refuses any other move list.
 - `orderedTypes`: the collections whose membership changed (insertion,
   deletion or reorder), in canonical collection order.
 - Digest: SHA-256, lowercase hex, of the byte string

@@ -940,13 +940,20 @@ QJsonObject changeBasedHistoryNetworkDelta(ProjectService& service, const Workin
         const QSet<QUuid> desiredSet(desired.cbegin(), desired.cend());
         requireInput(sourceSet.size() == projectedSource.size() && desiredSet.size() == desired.size(),
                      "duplicate History collection member");
-        QList<QUuid> projected = projectedSource;
+        // The list the client holds after the edits: members that stay, in
+        // source order, then the creations in destination order. Built in
+        // one pass each (D5: no removeAt per deletion).
+        QList<QUuid> projected;
+        projected.reserve(desired.size());
         for (const QUuid& member : projectedSource) {
             const std::map<Key, std::pair<std::optional<QByteArray>, std::optional<QByteArray>>>::const_iterator
                 found = changed.find(record::keyFromUuid(member));
-            if (!desiredSet.contains(member))
+            if (!desiredSet.contains(member)) {
                 edits.append(historyImageChange(type, member, image(before, member), std::nullopt));
-            else if (found != changed.end())
+                continue;
+            }
+            projected.append(member);
+            if (found != changed.end())
                 edits.append(historyImageChange(type, member, found->second.first, found->second.second));
         }
         for (const QUuid& member : desired)
@@ -954,19 +961,27 @@ QJsonObject changeBasedHistoryNetworkDelta(ProjectService& service, const Workin
                 edits.append(historyImageChange(type, member, std::nullopt, image(after, member)));
                 projected.append(member);
             }
-        for (qsizetype index = projected.size(); index > 0;) {
-            --index;
-            if (!desiredSet.contains(projected.at(index))) projected.removeAt(index);
-        }
+        // `projected` holds exactly the desired members (both lists are
+        // duplicate-free and every member is in desiredSet).
+        requireInput(projected.size() == desired.size(),
+                     "History membership ordering is inconsistent");
+        // Forward placement, the same moves as moving each desired member in
+        // turn from its later index to its final index, in one pass (D5):
+        // position `index` holds either the first member of `projected` not
+        // yet moved, or a member moved forward to it.
+        QSet<QUuid> placed;
+        qsizetype next = 0;
         for (qsizetype index = 0; index < desired.size(); ++index) {
-            if (projected.at(index) == desired.at(index)) continue;
-            const qsizetype from = projected.indexOf(desired.at(index), index + 1);
-            requireInput(from >= 0, "History membership ordering is inconsistent");
-            projected.move(from, index);
+            while (next < projected.size() && placed.contains(projected.at(next))) ++next;
+            requireInput(next < projected.size(), "History membership move verification failed");
+            if (projected.at(next) == desired.at(index)) {
+                ++next;
+                continue;
+            }
+            placed.insert(desired.at(index));
             moves.append(QJsonObject{{"type", type}, {"id", uuidString(desired.at(index))},
                                      {"position", static_cast<int>(index)}});
         }
-        requireInput(projected == desired, "History membership move verification failed");
         orderedTypes.append(type);
         ordersBefore.emplace_back(type, projectedSource);
         ordersAfter.emplace_back(type, desired);
