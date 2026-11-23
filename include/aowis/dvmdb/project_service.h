@@ -429,6 +429,7 @@ public:
     // the store's revision differences, so the work is proportional to the
     // changes, not the project; a revision without a usable ancestor is
     // streamed once. Results for immutable revisions are cached per project.
+    // Lock-free read path: no project operation lock and no queue place.
     std::vector<Key> hydraulicDistributionRootKeysAtRevision(std::string_view projectId,
                                                              const RevisionId& revision);
     // Exact native model changes from `from` to `to` (store trie difference,
@@ -675,7 +676,9 @@ private:
         std::mutex rootKeysMutex;
         std::map<RevisionId, std::vector<Key>> rootKeys;
     };
-    // Called inside withRepository for `project`.
+    // Called inside withRepository for `project`, or on the lock-free read
+    // path: it uses only self-synchronized Repository reads of immutable
+    // revisions and the rootKeys cache under rootKeysMutex.
     std::vector<Key> rootKeysAtRevision(Project& entry, Repository& repository,
                                         const ProjectId& project, const RevisionId& revision);
     // Looks the project up under the catalogue mutex only.

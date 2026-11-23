@@ -11,9 +11,12 @@
 #include "commit_metadata_fixture.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <future>
 #include <iostream>
 #include <map>
 #include <optional>
@@ -21,6 +24,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -691,6 +695,54 @@ void testRootKeysAndRevisionChanges() {
                 limited = error.kind() == db::StorageErrorKind::LimitExceeded;
             }
             require(limited, "too many revision changes must be LimitExceeded");
+        }
+        // D4: the lookup takes neither the project operation lock nor a queue
+        // place, so it answers while a long write holds the project. Queue of
+        // one: the writer fills it (a scoped operation would be Busy). Queue
+        // of two: a scoped operation would wait for the writer's lock.
+        for (const std::size_t queue : {std::size_t{1}, std::size_t{2}}) {
+            db::ProjectService service(root / "projects", queue);
+            service.configureRepositoryRole(db::RepositoryRole::Private);
+            std::promise<void> holding;
+            std::promise<void> release;
+            std::future<void> released = release.get_future();
+            std::atomic<bool> writerDone{false};
+            std::thread writer([&service, &projectId, &holding, &released, &writerDone]() {
+                service.withRepository(projectId, [&holding, &released](db::Repository&) {
+                    holding.set_value();
+                    // Bounded, so a regression fails instead of hanging.
+                    (void)released.wait_for(std::chrono::seconds(10));
+                });
+                writerDone.store(true);
+            });
+            holding.get_future().wait();
+            bool lookupFailed = false;
+            std::vector<db::Key> tip;
+            std::vector<db::Key> older;
+            try {
+                tip = service.hydraulicDistributionRootKeysAtRevision(projectId, revisions.back());
+                older = service.hydraulicDistributionRootKeysAtRevision(projectId, revisions[3]);
+            } catch (const std::exception&) {
+                lookupFailed = true;
+            }
+            const bool answeredWhileHeld = !writerDone.load();
+            const std::size_t pending = service.pendingOperations(projectId);
+            bool scopedBusy = false;
+            if (queue == 1) {
+                try {
+                    service.withRepository(projectId, [](db::Repository&) {});
+                } catch (const db::ProjectError& error) {
+                    scopedBusy = error.kind() == db::ProjectErrorKind::Busy;
+                }
+            }
+            release.set_value();
+            writer.join();
+            require(!lookupFailed && answeredWhileHeld,
+                    "network-root lookup waited for or was refused by a project operation");
+            require(tip == expected(revisions.size() - 1) && older == expected(3),
+                    "lock-free network-root lookup returned different roots");
+            require(pending == 1, "network-root lookup took a queue place");
+            require(queue != 1 || scopedBusy, "the full-queue fixture did not fill the queue");
         }
         std::filesystem::remove_all(root);
     } catch (...) {

@@ -4378,13 +4378,15 @@ std::vector<Key> ProjectService::hydraulicDistributionRootKeysAtRevision(
     const std::optional<ProjectId> project = ProjectId::parse(projectId);
     if (!project) throw ProjectError(ProjectErrorKind::InvalidInput, "UUIDv7 project required");
     const std::shared_ptr<Project> entry = findProject(projectId);
-    std::vector<Key> result;
-    withRepository(projectId, [&](Repository& repository) {
-        result = translated<std::vector<Key>>([&]() {
-            return rootKeysAtRevision(*entry, repository, *project, revision);
-        });
+    // D4: the lock-free read path, like pinModelRevision. Only immutable
+    // revisions are read, every Repository call used here synchronizes
+    // itself, and the cache has its own mutex, so neither the project
+    // operation lock nor a queue place is needed: summary routes and History
+    // planning do not wait behind a long write.
+    return translated<std::vector<Key>>([&]() {
+        const std::shared_ptr<Repository> repository = openRepository(*entry);
+        return rootKeysAtRevision(*entry, *repository, *project, revision);
     });
-    return result;
 }
 
 std::vector<ModelChange> ProjectService::modelChangesBetweenRevisions(

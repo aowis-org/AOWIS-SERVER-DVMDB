@@ -102,7 +102,11 @@ in [durability qualification](durability-qualification.md) and
 Lock order: project operation → draft → catalogue mutex. Projects never block
 each other, and a slow draft write or Commit holds up only its own draft and
 project. Draft reads take no lock at all. Multi-call hydraulic reads stay
-consistent by naming one immutable revision.
+consistent by naming one immutable revision. Reads of immutable revisions
+(pinned model reads, single revision records, and the network-root lookup
+behind the `networks/summary` routes and History planning) take only the
+repository's own handle lock per call, never the project operation lock or a
+queue place, so they do not wait behind a long write.
 
 ## Replication
 
