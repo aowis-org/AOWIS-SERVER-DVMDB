@@ -3713,7 +3713,9 @@ void exerciseAnnotationLayerPagesAndHistoryDeltaHttp() {
     for (const QString& query : {QStringLiteral("?fromChunk=3"), QStringLiteral("?chunkLimit=0"),
                                  QStringLiteral("?chunkLimit=40"), QStringLiteral("?fromChunk=01"),
                                  QStringLiteral("?fromChunk=-1"), QStringLiteral("?chunkLimit=x"),
-                                 QStringLiteral("?fromChunk=1&fromChunk=1"),
+                                 // cpp-httplib drops an exactly repeated pair
+                                 // before routing, so repeat with two values.
+                                 QStringLiteral("?fromChunk=0&fromChunk=1"),
                                  QStringLiteral("?revision=x"), QStringLiteral("?limit=5")})
         check(client.call("GET", layerPath + query).status == 400,
               "malformed annotation layer page request was accepted");
