@@ -210,6 +210,11 @@ struct RevisionNativeActionWitness {
     std::optional<std::string> historyForkArchiveCommitOperationId;
     std::vector<ModelChange> actualNativeChanges;
     std::vector<WorkingCopyEvent> actions;
+    // Initial Commit only (no parent): the overlay the archived actions
+    // started from (the draft's journal seed, digest-checked in the local
+    // Commit record). nullopt for every other Commit and for initial Commits
+    // made before seeds existed; those have no navigable starting state.
+    std::optional<std::vector<ModelChange>> journalSeed;
     // Validated immutable local Commit action-chain digest. This is the
     // *original* chronological order witness for archive replay; do not
     // regenerate it from client-controlled or rearranged action frames.

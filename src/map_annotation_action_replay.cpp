@@ -764,7 +764,9 @@ static std::optional<VerifiedIndexedAnnotationActionBoundary> verifyIndexedActio
     try {
         const RevisionNativeActionWitness witness =
             service.verifiedRevisionNativeActionWitness(projectId, branch, revision);
-        if (!witness.parentRevision)
+        // An initial Commit starts from its archived journal seed; one made
+        // before seeds existed has no navigable starting state.
+        if (!witness.parentRevision && !witness.journalSeed)
             return fail(QStringLiteral("Initial Commit has no immutable parent checkpoint"));
         if (witness.actions.empty() || actionPosition > witness.actions.size())
             return fail(QStringLiteral("Archived action position is invalid"));
@@ -782,11 +784,38 @@ static std::optional<VerifiedIndexedAnnotationActionBoundary> verifyIndexedActio
 
         ReplayInput input;
         input.roots = witness.hydraulicDistributionRootKeys;
-        RevisionId originRevision = *witness.parentRevision;
-        std::vector<ModelChange> originChanges;
         const bool forked = witness.historyForkRevision || witness.historyForkActionPosition ||
                             witness.historyForkArchiveCommitOperationId;
-        if (!forked) {
+        const std::optional<RevisionId> self = RevisionId::parse(witness.revisionId);
+        if (!self) return fail(QStringLiteral("Archived revision identity is invalid"));
+        RevisionId originRevision = witness.parentRevision ? *witness.parentRevision : *self;
+        std::vector<ModelChange> originChanges;
+        if (!witness.parentRevision) {
+            // Initial Commit: there is no parent revision, so the starting
+            // state is expressed over the Commit's own revision: every record
+            // of it removed (the witness lists them all), then the journal
+            // seed. Consumers rebuild it as originRevision + originChanges,
+            // exactly as for a fork source.
+            if (forked)
+                return fail(QStringLiteral("An initial Commit cannot be a History fork"));
+            std::map<Key, std::optional<ModelRecord>> start;
+            for (const ModelChange& change : witness.actualNativeChanges)
+                start[change.key] = std::nullopt;
+            std::set<Key> roots(input.roots.begin(), input.roots.end());
+            for (const ModelChange& change : *witness.journalSeed) {
+                start[change.key] = change.record;
+                if (change.record && change.record->kind == engineeringNetworkKind)
+                    roots.insert(change.key);
+            }
+            for (const std::pair<const Key, std::optional<ModelRecord>>& entry : start)
+                originChanges.push_back(ModelChange{entry.first, entry.second});
+            input.roots.assign(roots.begin(), roots.end());
+            State origin(pinnedView(service.pinModelRevision(projectId, *self)));
+            origin.apply(originChanges);
+            const State committed(origin.base());
+            input.parent = origin.view();
+            input.nativeDelta = difference(origin, committed);
+        } else if (!forked) {
             // The witness is the store's exact revision difference; the
             // parent is read point by point.
             input.parent = pinnedView(service.pinModelRevision(projectId, *witness.parentRevision));
@@ -907,7 +936,7 @@ static std::optional<ArchivedActionPlan> planArchivedAction(
             return failPlan(QStringLiteral("History archive is not verified: ") + replayError);
         const RevisionNativeActionWitness witness =
             service.verifiedRevisionNativeActionWitness(draft.projectId, branch->name, revision);
-        if (!witness.parentRevision ||
+        if ((!witness.parentRevision && !witness.journalSeed) ||
             witness.commitOperationId != selected->commitOperationId ||
             witness.actions.size() != selected->boundary.actionCount)
             return failPlan(QStringLiteral("History witness changed during planning"));

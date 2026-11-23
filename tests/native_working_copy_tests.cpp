@@ -881,9 +881,58 @@ void testUnbornJournalSeed() {
         // Commit: the draft continues from the new HEAD without a seed, and a
         // journal on a committed base never records one.
         const WorkingCopyInfo current = service.workingCopy(draftId);
+        require(current.journalSeed && !current.journal.empty(),
+                "the Commit fixture has no seeded journal");
         const std::string token = service.acquireWorkingCopyLease(draftId, session, 120).token;
-        (void)service.commitWorkingCopy(UuidV7::generate().toString(), draftId, session, token,
-                                        current.generation + 0, std::nullopt, commitMetadata());
+        const aowis::dvmdb::LocalCommitInfo initialCommit = service.commitWorkingCopy(
+            UuidV7::generate().toString(), draftId, session, token,
+            current.generation + 0, std::nullopt, commitMetadata());
+        // The initial Commit archives its journal seed: History can start
+        // its actions there although the Commit has no parent revision.
+        const std::optional<RevisionId> initialRevision =
+            RevisionId::parse(initialCommit.reservedRevisionId);
+        require(initialRevision.has_value(), "initial Commit has no revision");
+        const aowis::dvmdb::RevisionNativeActionWitness witness =
+            service.verifiedRevisionNativeActionWitness(projectId, "main", *initialRevision);
+        require(!witness.parentRevision && witness.journalSeed &&
+                sameChanges(*witness.journalSeed, *current.journalSeed) &&
+                witness.actions.size() == current.journal.size(),
+                "initial Commit did not archive its journal seed");
+        const std::filesystem::path record = root.path / "local-commits" / initialCommit.id;
+        std::string original;
+        {
+            std::ifstream in(record, std::ios::binary);
+            original.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        const std::function<void(const std::string&)> rewrite = [&record](const std::string& body) {
+            std::filesystem::permissions(record, std::filesystem::perms::owner_read |
+                                         std::filesystem::perms::owner_write);
+            std::ofstream out(record, std::ios::binary | std::ios::trunc);
+            out << body;
+        };
+        const std::size_t seedStart = original.find("\njournal-seed\t");
+        const std::size_t digestLine = original.find("\nseed-digest\t");
+        require(seedStart != std::string::npos && digestLine != std::string::npos &&
+                original.find("\nseed\t") != std::string::npos,
+                "the local Commit record has no journal seed rows");
+        // A damaged seed row (its last record byte, still decodable) fails
+        // the digest.
+        std::string damaged = original;
+        const std::size_t rowEnd = damaged.find('\n', damaged.find("\nseed\t") + 1);
+        damaged[rowEnd - 1] = damaged[rowEnd - 1] == '0' ? '2' : '0';
+        rewrite(damaged);
+        bool refused = false;
+        try { (void)service.verifiedRevisionNativeActionWitness(projectId, "main", *initialRevision); }
+        catch (const std::exception&) { refused = true; }
+        require(refused, "a damaged archived journal seed was accepted");
+        // A record without the seed lines (made before seeds) still reads,
+        // without a seed.
+        const std::size_t digestEnd = original.find('\n', digestLine + 1);
+        rewrite(original.substr(0, seedStart + 1) + original.substr(digestEnd + 1));
+        require(!service.verifiedRevisionNativeActionWitness(
+                    projectId, "main", *initialRevision).journalSeed,
+                "a local Commit record without seed lines produced a seed");
+        rewrite(original);
         const WorkingCopyInfo rebased = service.workingCopy(draftId);
         require(rebased.baseRevision && !rebased.journalSeed &&
                 draftFiles(root.path, draftId, "seed-").empty(),
@@ -893,6 +942,16 @@ void testUnbornJournalSeed() {
         require(!service.workingCopy(draftId).journalSeed &&
                 draftFiles(root.path, draftId, "seed-").empty(),
                 "a journal on a committed base recorded a seed");
+        // A Commit with a parent never archives a seed.
+        const aowis::dvmdb::LocalCommitInfo second = service.commitWorkingCopy(
+            UuidV7::generate().toString(), draftId, session, token,
+            service.workingCopy(draftId).generation, initialRevision, commitMetadata());
+        const std::optional<RevisionId> secondRevision = RevisionId::parse(second.reservedRevisionId);
+        require(secondRevision.has_value(), "second Commit has no revision");
+        const aowis::dvmdb::RevisionNativeActionWitness secondWitness =
+            service.verifiedRevisionNativeActionWitness(projectId, "main", *secondRevision);
+        require(secondWitness.parentRevision == initialRevision && !secondWitness.journalSeed,
+                "a Commit with a parent archived a journal seed");
     }
     {
         // A seed line is only valid for an unborn draft with a journal.

@@ -170,7 +170,8 @@ an optional last `meta` line `journal-seed <file|-> <count> <bytes> <sha256|->`
 (`-`: an empty overlay). A Save that keeps a journal prefix keeps the seed;
 History navigation never changes it; a Commit (rebase) or any journal reset
 removes it. History replays the journal forward from the seed, so creations,
-updates and deletions are all reversible before the first Commit. A `meta`
+updates and deletions are all reversible before the first Commit. The first
+Commit archives the seed with its actions, so they stay navigable after it. A `meta`
 without the line (a journal begun before seeds existed) reads as "no seed",
 and History then falls back to reversing the journal, which refuses
 deletions. Unreferenced `seed-*` files are removed when the store opens.

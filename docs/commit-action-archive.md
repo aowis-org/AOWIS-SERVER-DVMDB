@@ -148,6 +148,16 @@ DVMDB's multi-network storage capability is unchanged.
   action pages: up to **100** per request, with separate cursors.
 - The native revision witness is bounded (65,536 changed record keys), and
   navigation is further limited by private candidate budgets.
+- A project's **first Commit** has no parent revision. Its local Commit
+  record therefore also archives the draft's journal seed (the overlay
+  before the first action: rows `seed <key> <record|->` after a
+  `journal-seed <count>` line, then `seed-digest <sha256 of the rows>`).
+  Its archive replays from that seed: the starting state is the Commit's own
+  revision with every record removed, plus the seed, so the first Commit's
+  actions are navigable down to position 0 and can be branched from like
+  any other archive. A first Commit made before seeds were archived (no seed
+  lines) stays checkpoint-only. The seed lines are only valid on a Commit
+  without parent and with actions, never on a fork.
 - A selected action is a **boundary**, with position 0 before the archive's
   first action and position N after its Nth action. Commit markers are not
   extra MODEL edits. A checkpoint-only revision cannot yield fabricated

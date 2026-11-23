@@ -1551,8 +1551,28 @@ std::vector<ModelChange> mergedCandidate(const std::vector<ModelChange>& current
 constexpr std::string_view localCommitMarker = "AOWIS-LOCAL-COMMIT-3\n";
 // Candidate and journal frames are hex-encoded in a single, durable intent.
 // Candidate up to 8 MiB + journal up to 8 MiB => 32 MiB of hex, plus rows.
+// An initial Commit may also carry its journal seed (up to 8 MiB => 16 MiB).
 constexpr std::size_t localCommitMaxBytes =
-    5 * workingCopyMaxBytes + workingCopyMaxEvents * 90 + 2 * maxCommitMessageBytes + 4096;
+    7 * workingCopyMaxBytes + workingCopyMaxEvents * 90 + 2 * maxCommitMessageBytes + 4096;
+
+// Rows of an archived journal seed, also the input of its digest.
+std::string localSeedRows(const std::vector<ModelChange>& seed) {
+    check(seed.size() <= workingCopyMaxChanges, "archived journal seed has too many records",
+          StorageErrorKind::InvalidInput);
+    std::string rows;
+    std::optional<Key> lastKey;
+    for (const ModelChange& change : seed) {
+        check(!lastKey || *lastKey < change.key, "unordered archived journal seed",
+              StorageErrorKind::InvalidInput);
+        lastKey = change.key;
+        const Bytes record = change.record ? encodeModelRecord(*change.record) : Bytes{};
+        rows += "seed\t" + hexBytes(change.key.data(), change.key.size()) + "\t" +
+            (change.record ? hexBytes(record.data(), record.size()) : "-") + "\n";
+        check(rows.size() <= localCommitMaxBytes, "archived journal seed exceeds size limit",
+              StorageErrorKind::InvalidInput);
+    }
+    return rows;
+}
 
 // The reserved commit time and the metadata make the revision record of a
 // retried publication byte-identical to the first attempt.
@@ -1561,6 +1581,8 @@ struct PersistedLocalCommit {
     std::string requestDigest;
     std::vector<ModelChange> changes;
     std::vector<WorkingCopyEvent> actions; // Frozen before immutable HEAD publication.
+    // Initial Commit of a seeded journal only: the overlay before actions[0].
+    std::optional<std::vector<ModelChange>> journalSeed;
     CommitMetadata metadata;
     std::uint64_t committedAtMs = 0;
 };
@@ -1652,6 +1674,18 @@ std::string localCommitBody(const PersistedLocalCommit& operation) {
               "local Commit action archive exceeds journal budget", StorageErrorKind::InvalidInput);
         body += "action\t" + action.id + "\t" +
             hexBytes(action.encoded.data(), action.encoded.size()) + "\n";
+        check(body.size() <= localCommitMaxBytes, "local commit record exceeds size limit",
+              StorageErrorKind::InvalidInput);
+    }
+    if (operation.journalSeed) {
+        // Only an initial Commit needs it: every other archive starts at an
+        // immutable parent revision.
+        check(!info.expectedHead && !info.historyForkRevisionId && !operation.actions.empty(),
+              "journal seed on a Commit with a parent, a fork or no actions",
+              StorageErrorKind::InvalidInput);
+        const std::string rows = localSeedRows(*operation.journalSeed);
+        body += "journal-seed\t" + std::to_string(operation.journalSeed->size()) + "\n" + rows +
+            "seed-digest\t" + localDigest(rows) + "\n";
         check(body.size() <= localCommitMaxBytes, "local commit record exceeds size limit",
               StorageErrorKind::InvalidInput);
     }
@@ -1765,10 +1799,41 @@ PersistedLocalCommit readLocalCommit(const std::filesystem::path& path) {
     const Hash archiveHash = chainJournal(Hash{}, result.actions);
     check(actionChain == hexBytes(archiveHash.data(), archiveHash.size()),
           "archived Commit action chain integrity failure");
-    // Only forked Commits have these optional current-format sidecar fields.
-    // Existing immutable archives need no rewrite or migration.
+    // Only seeded initial Commits and forked Commits have these optional
+    // current-format sidecar fields. Existing immutable archives need no
+    // rewrite or migration.
     std::string extra;
-    if (std::getline(lines, extra)) {
+    bool more = static_cast<bool>(std::getline(lines, extra));
+    if (more && extra.starts_with("journal-seed\t")) {
+        const std::uint64_t seedCount = decimalField(extra.substr(sizeof("journal-seed\t") - 1));
+        check(seedCount <= workingCopyMaxChanges, "invalid archived journal seed count");
+        std::vector<ModelChange> seed;
+        std::optional<Key> lastSeedKey;
+        for (std::uint64_t index = 0; index < seedCount; ++index) {
+            const std::string row = nextField("seed");
+            const std::size_t split = row.find('\t');
+            check(split == 32 && row.find('\t', split + 1) == std::string::npos,
+                  "invalid archived journal seed row");
+            const Bytes keyBytes = unhexBytes(std::string_view(row).substr(0, split));
+            check(keyBytes.size() == Key{}.size(), "invalid archived journal seed model UUID");
+            ModelChange change;
+            std::copy(keyBytes.begin(), keyBytes.end(), change.key.begin());
+            check(!lastSeedKey || *lastSeedKey < change.key, "unsorted archived journal seed");
+            lastSeedKey = change.key;
+            const std::string_view value = std::string_view(row).substr(split + 1);
+            if (value != "-") change.record = decodeModelRecord(unhexBytes(value));
+            seed.push_back(std::move(change));
+        }
+        const std::string digest = nextField("seed-digest");
+        check(hexDigest(digest) && digest == localDigest(localSeedRows(seed)),
+              "archived journal seed integrity failure");
+        check(expected == "-" && !result.actions.empty(),
+              "journal seed on a Commit with a parent or without actions");
+        result.journalSeed = std::move(seed);
+        more = static_cast<bool>(std::getline(lines, extra));
+    }
+    if (more) {
+        check(!result.journalSeed, "journal seed on a forked Commit");
         check(extra.starts_with("fork-revision\t"), "invalid archived fork revision field");
         info.historyForkRevisionId = extra.substr(sizeof("fork-revision\t") - 1);
         info.historyForkActionPosition = decimalField(nextField("fork-position"));
@@ -3054,6 +3119,10 @@ LocalCommitInfo ProjectService::commitWorkingCopy(
             operation.committedAtMs = wallClockMs();
             operation.changes = draft.candidateChanges;
             operation.actions = draft.journal;
+            // An initial Commit has no parent revision to start History from:
+            // keep the journal seed (D3) so its actions stay navigable.
+            if (!expectedLocalHead && !draft.journal.empty() && !draft.historyForkRevisionId)
+                operation.journalSeed = draft.journalSeed;
             operation.info.payloadDigest = localDigest(requestDigest + "\n" +
                 saveBatchFingerprint(operation.changes, {}) + "\n");
             // Publish and fsync the revision -> operation mapping first. A
@@ -3268,6 +3337,7 @@ RevisionNativeActionWitness ProjectService::verifiedRevisionNativeActionWitness(
     result.historyForkArchiveCommitOperationId =
         commit.info.historyForkArchiveCommitOperationId;
     result.actions = commit.actions;
+    result.journalSeed = commit.journalSeed;
     // readLocalCommit/indexedLocalCommit verified this ordered chain against
     // the immutable sidecar's action-chain field before returning `commit`.
     result.authenticatedActionChain = chainJournal(Hash{}, commit.actions);

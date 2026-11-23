@@ -2860,18 +2860,111 @@ void exerciseAnnotationDraftHttp() {
               native::RevisionId::parse(committedRevision.toStdString()),
           "generic direct MODEL Commit bypassed annotation action journal");
 
-    // The first Commit is a checkpoint: it has no immutable parent to replay.
-    // A subsequent real local Commit with two annotation actions must provide
-    // an authenticated revision witness, including order, native membership
-    // records, parent/child snapshot closure, and both intermediate boundaries.
+    // The first Commit has no immutable parent, but it archived its journal
+    // seed (the network and its empty layer before the first action), so its
+    // three actions replay like those of any later Commit. A subsequent real
+    // local Commit with two annotation actions must provide an authenticated
+    // revision witness, including order, native membership records,
+    // parent/child snapshot closure, and both intermediate boundaries.
     const std::optional<native::RevisionId> initialRevision =
         native::RevisionId::parse(committedRevision.toStdString());
     check(initialRevision.has_value(), "first annotation Commit has invalid revision identity");
     QString historyError;
-    check(!native::annotations::verifyIndexedAnnotationActionBoundary(
-              service, project.id, "main", *initialRevision, 0, &historyError) &&
-          !historyError.isEmpty(),
-          "first Commit without immutable parent was exposed as annotation actions");
+    const native::Key annotationKey = native::record::keyFromUuid(annotation.uuid);
+    for (std::size_t position = 0; position <= 3; ++position) {
+        const std::optional<native::annotations::VerifiedIndexedAnnotationActionBoundary> boundary =
+            native::annotations::verifyIndexedAnnotationActionBoundary(
+                service, project.id, "main", *initialRevision, position, &historyError);
+        check(boundary && boundary->boundary.actionCount == 3 &&
+              boundary->originRevision == initialRevision,
+              ("first Commit action boundary is not verified: " + historyError.toStdString()).c_str());
+        // The member at this boundary: origin revision + origin changes +
+        // boundary changes.
+        std::optional<native::ModelRecord> member =
+            service.getModelAtRevision(project.id, *boundary->originRevision, annotationKey);
+        for (const native::ModelChange& change : boundary->originChanges)
+            if (change.key == annotationKey) member = change.record;
+        for (const native::ModelChange& change : boundary->boundary.changesFromParent)
+            if (change.key == annotationKey) member = change.record;
+        const std::optional<QByteArray> expected = position == 1 ? std::optional<QByteArray>(initial)
+            : position == 2 ? std::optional<QByteArray>(revised) : std::nullopt;
+        check(member.has_value() == expected.has_value() &&
+              (!member || native::record::qByteArrayFromBytes(member->payload) == *expected),
+              "first Commit action boundary has the wrong annotation state");
+    }
+    // A first Commit made before journal seeds existed stays checkpoint-only.
+    {
+        const std::filesystem::path record = root.root() / "local-commits" / operation.toStdString();
+        std::string original;
+        {
+            std::ifstream in(record, std::ios::binary);
+            original.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        const std::size_t seedStart = original.find("\njournal-seed\t");
+        const std::size_t digestLine = original.find("\nseed-digest\t");
+        check(seedStart != std::string::npos && digestLine != std::string::npos,
+              "first Commit record has no journal seed");
+        const std::size_t digestEnd = original.find('\n', digestLine + 1);
+        const std::function<void(const std::string&)> rewrite = [&record](const std::string& body) {
+            std::filesystem::permissions(record, std::filesystem::perms::owner_read |
+                                         std::filesystem::perms::owner_write);
+            std::ofstream out(record, std::ios::binary | std::ios::trunc);
+            out << body;
+        };
+        rewrite(original.substr(0, seedStart + 1) + original.substr(digestEnd + 1));
+        check(!native::annotations::verifyIndexedAnnotationActionBoundary(
+                  service, project.id, "main", *initialRevision, 0, &historyError) &&
+              historyError.contains("no immutable parent checkpoint"),
+              "first Commit without a journal seed was exposed as annotation actions");
+        rewrite(original);
+    }
+    // Through HTTP on a fresh draft at that Commit: Undo into its actions down
+    // to the seed, with annotation deltas, and back to HEAD.
+    {
+        const native::WorkingCopyInfo firstDraft = service.createWorkingCopy(
+            project.id, "main", initialRevision, session.toStdString());
+        const QString firstToken = QString::fromStdString(
+            service.acquireWorkingCopyLease(firstDraft.id, session.toStdString(), 90).token);
+        const QString firstPath = QStringLiteral("/dvmdb/v1/working-copies/") +
+            QString::fromStdString(firstDraft.id);
+        const Response atHead = client.call("GET", firstPath + "/history/cursor");
+        check(atHead.status == 200 &&
+              atHead.json.value("previousAction").toObject().value("selectionKind") == "archived" &&
+              atHead.json.value("previousAction").toObject().value("actionPosition") == "2",
+              "first Commit actions are not offered as Undo");
+        struct FirstStep {
+            QString generation;
+            QString position;
+            int count;
+            std::optional<QByteArray> image;
+            const char* message;
+        };
+        const std::vector<FirstStep> steps{
+            {"0", "2", 1, revised, "Undo into the first Commit failed"},
+            {"1", "1", 1, initial, "Undo of the first Commit's update failed"},
+            {"2", "0", 0, std::nullopt, "Undo to the first Commit's seed failed"},
+            {"3", "3", 0, std::nullopt, "Redo to the first Commit's tip failed"},
+        };
+        for (const FirstStep& step : steps) {
+            const QJsonObject body{{"operationId", QString::fromStdString(native::UuidV7::generate().toString())},
+                {"sessionId", session}, {"fencingToken", firstToken},
+                {"expectedGeneration", step.generation}, {"expectedHead", committedRevision},
+                {"actionPosition", step.position}, {"networkId", networkId},
+                {"revisionId", committedRevision}};
+            const Response moved = client.call("POST", firstPath + "/history/navigate", body);
+            const QJsonObject layer = client.call("GET", firstPath + "/annotation-layers/" + layerId).json;
+            const QJsonArray members = layer.value("annotations").toArray();
+            check(moved.status == 200 &&
+                  moved.json.value("generation") == QString::number(step.generation.toInt() + 1) &&
+                  moved.json.value("annotationDelta").isObject() &&
+                  layer.value("count") == step.count &&
+                  (!step.image || QByteArray::fromBase64(members.first().toObject()
+                      .value("payloadBase64").toString().toLatin1()) == *step.image),
+                  step.message);
+        }
+        check(!service.workingCopy(firstDraft.id).dirty,
+              "Redo to the first Commit's tip did not return to the clean committed state");
+    }
     const native::WorkingCopyInfo archivedDraft = service.createWorkingCopy(
         project.id, "main", initialRevision, session.toStdString());
     const native::WorkingCopyLease archivedLease = service.acquireWorkingCopyLease(

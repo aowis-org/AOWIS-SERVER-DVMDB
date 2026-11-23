@@ -84,15 +84,18 @@ std::optional<VerifiedAnnotationActionBoundary> replayVerifiedCombinedActionBoun
 // B4.3 read-only bridge from a REAL indexed local Commit to the annotation
 // replay verifier. The project/branch, immutable first parent, exact native
 // delta, and SHA-256 action order are obtained from ProjectService, not from
-// caller-supplied snapshots or action arrays. Initial, imported, forked, and
-// nonlocal archives remain checkpoint-only in this adapter.
+// caller-supplied snapshots or action arrays. A first Commit (no parent)
+// replays from its archived journal seed; one made before seeds were archived,
+// imported and nonlocal archives remain checkpoint-only in this adapter.
 struct VerifiedIndexedAnnotationActionBoundary final {
     std::string revisionId;
     std::string commitOperationId;
     // `boundary.changesFromParent` is relative to the archive's starting
     // state: `originRevision` + `originChanges`. Without a History fork that
     // is the immutable first parent and no changes; after a fork it is the
-    // verified source boundary the archive started from.
+    // verified source boundary the archive started from; for a first Commit
+    // it is the Commit's own revision with every record removed, plus the
+    // archived journal seed.
     VerifiedAnnotationActionBoundary boundary;
     std::optional<RevisionId> originRevision; // always set by the verifier
     std::vector<ModelChange> originChanges;
