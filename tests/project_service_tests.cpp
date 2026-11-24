@@ -346,6 +346,70 @@ void exerciseVerificationFailurePolicy() {
     require(exact, "rethrown failure must be the original exception");
 }
 
+// deleteProject removes one whole project and its working copies, never
+// another project; it refuses while the project is edited or busy, or when
+// the confirmed name is stale; a crash remnant is removed at the next open.
+void exerciseProjectDeletion() {
+    TemporaryRoot root;
+    std::string keptId;
+    std::string doomedId;
+    std::string crashedId;
+    aowis::dvmdb::RevisionId keptHead = aowis::dvmdb::RevisionId::generate();
+    {
+        ProjectService service(root.directory);
+        service.configureRepositoryRole(aowis::dvmdb::RepositoryRole::Private);
+        keptId = service.createUnbornProject("Keep").id;
+        doomedId = service.createUnbornProject("Doomed").id;
+        keptHead = service.commitModel(keptId, "main", {{modelKey(1), record(1)}}, commitMetadata());
+        const aowis::dvmdb::RevisionId doomedHead =
+            service.commitModel(doomedId, "main", {{modelKey(2), record(2)}}, commitMetadata());
+        (void)service.createUnbornBranch(doomedId, "study");
+        const std::string writer = aowis::dvmdb::UuidV7::generate().toString();
+        const std::string draft = service.createWorkingCopy(doomedId, "main", doomedHead, writer).id;
+        const std::string keptDraft = service.createWorkingCopy(keptId, "main", keptHead, writer).id;
+        const aowis::dvmdb::WorkingCopyLease lease = service.acquireWorkingCopyLease(draft, writer, 120);
+
+        expectError([&] { service.deleteProject(doomedId, "Doomed"); }, ProjectErrorKind::Conflict);
+        service.releaseWorkingCopyLease(draft, writer, lease.token);
+        expectError([&] { service.deleteProject(doomedId, "Renamed meanwhile"); }, ProjectErrorKind::Conflict);
+        {
+            ProjectService::Operation busy = service.reserveOperation(doomedId);
+            expectError([&] { service.deleteProject(doomedId, "Doomed"); }, ProjectErrorKind::Busy);
+        }
+        require(service.project(doomedId).name == "Doomed" && service.listWorkingCopies().size() == 2,
+                "a refused project deletion changed something");
+
+        service.deleteProject(doomedId, "Doomed");
+        expectError([&] { (void)service.project(doomedId); }, ProjectErrorKind::NotFound);
+        expectError([&] { (void)service.listBranches(doomedId); }, ProjectErrorKind::NotFound);
+        expectError([&] { service.deleteProject(doomedId, "Doomed"); }, ProjectErrorKind::NotFound);
+        expectError([&] { service.deleteProject("not-a-project", "Doomed"); }, ProjectErrorKind::InvalidInput);
+        require(service.listProjects().size() == 1 && service.listProjects().front().id == keptId,
+                "project deletion removed the wrong projects");
+        const std::vector<aowis::dvmdb::WorkingCopyInfo> drafts = service.listWorkingCopies();
+        require(drafts.size() == 1 && drafts.front().id == keptDraft,
+                "project deletion kept its working copies or removed another project's");
+        require(service.head(keptId, "main") == keptHead && service.history(keptId, "main", 10).size() == 1,
+                "project deletion changed another project");
+        for (const std::filesystem::directory_entry& entry :
+             std::filesystem::directory_iterator(root.directory / "projects"))
+            require(entry.path().filename().string() == keptId, "project deletion left files behind");
+        // A new project still works after a deletion.
+        crashedId = service.createUnbornProject("Crashed").id;
+    }
+    // A crash right after the catalogue rename leaves a .deleting-* remnant.
+    std::filesystem::rename(root.directory / "projects" / crashedId,
+                            root.directory / "projects" / (".deleting-" + crashedId));
+    {
+        ProjectService reopened(root.directory);
+        require(reopened.listProjects().size() == 1 && reopened.listProjects().front().id == keptId,
+                "a deleted project came back after reopening");
+        require(!std::filesystem::exists(root.directory / "projects" / (".deleting-" + crashedId)),
+                "a project deletion remnant was not removed at open");
+        require(reopened.head(keptId, "main") == keptHead, "reopening after a deletion lost a project");
+    }
+}
+
 int main() {
     try {
         exerciseVerificationFailurePolicy();
@@ -353,6 +417,7 @@ int main() {
         exerciseNonV7ProjectRejected();
         exerciseUnsafeCatalogue();
         exerciseLargeBranchCatalogue();
+        exerciseProjectDeletion();
         std::cout << "Project catalogue and lifecycle tests passed\n";
         return 0;
     } catch (const std::exception& error) {

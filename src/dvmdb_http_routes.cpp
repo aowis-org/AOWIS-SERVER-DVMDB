@@ -74,6 +74,7 @@ const char* const routeWorkingCopyLease = "/dvmdb/v1/working-copies/:draft/lease
 const char* const routeWorkingCopyRelease = "/dvmdb/v1/working-copies/:draft/release";
 const char* const routeWorkingCopyDiscard = "/dvmdb/v1/working-copies/:draft/discard";
 const char* const routeBranches = "/dvmdb/v1/projects/:id/branches";
+const char* const routeProjectDelete = "/dvmdb/v1/projects/:id/delete";
 const char* const routeBranchDelete = "/dvmdb/v1/projects/:id/branch-ids/:branchId/delete";
 const char* const routeBranchTruncate = "/dvmdb/v1/projects/:id/branch-ids/:branchId/truncate";
 const char* const routeRevisionBundle = "/dvmdb/v1/projects/:id/branches/:branch/bundle";
@@ -1223,7 +1224,7 @@ std::optional<std::size_t> jsonBodyLimit(const httplib::Request& request) {
     if (request.method != "POST") return std::nullopt;
     const std::string& route = request.matched_route;
     if (route == routeProjects || route == routeBranches ||
-        route == routeBranchDelete || route == routeBranchTruncate ||
+        route == routeProjectDelete || route == routeBranchDelete || route == routeBranchTruncate ||
         route == routeRepositoryRole || route == routeWorkingCopies || route == routeWorkingCopyLease ||
         route == routeWorkingCopyInitializeNetwork ||
         route == routeWorkingCopyHistoryNavigate ||
@@ -3458,6 +3459,20 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
             requireKeys(object, {"name", "expectedName"});
             return Reply{200, projectJson(service.renameProject(pathParam(request, "id"),
                 requiredString(object, "expectedName"), requiredString(object, "name")))};
+        });
+    });
+    // The whole project, its branches, revisions and working copies. The
+    // name the user confirmed guards against deleting a renamed project.
+    server.Post(routeProjectDelete, [&service](const httplib::Request& request,
+                                               httplib::Response& response) {
+        guarded(response, [&]() {
+            if (const std::optional<Reply> pin = repositoryPinFailure(request, service))
+                return *pin;
+            const QJsonObject object = parseBody(request, maxJsonSmallBytes);
+            requireKeys(object, {"expectedName"});
+            const std::string project = pathParam(request, "id");
+            service.deleteProject(project, requiredString(object, "expectedName"));
+            return Reply{200, QJsonObject{{"deleted", true}, {"id", QString::fromStdString(project)}}};
         });
     });
     registerBundleRoutes(server, service, transferLimits, stagingBudget);

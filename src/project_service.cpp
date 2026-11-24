@@ -143,7 +143,8 @@ void removeCatalogueRemnants(const std::filesystem::path& root) {
         syncDirectory(root / "local-commit-revisions");
     if (removePrefixed(root / "history-deletions", {".creating-"}, false))
         syncDirectory(root / "history-deletions");
-    if (removePrefixed(root / "projects", {".creating-"}, true)) syncDirectory(root / "projects");
+    // .deleting-*: a project deleteProject took out of the catalogue.
+    if (removePrefixed(root / "projects", {".creating-", ".deleting-"}, true)) syncDirectory(root / "projects");
     for (const std::filesystem::directory_entry& entry :
          std::filesystem::directory_iterator(root / "projects")) {
         if (entry.is_directory() && !entry.is_symlink() &&
@@ -2377,6 +2378,72 @@ ProjectInfo ProjectService::renameProject(std::string_view projectId,
         throw;
     }
     return updated;
+}
+
+void ProjectService::deleteProject(std::string_view projectId, std::string_view expectedName) {
+    const std::shared_ptr<Project> entry = findProject(projectId);
+    // No operation runs, and none can start: operations take this mutex and
+    // see `deleted` after it. Never wait here (a draft lock holder may wait
+    // for this project): busy is retryable.
+    std::unique_lock<std::mutex> operation(entry->operationMutex, std::try_to_lock);
+    if (!operation.owns_lock() || entry->pending.load() != 0)
+        throw ProjectError(ProjectErrorKind::Busy, "project is busy; retry deletion");
+    if (entry->info.name != expectedName)
+        throw ProjectError(ProjectErrorKind::Conflict, "project name changed since confirmation");
+    const std::string id(projectId);
+    {
+        const std::filesystem::path deletions = historyDeletionDirectory(this->root_);
+        if (std::filesystem::exists(deletions))
+            for (const std::filesystem::directory_entry& item : std::filesystem::directory_iterator(deletions))
+                if (!item.path().filename().string().starts_with(".") &&
+                    readHistoryDeletion(item.path()).project == id)
+                    throw ProjectError(ProjectErrorKind::Busy, "a branch deletion of this project is unfinished");
+    }
+    // The project's working copies go first: a crash in between leaves the
+    // project without drafts, never drafts of a missing project.
+    std::vector<WorkingCopyInfo> drafts;
+    for (const WorkingCopyInfo& draft : listWorkingCopies())
+        if (draft.projectId == id) drafts.push_back(draft);
+    std::vector<std::shared_ptr<std::mutex>> lockedDrafts;
+    std::vector<std::unique_lock<std::mutex>> draftGuards;
+    lockedDrafts.reserve(drafts.size());
+    draftGuards.reserve(drafts.size());
+    for (const WorkingCopyInfo& draft : drafts) {
+        if (workingCopyLeaseLive(draft))
+            throw ProjectError(ProjectErrorKind::Conflict,
+                               "a working copy of this project is open for editing; close it first");
+        lockedDrafts.push_back(draftLock(draft.id));
+        draftGuards.emplace_back(*lockedDrafts.back(), std::try_to_lock);
+        if (!draftGuards.back().owns_lock())
+            throw ProjectError(ProjectErrorKind::Busy, "working copy is being edited; retry deletion");
+    }
+    for (const WorkingCopyInfo& draft : drafts) {
+        deleteDraft(this->root_, draft.id);
+        forgetLease(draft.id);
+    }
+    // Release the open repository before its directory moves (required where
+    // open files cannot be renamed).
+    {
+        std::lock_guard<std::mutex> opened(entry->openMutex);
+        entry->repository.reset();
+    }
+    const std::filesystem::path doomed = this->projects_ / (".deleting-" + id);
+    {
+        std::lock_guard<std::mutex> guard(this->mutex_);
+        ensureHealthy();
+        const std::map<std::string, std::shared_ptr<Project>>::const_iterator current = this->entries_.find(id);
+        if (current == this->entries_.end() || current->second != entry)
+            throw ProjectError(ProjectErrorKind::NotFound, "project not found");
+        syscallChecked(sys::rename((this->projects_ / id).c_str(), doomed.c_str()) == 0, "remove project from catalogue");
+        entry->deleted = true;
+        this->entries_.erase(id);
+        try { syncDirectory(this->projects_); }
+        catch (...) { this->uncertain_ = true; throw; }
+    }
+    // Best effort: a remnant is removed at the next open.
+    std::error_code ignored;
+    std::filesystem::remove_all(doomed, ignored);
+    if (!ignored) syncDirectory(this->projects_);
 }
 
 ProjectInfo ProjectService::provisionCloneTarget(std::string_view projectId,
@@ -4677,6 +4744,8 @@ void ProjectService::withRepository(Operation& operation,
                                                 "operation reservation was moved from");
     const std::shared_ptr<Project> project = operation.project_;
     std::lock_guard<std::mutex> guard(project->operationMutex);
+    // Reserved just before deleteProject took the project out of the catalogue.
+    if (project->deleted) throw ProjectError(ProjectErrorKind::NotFound, "project not found");
     const std::shared_ptr<Repository> repository =
         translated<std::shared_ptr<Repository>>([&]() { return openRepository(*project); });
     action(*repository);

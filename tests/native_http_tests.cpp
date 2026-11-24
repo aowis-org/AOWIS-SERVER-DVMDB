@@ -1864,6 +1864,41 @@ void exerciseChunkedCloneTransferHttp() {
     });
 }
 
+// POST /projects/{id}/delete: pinned, guarded by the confirmed name, and
+// removes only that project.
+void exerciseProjectDeletionHttp() {
+    namespace native = aowis::dvmdb;
+    TemporaryRoot root;
+    native::ProjectService service(root.root());
+    const native::ProjectInfo doomed = service.createProject("Doomed", commitMetadata());
+    const native::ProjectInfo kept = service.createProject("Kept", commitMetadata());
+    TestServer server(service, native::BundleLimits{4ULL * 1024ULL * 1024ULL, 10000ULL, 1024ULL * 1024ULL});
+    Client client(server.port());
+    httplib::Client raw("127.0.0.1", server.port());
+    const httplib::Headers pin{{"X-AOWIS-Expected-Repository-Id", service.repositoryId()}};
+    const httplib::Headers wrongPin{{"X-AOWIS-Expected-Repository-Id",
+                                     native::UuidV7::generate().toString()}};
+    const std::string path = "/dvmdb/v1/projects/" + doomed.id + "/delete";
+    const std::string body = R"({"expectedName":"Doomed"})";
+    const httplib::Result mismatch = raw.Post(path, wrongPin, body, "application/json");
+    check(mismatch && mismatch->status == 409 && service.listProjects().size() == 2,
+          "project deletion ignored a wrong repository pin");
+    const httplib::Result stale = raw.Post(path, pin, R"({"expectedName":"Other"})", "application/json");
+    check(stale && stale->status == 409 && service.listProjects().size() == 2,
+          "a project was deleted under a stale confirmed name");
+    const httplib::Result malformed = raw.Post(path, pin, R"({"name":"Doomed"})", "application/json");
+    check(malformed && malformed->status == 400, "project deletion accepted a body without expectedName");
+    const httplib::Result deleted = raw.Post(path, pin, body, "application/json");
+    check(deleted && deleted->status == 200 &&
+          QJsonDocument::fromJson(QByteArray::fromStdString(deleted->body)).object().value("deleted").toBool(),
+          "project deletion failed");
+    check(client.call("GET", QString::fromStdString("/dvmdb/v1/projects/" + doomed.id)).status == 404 &&
+          client.call("GET", QString::fromStdString("/dvmdb/v1/projects/" + kept.id)).status == 200,
+          "project deletion removed the wrong project");
+    const httplib::Result again = raw.Post(path, pin, body, "application/json");
+    check(again && again->status == 404, "deleting a deleted project did not answer not found");
+}
+
 // Push of part of a branch (GET .../bundle?maxBytes=&upTo=): the chunk
 // sequence ends at the pushed revision, the recipient stops there, and a
 // recipient that is already further is refused before anything is sent.
@@ -5696,6 +5731,7 @@ int main(int argc, char** argv) {
         exerciseUnbornCheckoutHttp();
         exerciseChunkedCloneTransferHttp();
         exercisePartialPushHttp();
+        exerciseProjectDeletionHttp();
         exerciseWorkingCopyHttp();
         exerciseWorkingCopyListAndDiscardHttp();
         exerciseHistoryDeletionHttp();

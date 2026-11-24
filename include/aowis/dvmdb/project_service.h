@@ -349,6 +349,13 @@ public:
     ProjectInfo provisionCloneTarget(std::string_view projectId, std::string_view name);
     // Rename catalogue metadata without changing the project UUID or its repository.
     // expectedName provides a stale-editor check for concurrent clients.
+    // Deletes the whole project: every branch, revision and network, and the
+    // project's saved working copies. expectedName is the name the user
+    // confirmed (Conflict when it changed). Conflict while one of its working
+    // copies is open for editing (live lease); Busy while an operation on the
+    // project runs or waits. The removal from the catalogue is one atomic
+    // rename; a crash after it leaves only a remnant removed at the next open.
+    void deleteProject(std::string_view projectId, std::string_view expectedName);
     ProjectInfo renameProject(std::string_view projectId, std::string_view expectedName,
                               std::string_view name);
     // Import the exact identity of a root unborn branch into an empty private
@@ -677,6 +684,7 @@ private:
         std::shared_ptr<Repository> repository;  // opened on first use
         std::mutex operationMutex;               // one scoped operation at a time
         std::atomic<std::size_t> pending{0};     // reserved Operations
+        bool deleted = false;                    // under operationMutex: removed by deleteProject
         // Immutable revision -> sorted network root keys (bounded).
         std::mutex rootKeysMutex;
         std::map<RevisionId, std::vector<Key>> rootKeys;

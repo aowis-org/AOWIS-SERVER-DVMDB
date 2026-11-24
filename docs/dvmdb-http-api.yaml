@@ -900,6 +900,34 @@ paths:
         '400': {$ref: '#/components/responses/BadRequest'}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/Conflict'}
+  /projects/{projectId}/delete:
+    parameters:
+      - {$ref: '#/components/parameters/ProjectId'}
+    post:
+      operationId: deleteProject
+      description: |
+        Permanently delete the whole project: every branch, revision and
+        network, and its saved working copies. expectedName is the name the
+        user confirmed; a renamed project is not deleted (HTTP 409). Refused
+        (409) while one of its working copies is open for editing, and
+        retryable (503) while an operation on the project runs. Removal from
+        the catalogue is atomic. Include X-AOWIS-Expected-Repository-Id for
+        repository pinning.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedName]
+              properties:
+                expectedName: {type: string, description: Name the user confirmed}
+      responses:
+        '200': {description: Project deleted}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
   /projects/{projectId}/branches:
     parameters:
       - {$ref: '#/components/parameters/ProjectId'}
