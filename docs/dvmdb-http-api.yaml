@@ -77,11 +77,17 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [repositoryId, modelCodecFingerprint]
+                required: [repositoryId, modelCodecFingerprint, transferLimits]
                 additionalProperties: false
                 properties:
                   repositoryId: {type: string, format: uuid}
                   modelCodecFingerprint: {type: string, pattern: "^[0-9a-f]{64}$", description: SHA-256 of checked-out MODEL include and src content at build time}
+                  transferLimits:
+                    type: object
+                    required: [maxBundleBytes]
+                    additionalProperties: false
+                    properties:
+                      maxBundleBytes: {type: integer, minimum: 1, description: "Largest revision bundle this server exports or accepts. Copy clients request chunks of at most this size (GET bundle?maxBytes=)."}
   /repository/tracking:
     get:
       operationId: getRepositoryTracking
@@ -739,8 +745,11 @@ paths:
         branch or revision is created. Used immediately before importing a
         full UUIDv7 revision bundle into the personal repository. A differing
         existing project name is a conflict. This is identity provisioning,
-        not a merge or a project copy by itself. Unborn branch transfer is
-        not supported by revision bundles.
+        not a merge or a project copy by itself. Unborn branches are not
+        carried by revision bundles; a clone recreates them with
+        POST /projects/{projectId}/branches (unborn, id, description, tags),
+        which works in private and shared repositories.
+        Include X-AOWIS-Expected-Repository-Id for repository pinning.
       requestBody:
         required: true
         content:
@@ -765,6 +774,7 @@ paths:
         Provision an unborn root branch in an empty private clone target with
         the source branch's exact UUIDv7 and a null HEAD. Does not create a
         revision or fetch a bundle. Conflicting target/provenance is rejected.
+        Include X-AOWIS-Expected-Repository-Id for repository pinning.
       requestBody:
         required: true
         content:
@@ -794,21 +804,42 @@ paths:
         recipient-base revision UUIDv7. Uses project-scoped scratch files,
         chunked HTTP streaming and the global transfer staging quota. Does
         not support network resumption or authentication.
+
+        With maxBytes the server exports a chunk: the bundle whose tip is the
+        newest revision on HEAD's first-parent chain (after base) that fits
+        both maxBytes and the server's transfer limit. Import the chunks in
+        order, each next request with base set to the previous chunk's head,
+        until X-AOWIS-Bundle-Complete is true; the recipient branch is then
+        created and fast-forwarded to HEAD. A merge and the history it brings
+        in are one step, and no chunk of a forked branch ends before its fork
+        revision. A base that is not on the first-parent chain allows only
+        the HEAD bundle. 413 when not even the smallest chunk fits.
       parameters:
         - name: base
           in: query
           required: false
           schema: {type: string, format: uuid, description: UUIDv7 revision ID}
+        - name: maxBytes
+          in: query
+          required: false
+          schema: {type: integer, minimum: 1, description: Largest acceptable bundle size in bytes; selects chunked export}
       responses:
         '200':
           description: Verified full or incremental UUIDv7 revision bundle
+          headers:
+            X-AOWIS-Bundle-Head:
+              description: Chunked export only. UUIDv7 of the bundle's tip revision.
+              schema: {type: string, format: uuid}
+            X-AOWIS-Bundle-Complete:
+              description: Chunked export only. true when the tip is the branch HEAD.
+              schema: {type: string, enum: ["true", "false"]}
           content:
             application/vnd.aowis.revision-bundle-v2:
               schema: {type: string, format: binary}
         '400': {$ref: '#/components/responses/BadRequest'}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/Conflict'}
-        '413': {description: Export exceeds configured limit}
+        '413': {description: Export exceeds configured limit, or no chunk fits maxBytes}
         '503': {description: Staging quota or repository queue exhausted}
         '507': {description: Scratch storage exhausted}
     post:
@@ -819,6 +850,8 @@ paths:
         and revision UUIDs; rejects divergent/stale bases. Imports commit the
         verified immutable closure before atomically publishing the HEAD.
         The server currently provides no caller authentication.
+        Include X-AOWIS-Expected-Repository-Id for repository pinning (409
+        repository_mismatch before the body is read).
       requestBody:
         required: true
         content:

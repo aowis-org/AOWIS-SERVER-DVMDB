@@ -24,6 +24,7 @@
 #include <stdexcept>
 #include <unordered_set>
 #include <string>
+#include <type_traits>
 
 namespace aowis::dvmdb {
 namespace {
@@ -4946,6 +4947,41 @@ void publishBundleFile(const std::filesystem::path& path, Write&& write) {
 }
 } // namespace
 
+namespace {
+// Every object a full bundle carries: the revision records reachable from
+// the tip, both tries of each and their leaf values. Shared by export and
+// by chunk planning, so both count exactly the same object set.
+template <class LoadRecord, class ReadNode>
+void collectFullBundleObjects(const Hash& tipHash, DiskBundleHashes& objects,
+                              const LoadRecord& loadRecord, const ReadNode& readNode) {
+    enum class Kind { Revision, Tree, Value };
+    std::vector<std::pair<Hash, Kind>> pending{{tipHash, Kind::Revision}};
+    while (!pending.empty()) {
+        const std::pair<Hash, Kind> next = pending.back();
+        pending.pop_back();
+        if (isZero(next.first) || !objects.insert(next.first, revisionBundleMaxObjects))
+            continue;
+        if (next.second == Kind::Revision) {
+            const RevisionRecord record = loadRecord(next.first);
+            pending.emplace_back(record.root, Kind::Tree);
+            pending.emplace_back(record.referencesRoot, Kind::Tree);
+            for (const RevisionParent& parent : record.parents)
+                pending.emplace_back(parent.expectedRecordHash, Kind::Revision);
+        } else if (next.second == Kind::Tree) {
+            const std::invoke_result_t<const ReadNode&, const Hash&> node = readNode(next.first);
+            if (node.leaf) pending.emplace_back(node.value, Kind::Value);
+            else for (const Hash& child : node.children)
+                pending.emplace_back(child, Kind::Tree);
+        }
+    }
+}
+
+std::uint64_t bundleHeaderBytes(bool delta, bool provenance) {
+    return provenance ? (delta ? revisionDeltaProvenanceHeader : revisionBundleProvenanceHeader)
+                      : (delta ? revisionDeltaHeader : revisionBundleHeader);
+}
+} // namespace
+
 void Repository::exportRevisionBundle(const ProjectId& project, std::string_view branch,
                                         const std::filesystem::path& bundlePath,
                                         BundleLimits limits) {
@@ -4984,9 +5020,140 @@ void Repository::exportIncrementalRevisionBundle(const ProjectId& project,
     exportRevisionBundleLocked(project, branch, recipientBase, fd, limits);
 }
 
+std::pair<std::uint64_t, std::uint64_t> Repository::bundleSizeLocked(
+        const Hash& tipHash, const std::optional<Hash>& baseHash, bool provenance) {
+    std::uint64_t bytes = bundleHeaderBytes(baseHash.has_value(), provenance);
+    std::uint64_t objects = 0;
+    const std::function<void(const Hash&)> add = [&](const Hash& hash) {
+        bytes += bundleEntryBytes + static_cast<std::uint64_t>(load(hash).size());
+        ++objects;
+    };
+    if (baseHash) {
+        bool reachedBase = false;
+        const std::set<Hash> delta = collectDelta(tipHash, *baseHash, revisionBundleMaxObjects,
+                                                  reachedBase);
+        require(Err::Conflict, reachedBase,
+                "incremental recipient base is not an ancestor of source HEAD");
+        for (const Hash& hash : delta) add(hash);
+    } else {
+        DiskBundleHashes full(this->scratch_);
+        collectFullBundleObjects(tipHash, full,
+            [this](const Hash& hash) { return decodeRevisionRecord(load(hash)); },
+            [this](const Hash& hash) { return readNode(hash); });
+        full.forEach(add);
+    }
+    return {bytes, objects};
+}
+
+RevisionBundleChunk Repository::exportRevisionBundleChunk(const ProjectId& project,
+        std::string_view branch, std::optional<RevisionId> recipientBase,
+        std::uint64_t maxBytes, int fd, BundleLimits limits, std::optional<RevisionId> upTo) {
+    require(Err::InvalidInput, maxBytes > 0, "bundle chunk byte limit must be positive");
+    std::lock_guard<std::mutex> guarded(this->mutex_);
+    ScopedFileLock locked(this->lockFd_);
+    refreshIndex();
+    const std::optional<StoredBranch> ref = findStoredBranch(this->directory_, branch);
+    require(Err::NotFound, ref.has_value(), "bundle branch was not found");
+    require(Err::Unavailable, ref->revision.has_value(),
+            "replication requires UUIDv7 branch HEAD");
+    RevisionRecord head = branchRevisionLocked(project, branch);
+    // A push of part of the branch: the transfer ends at `upTo`, found on
+    // HEAD's first-parent chain (never below a forked branch's fork revision).
+    if (upTo && head.id != *upTo) {
+        RevisionRecord walked = head;
+        for (;;) {
+            require(Err::InvalidInput,
+                    !walked.parents.empty() && !(ref->forkRevisionId && walked.id == *ref->forkRevisionId),
+                    "the pushed revision is not on the branch's first-parent history");
+            const Hash parentHash = walked.parents.front().expectedRecordHash;
+            walked = decodeRevisionRecord(load(parentHash));
+            require(Err::Corruption, hashRevisionRecord(walked) == parentHash,
+                    "first-parent revision SHA-256 mismatch");
+            if (walked.id == *upTo) break;
+        }
+        head = walked;
+    }
+    std::optional<Hash> baseHash;
+    if (recipientBase) {
+        RevisionResolver resolver(this->directory_, project);
+        const RevisionObjectReader reader = [this](const Hash& hash) -> std::optional<Bytes> {
+            if (!containsIndex(hash)) return std::nullopt;
+            return load(hash);
+        };
+        const std::optional<ResolvedRevision> resolved = resolver.resolve(*recipientBase, reader);
+        require(Err::NotFound, resolved.has_value(), "incremental recipient base is not published");
+        baseHash = resolved->recordHash;
+    }
+
+    // HEAD's (or upTo's) first-parent chain, newest first, down to (excluding) the
+    // recipient base, or down to (including) the fork revision: an earlier
+    // tip would not have the fork revision as an ancestor.
+    std::vector<std::pair<RevisionId, Hash>> chain;
+    bool reachedBase = false;
+    bool reachedFork = false;
+    RevisionRecord current = head;
+    Hash currentHash = hashRevisionRecord(head);
+    for (;;) {
+        if (recipientBase && current.id == *recipientBase) {
+            reachedBase = true;
+            break;
+        }
+        chain.emplace_back(current.id, currentHash);
+        if (ref->forkRevisionId && current.id == *ref->forkRevisionId) {
+            reachedFork = true;
+            break;
+        }
+        if (current.parents.empty()) break;
+        currentHash = current.parents.front().expectedRecordHash;
+        current = decodeRevisionRecord(load(currentHash));
+        require(Err::Corruption, hashRevisionRecord(current) == currentHash,
+                "first-parent revision SHA-256 mismatch");
+    }
+    // Oldest first. Without a usable chain (base off the first-parent chain,
+    // fork revision not on it, or nothing newer than the base) only HEAD is
+    // a candidate, which is exactly the unbounded export.
+    std::vector<std::pair<RevisionId, Hash>> candidates;
+    const bool usable = !chain.empty() && (recipientBase ? reachedBase : true) &&
+                        (!ref->forkRevisionId || recipientBase || reachedFork);
+    if (usable) candidates.assign(chain.rbegin(), chain.rend());
+    else candidates.emplace_back(head.id, hashRevisionRecord(head));
+
+    const bool provenance = ref->originBranchId.has_value() || ref->forkRevisionId.has_value();
+    const std::uint64_t byteLimit = limits.maxBytes == 0 ? maxBytes : std::min(limits.maxBytes, maxBytes);
+    const std::function<bool(std::size_t)> fits = [&](std::size_t index) {
+        const std::pair<std::uint64_t, std::uint64_t> size =
+            bundleSizeLocked(candidates[index].second, baseHash, provenance);
+        return size.first <= byteLimit && size.first <= revisionBundleMaxBytes &&
+               size.second <= revisionBundleMaxObjects &&
+               (limits.maxObjects == 0 || size.second <= limits.maxObjects);
+    };
+    // Bundle size never shrinks along a first-parent chain (a descendant's
+    // object set contains its ancestor's), so the newest fitting tip is
+    // found by bisection after HEAD itself is tried.
+    std::size_t chosen = candidates.size() - 1;
+    if (!fits(chosen)) {
+        require(Err::LimitExceeded, chosen > 0 && fits(0),
+                "the smallest revision bundle chunk exceeds the byte limit");
+        std::size_t low = 0;
+        std::size_t high = chosen;
+        while (high - low > 1) {
+            const std::size_t middle = low + (high - low) / 2;
+            if (fits(middle)) low = middle;
+            else high = middle;
+        }
+        chosen = low;
+    }
+    BundleLimits effective = limits;
+    effective.maxBytes = byteLimit;
+    exportRevisionBundleLocked(project, branch, recipientBase, fd, effective,
+                               candidates[chosen].first);
+    return RevisionBundleChunk{candidates[chosen].first, candidates[chosen].first == head.id};
+}
+
+
 void Repository::exportRevisionBundleLocked(const ProjectId& project,
         std::string_view branch, std::optional<RevisionId> base, int fd,
-        BundleLimits limits) {
+        BundleLimits limits, std::optional<RevisionId> tipRevision) {
     sys::Stat destination{};
     systemCall(fd >= 0 && sys::fstat(fd, &destination) == 0, "stat bundle output");
     require(Err::InvalidInput, S_ISREG(destination.st_mode) && destination.st_size == 0,
@@ -4995,8 +5162,8 @@ void Repository::exportRevisionBundleLocked(const ProjectId& project,
     require(Err::NotFound, ref.has_value(), "bundle branch was not found");
     require(Err::Unavailable, ref->revision.has_value(),
             "replication requires UUIDv7 branch HEAD");
-    const RevisionRecord tip = branchRevisionLocked(project, branch);
-    const Hash tipHash = hashRevisionRecord(tip);
+    RevisionRecord tip = branchRevisionLocked(project, branch);
+    Hash tipHash = hashRevisionRecord(tip);
     require(Err::Corruption, tipHash == ref->head && tip.id == *ref->revision,
             "bundle HEAD UUID/SHA mismatch");
     RevisionResolver resolver(this->directory_, project);
@@ -5004,13 +5171,20 @@ void Repository::exportRevisionBundleLocked(const ProjectId& project,
         if (!containsIndex(hash)) return std::nullopt;
         return load(hash);
     };
+    // A chunk tip is an ancestor of HEAD chosen by exportRevisionBundleChunk;
+    // the bundle then carries that revision as its tip.
+    if (tipRevision && *tipRevision != tip.id) {
+        const std::optional<ResolvedRevision> resolvedTip = resolver.resolve(*tipRevision, reader);
+        require(Err::NotFound, resolvedTip.has_value(), "bundle chunk tip is not published");
+        tip = resolvedTip->record;
+        tipHash = resolvedTip->recordHash;
+    }
     Hash baseHash{};
     if (base) {
         const std::optional<ResolvedRevision> resolved = resolver.resolve(*base, reader);
         require(Err::NotFound, resolved.has_value(), "incremental recipient base is not published");
         baseHash = resolved->recordHash;
     }
-    enum class Kind { Revision, Tree, Value };
     // A full bundle carries the complete graph; it is authenticated and its
     // semantics re-verified while it is collected. An incremental bundle
     // carries only the delta against the recipient's base (collectDelta),
@@ -5024,25 +5198,9 @@ void Repository::exportRevisionBundleLocked(const ProjectId& project,
                 "incremental recipient base is not an ancestor of source HEAD");
     } else {
         fullObjects.emplace(this->scratch_);
-        std::vector<std::pair<Hash, Kind>> pending{{tipHash, Kind::Revision}};
-        while (!pending.empty()) {
-            const std::pair<Hash, Kind> next = pending.back();
-            pending.pop_back();
-            if (isZero(next.first) || !fullObjects->insert(next.first, revisionBundleMaxObjects))
-                continue;
-            if (next.second == Kind::Revision) {
-                const RevisionRecord record = decodeRevisionRecord(load(next.first));
-                pending.emplace_back(record.root, Kind::Tree);
-                pending.emplace_back(record.referencesRoot, Kind::Tree);
-                for (const RevisionParent& parent : record.parents)
-                    pending.emplace_back(parent.expectedRecordHash, Kind::Revision);
-            } else if (next.second == Kind::Tree) {
-                const TreeNode node = readNode(next.first);
-                if (node.leaf) pending.emplace_back(node.value, Kind::Value);
-                else for (const Hash& child : node.children)
-                    pending.emplace_back(child, Kind::Tree);
-            }
-        }
+        collectFullBundleObjects(tipHash, *fullObjects,
+            [this](const Hash& hash) { return decodeRevisionRecord(load(hash)); },
+            [this](const Hash& hash) { return readNode(hash); });
     }
     const std::uint64_t objectTotal = base ? static_cast<std::uint64_t>(deltaObjects.size())
                                            : fullObjects->size();
@@ -5054,9 +5212,7 @@ void Repository::exportRevisionBundleLocked(const ProjectId& project,
     require(Err::Corruption, !ref->forkRevisionId || ref->originBranchId,
             "branch fork revision has no origin branch identity");
     const bool hasProvenance = ref->originBranchId.has_value() || ref->forkRevisionId.has_value();
-    const std::uint64_t headerSize = hasProvenance
-        ? (base ? revisionDeltaProvenanceHeader : revisionBundleProvenanceHeader)
-        : (base ? revisionDeltaHeader : revisionBundleHeader);
+    const std::uint64_t headerSize = bundleHeaderBytes(base.has_value(), hasProvenance);
     std::uint64_t total = headerSize;
     // Preflight byte limits and authenticate every exported object before
     // exposing any bundle content.

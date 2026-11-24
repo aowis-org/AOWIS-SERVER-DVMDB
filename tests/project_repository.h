@@ -225,6 +225,14 @@ public:
         this->repository_.exportIncrementalRevisionBundle(this->project_, branch, recipientBase,
                                                             fd, limits);
     }
+    aowis::dvmdb::RevisionBundleChunk exportBundleChunk(std::string_view branch,
+                                                        std::optional<RevisionId> recipientBase,
+                                                        std::uint64_t maxBytes, int fd,
+                                                        BundleLimits limits = {},
+                                                        std::optional<RevisionId> upTo = std::nullopt) {
+        return this->repository_.exportRevisionBundleChunk(this->project_, branch, recipientBase,
+                                                           maxBytes, fd, limits, upTo);
+    }
     RevisionBundleImport importBundle(int fd, std::string_view localBranch,
                                         BundleLimits limits = {},
                                         BundleImportProfile* profile = nullptr) {

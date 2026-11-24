@@ -91,6 +91,17 @@ for network access.
 ./compile_linux.sh             # build Release and start the server in the foreground
 ```
 
+The server listens on `127.0.0.1:8755` unless `aowis-server-dvmdb.ini` says
+otherwise. To reach it from other machines, choose the listen address (and
+optionally the port) when starting it:
+
+```bash
+./compile_linux.sh --listen-address 0.0.0.0          # all IPv4 interfaces, port 8755
+./compile_linux.sh --listen-address 0.0.0.0:9000     # ... on port 9000
+./compile_linux.sh --listen-address [::]:9000        # all IPv6 interfaces, port 9000
+./compile_linux.sh --listen-port 9000                # configured address, port 9000
+```
+
 In a second terminal:
 
 ```bash
@@ -100,7 +111,13 @@ curl -fsS http://127.0.0.1:8755/dvmdb/v1/projects   # {"projects":[]}
 
 The server prints its storage root at startup. Without `--data-root` or an INI
 setting it uses `./aowis-dvmdb-data` if that exists, otherwise
-`~/.local/share/aowis-dvmdb/`. Configuration, limits, deployment and errors:
+`~/.local/share/aowis-dvmdb/`. Choose it when starting through the script:
+
+```bash
+./compile_linux.sh --data-root ~/.local/share/aowis-dvmdb   # the default root, explicitly
+./compile_linux.sh --data-root /srv/aowis-dvmdb --listen-address 0.0.0.0
+```
+ Configuration, limits, deployment and errors:
 [running the service](docs/native-database-service.md).
 
 ## Build and test

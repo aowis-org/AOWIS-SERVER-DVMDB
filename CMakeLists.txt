@@ -495,6 +495,12 @@ if(BUILD_TESTING)
     target_link_libraries(aowis-dvmdb-bundle-limit-tests PRIVATE aowis-dvmdb-store)
     add_test(NAME aowis-dvmdb-bundle-limit-tests COMMAND aowis-dvmdb-bundle-limit-tests)
     set_tests_properties(aowis-dvmdb-bundle-limit-tests PROPERTIES LABELS "aowis")
+
+    # Size-bounded bundle chunks for transfers through a byte ceiling.
+    add_executable(aowis-dvmdb-bundle-chunk-tests tests/native_bundle_chunk_tests.cpp)
+    target_link_libraries(aowis-dvmdb-bundle-chunk-tests PRIVATE aowis-dvmdb-store)
+    add_test(NAME aowis-dvmdb-bundle-chunk-tests COMMAND aowis-dvmdb-bundle-chunk-tests)
+    set_tests_properties(aowis-dvmdb-bundle-chunk-tests PROPERTIES LABELS "aowis;replication")
     add_executable(aowis-dvmdb-bundle-disk-index-tests tests/native_bundle_disk_index_tests.cpp)
     target_link_libraries(aowis-dvmdb-bundle-disk-index-tests PRIVATE aowis-dvmdb-store)
     add_test(NAME aowis-dvmdb-bundle-disk-index-tests COMMAND aowis-dvmdb-bundle-disk-index-tests)

@@ -74,6 +74,9 @@ repository.exportRevisionBundle(project, "main", "/tmp/main.aowbundle");
 repository.exportIncrementalRevisionBundle(project, "main", base, "/tmp/update.aowbundle");
 const RevisionBundleImport result =
     repository.importRevisionBundle(project, fd, "main", limits);
+// At most maxBytes; continue with base = chunk.head until chunk.complete.
+const RevisionBundleChunk chunk =
+    repository.exportRevisionBundleChunk(project, "main", base, maxBytes, fd, limits);
 ```
 
 Path forms publish atomically with no replace; descriptor forms write to an
@@ -89,10 +92,52 @@ caps total bytes, objects and object size; hard ceilings are 64 GiB,
   created, `200` for fast-forward or up to date, with `status`, `head` and
   `objectsImported`.
 
-Every transfer reserves `max_transfer_mib` of the server-wide staging budget
-for its duration (`503 staging_busy` when none is left); a bundle over the
-limit is `413 transfer_too_large`. Use the CLI for larger transfers. Bundle
-hashes prove integrity, not authorship or permission to change the project.
+* `GET .../bundle?maxBytes={n}[&base={revision}][&upTo={revision}]` — a
+  **chunk**, see below. `X-AOWIS-Bundle-Head` names its tip,
+  `X-AOWIS-Bundle-Complete` is `true` when the tip is the branch HEAD, or the
+  `upTo` revision.
+* `upTo` (push of part of a branch) ends the transfer at that revision
+  instead of HEAD; it needs `maxBytes`. It must be HEAD or on HEAD's
+  first-parent chain, not below a forked branch's fork revision (`400`). A
+  `base` that is not an ancestor of it — the recipient already has that
+  revision or newer history — is `409`; a `base` this database does not have
+  (the recipient committed on its own) is `404`. Nothing is exported then.
+
+`GET /dvmdb/v1/repository` reports `transferLimits.maxBundleBytes`. Every
+transfer reserves `max_transfer_mib` of the server-wide staging budget for its
+duration (`503 staging_busy` when none is left); a bundle over the limit is
+`413 transfer_too_large`. Bundle hashes prove integrity, not authorship or
+permission to change the project. Uploads, `clone-target` and
+`unborn-checkout` honour `X-AOWIS-Expected-Repository-Id` (409
+`repository_mismatch`), so a copy cannot land in the wrong repository.
+
+## Chunked transfer
+
+A branch larger than the transfer limit is moved as a sequence of bundles.
+Each chunk's tip is the **newest revision on HEAD's first-parent chain** whose
+bundle (full for the first chunk, delta from the previous tip afterwards) fits
+`maxBytes` and the server's own limits. Importing the chunks in order creates
+the branch at the first tip and fast-forwards it to each following one; the
+recipient ends at exactly the source HEAD with the same branch and revision
+UUIDv7s. Bundle size never shrinks along the chain, so the server finds the
+tip by bisection: about log2(n) size computations of the candidate bundle,
+then one export.
+
+Limits of the split:
+
+* A merge and the side history it brings in are one step; they are never split.
+* No chunk of a forked branch ends before its fork revision (a bundle's fork
+  revision must be an ancestor of its tip). A clone therefore first copies the
+  origin branch and creates the fork with `POST .../branches`
+  (`fromBranchId`, `revision`, `id`), then sends deltas from the fork revision.
+* A `base` that is reachable only through a second parent allows only the HEAD
+  bundle.
+* `413` when not even the smallest candidate fits; one object over the limit
+  cannot be split at all.
+
+An unborn branch has no revisions to bundle. A clone recreates it with
+`POST .../branches` (`unborn: true`, `id`, `description`, `tags`), which works
+in private and shared repositories and is idempotent for the same UUIDv7.
 
 ## Collaboration today
 

@@ -1726,6 +1726,218 @@ void exerciseUnbornCheckoutHttp() {
     targetServer.stop();
 }
 
+// Whole-project clone into a shared repository through a transfer ceiling:
+// transfer limits are advertised, bundle chunks (GET .../bundle?maxBytes=)
+// fit and fast-forward the recipient to the source HEAD, clone writes honour
+// the wrong-target pin, and an unborn branch keeps its UUIDv7 and metadata.
+void exerciseChunkedCloneTransferHttp() {
+    namespace native = aowis::dvmdb;
+    TemporaryRoot sourceRoot;
+    TemporaryRoot targetRoot;
+    native::ProjectService source(sourceRoot.root());
+    const native::ProjectInfo project = source.createProject("Chunked clone", commitMetadata());
+    const std::optional<native::ProjectId> projectId = native::ProjectId::parse(project.id);
+    check(projectId.has_value(), "chunk fixture project is not UUIDv7");
+    native::RevisionId tip = source.head(project.id, "main");
+    source.withRepository(project.id, [&](native::Repository& repository) {
+        for (unsigned index = 0; index < 16; ++index) {
+            native::Key key{};
+            key[14] = 0x6b;
+            key[15] = static_cast<std::uint8_t>(index);
+            native::Bytes value(64 * 1024, 0);
+            std::uint32_t state = 0x811c9dc5U ^ index;
+            for (std::uint8_t& byte : value) {
+                state = state * 16777619U + 0x9e3779b9U;
+                byte = static_cast<std::uint8_t>(state >> 24U);
+            }
+            tip = repository.commit(*projectId, "main", {{key, value}}, commitMetadata(), tip);
+        }
+    });
+    const native::BundleLimits limits{4ULL * 1024ULL * 1024ULL, 10000ULL, 1024ULL * 1024ULL};
+    native::ProjectService target(targetRoot.root());
+    target.configureRepositoryRole(native::RepositoryRole::Shared);
+    TestServer sourceServer(source, limits);
+    TestServer targetServer(target, limits);
+    Client sourceClient(sourceServer.port());
+    Client targetClient(targetServer.port());
+    httplib::Client raw("127.0.0.1", targetServer.port());
+    raw.set_read_timeout(std::chrono::seconds(30));
+    httplib::Client rawSource("127.0.0.1", sourceServer.port());
+    rawSource.set_read_timeout(std::chrono::seconds(30));
+
+    const Response repository = targetClient.call("GET", "/dvmdb/v1/repository");
+    check(repository.status == 200 &&
+          repository.json.value("transferLimits").toObject().value("maxBundleBytes").toInteger() ==
+              static_cast<qint64>(limits.maxBytes),
+          "repository identity does not advertise the bundle transfer limit");
+
+    const std::string correct = target.repositoryId();
+    const std::string wrong = source.repositoryId();
+    const httplib::Headers wrongPin{{"X-AOWIS-Expected-Repository-Id", wrong}};
+    const httplib::Headers correctPin{{"X-AOWIS-Expected-Repository-Id", correct}};
+    const std::string cloneBody = QJsonDocument(QJsonObject{
+        {"projectId", QString::fromStdString(project.id)}, {"name", "Chunked clone"}})
+        .toJson(QJsonDocument::Compact).toStdString();
+    const httplib::Result cloneRefused = raw.Post("/dvmdb/v1/projects/clone-target", wrongPin,
+                                                  cloneBody, "application/json");
+    check(cloneRefused && cloneRefused->status == 409 &&
+          QJsonDocument::fromJson(QByteArray::fromStdString(cloneRefused->body)).object()
+              .value("error").toObject().value("code").toString() == "repository_mismatch" &&
+          target.listProjects().empty(),
+          "clone target provisioning ignored a wrong repository pin");
+    const httplib::Result cloneOk = raw.Post("/dvmdb/v1/projects/clone-target", correctPin,
+                                             cloneBody, "application/json");
+    check(cloneOk && cloneOk->status == 200, "pinned clone target provisioning into a shared repository failed");
+
+    const std::string bundlePath = "/dvmdb/v1/projects/" + project.id + "/branches/main/bundle";
+    check(sourceClient.callRaw("GET", QString::fromStdString(bundlePath + "?maxBytes=0")).status == 400 &&
+          sourceClient.callRaw("GET", QString::fromStdString(bundlePath + "?maxBytes=12x")).status == 400 &&
+          sourceClient.callRaw("GET", QString::fromStdString(bundlePath + "?maxBytes=-1")).status == 400,
+          "an invalid bundle chunk size was accepted");
+    check(sourceClient.callRaw("GET", QString::fromStdString(bundlePath + "?maxBytes=64")).status == 413,
+          "a chunk size below one revision was not rejected as too large");
+
+    const std::uint64_t chunkLimit = 300000;
+    std::optional<std::string> base;
+    int chunks = 0;
+    bool complete = false;
+    while (!complete) {
+        check(++chunks < 64, "chunked clone transfer did not terminate");
+        std::string query = bundlePath + "?maxBytes=" + std::to_string(chunkLimit);
+        if (base) query += "&base=" + *base;
+        const httplib::Result exported = rawSource.Get(query);
+        check(exported && exported->status == 200 &&
+              exported->body.size() <= chunkLimit &&
+              exported->has_header("X-AOWIS-Bundle-Head") &&
+              exported->has_header("X-AOWIS-Bundle-Complete"),
+              "bundle chunk export failed or exceeded the requested size");
+        const std::string head = exported->get_header_value("X-AOWIS-Bundle-Head");
+        const std::string completeText = exported->get_header_value("X-AOWIS-Bundle-Complete");
+        check(native::RevisionId::parse(head).has_value() &&
+              (completeText == "true" || completeText == "false"),
+              "bundle chunk headers are malformed");
+        complete = completeText == "true";
+        if (chunks == 1) {
+            const httplib::Result refused = raw.Post(bundlePath, wrongPin, exported->body,
+                                                     "application/vnd.aowis.revision-bundle-v2");
+            check(refused && refused->status == 409 && target.listBranches(project.id).empty(),
+                  "bundle upload ignored a wrong repository pin");
+        }
+        const httplib::Result imported = raw.Post(bundlePath, correctPin, exported->body,
+                                                  "application/vnd.aowis.revision-bundle-v2");
+        check(imported && imported->status == (chunks == 1 ? 201 : 200),
+              "bundle chunk import failed");
+        const QJsonObject result = QJsonDocument::fromJson(QByteArray::fromStdString(imported->body)).object();
+        check(result.value("head").toString().toStdString() == head &&
+              result.value("status").toString() == (chunks == 1 ? "created" : "fast_forward"),
+              "bundle chunk import did not create, then fast-forward, to the chunk head");
+        base = head;
+    }
+    check(chunks >= 4, "a project larger than the chunk limit was not split");
+    check(target.head(project.id, "main") == tip &&
+          target.branchId(project.id, "main") == source.branchId(project.id, "main"),
+          "chunked clone did not reach the source HEAD with the source branch UUIDv7");
+
+    // An unborn branch is copied by identity into the shared clone, with its
+    // metadata; a retry is idempotent.
+    const QString branchId = QString::fromStdString(native::BranchId::generate().toString());
+    const std::string unbornBody = QJsonDocument(QJsonObject{
+        {"name", "planned"}, {"unborn", true}, {"id", branchId},
+        {"description", "Not started yet"}, {"tags", QJsonArray{"draft"}}})
+        .toJson(QJsonDocument::Compact).toStdString();
+    const std::string branchesPath = "/dvmdb/v1/projects/" + project.id + "/branches";
+    const httplib::Result unborn = raw.Post(branchesPath, correctPin, unbornBody, "application/json");
+    const httplib::Result unbornRetry = raw.Post(branchesPath, correctPin, unbornBody, "application/json");
+    check(unborn && unborn->status == 201 && unbornRetry && unbornRetry->status == 201 &&
+          target.branchId(project.id, "planned") ==
+              native::BranchId::parse(branchId.toStdString()) &&
+          !target.optionalHead(project.id, "planned"),
+          "an unborn branch could not be cloned into a shared repository by UUIDv7");
+    const httplib::Result checkoutRefused = raw.Post(
+        "/dvmdb/v1/projects/" + project.id + "/unborn-checkout", wrongPin,
+        QJsonDocument(QJsonObject{{"branchId", branchId}, {"name", "planned"}})
+            .toJson(QJsonDocument::Compact).toStdString(), "application/json");
+    check(checkoutRefused && checkoutRefused->status == 409,
+          "unborn checkout ignored a wrong repository pin");
+    target.withRepository(project.id, [](native::Repository& repository) {
+        (void)repository.verifyRepository();
+    });
+}
+
+// Push of part of a branch (GET .../bundle?maxBytes=&upTo=): the chunk
+// sequence ends at the pushed revision, the recipient stops there, and a
+// recipient that is already further is refused before anything is sent.
+void exercisePartialPushHttp() {
+    namespace native = aowis::dvmdb;
+    TemporaryRoot sourceRoot;
+    TemporaryRoot targetRoot;
+    native::ProjectService source(sourceRoot.root());
+    const native::ProjectInfo project = source.createProject("Partial push", commitMetadata());
+    const std::optional<native::ProjectId> projectId = native::ProjectId::parse(project.id);
+    check(projectId.has_value(), "push fixture project is not UUIDv7");
+    std::vector<native::RevisionId> revisions{source.head(project.id, "main")};
+    source.withRepository(project.id, [&](native::Repository& repository) {
+        for (unsigned index = 0; index < 8; ++index) {
+            native::Key key{};
+            key[14] = 0x70;
+            key[15] = static_cast<std::uint8_t>(index);
+            revisions.push_back(repository.commit(*projectId, "main",
+                {{key, native::Bytes(1024, static_cast<std::uint8_t>(index))}}, commitMetadata(),
+                revisions.back()));
+        }
+    });
+    const native::BundleLimits limits{4ULL * 1024ULL * 1024ULL, 10000ULL, 1024ULL * 1024ULL};
+    native::ProjectService target(targetRoot.root());
+    target.configureRepositoryRole(native::RepositoryRole::Shared);
+    TestServer sourceServer(source, limits);
+    TestServer targetServer(target, limits);
+    Client sourceClient(sourceServer.port());
+    httplib::Client raw("127.0.0.1", targetServer.port());
+    raw.set_read_timeout(std::chrono::seconds(30));
+    httplib::Client rawSource("127.0.0.1", sourceServer.port());
+    rawSource.set_read_timeout(std::chrono::seconds(30));
+    const httplib::Headers pin{{"X-AOWIS-Expected-Repository-Id", target.repositoryId()}};
+    const std::string cloneBody = QJsonDocument(QJsonObject{
+        {"projectId", QString::fromStdString(project.id)}, {"name", "Partial push"}})
+        .toJson(QJsonDocument::Compact).toStdString();
+    const httplib::Result provisioned = raw.Post("/dvmdb/v1/projects/clone-target", pin, cloneBody,
+                                                 "application/json");
+    check(provisioned && provisioned->status == 200, "push target provisioning failed");
+
+    const std::string bundlePath = "/dvmdb/v1/projects/" + project.id + "/branches/main/bundle";
+    const std::string middle = revisions[4].toString();
+    const std::string tip = revisions.back().toString();
+    check(sourceClient.callRaw("GET", QString::fromStdString(bundlePath + "?upTo=" + middle)).status == 400 &&
+          sourceClient.callRaw("GET", QString::fromStdString(bundlePath + "?maxBytes=4194304&upTo=x")).status == 400 &&
+          sourceClient.callRaw("GET", QString::fromStdString(bundlePath + "?maxBytes=4194304&upTo=" +
+              native::RevisionId::generate().toString())).status == 400,
+          "an invalid push revision was accepted");
+
+    const std::function<httplib::Result(const std::optional<std::string>&, const std::string&)> push =
+        [&](const std::optional<std::string>& base, const std::string& upTo) {
+        std::string query = bundlePath + "?maxBytes=4194304&upTo=" + upTo;
+        if (base) query += "&base=" + *base;
+        return rawSource.Get(query);
+    };
+    const httplib::Result first = push(std::nullopt, middle);
+    check(first && first->status == 200 && first->get_header_value("X-AOWIS-Bundle-Head") == middle &&
+          first->get_header_value("X-AOWIS-Bundle-Complete") == "true",
+          "a push did not end its bundle at the pushed revision");
+    const httplib::Result created = raw.Post(bundlePath, pin, first->body, "application/vnd.aowis.revision-bundle-v2");
+    check(created && created->status == 201 && target.head(project.id, "main") == revisions[4],
+          "a pushed revision did not create the branch there");
+
+    const httplib::Result older = push(tip, revisions[2].toString());
+    check(older && older->status == 409, "a push older than the recipient was not refused");
+
+    const httplib::Result rest = push(middle, tip);
+    check(rest && rest->status == 200 && rest->get_header_value("X-AOWIS-Bundle-Head") == tip &&
+          rest->get_header_value("X-AOWIS-Bundle-Complete") == "true", "pushing HEAD did not send the rest");
+    const httplib::Result advanced = raw.Post(bundlePath, pin, rest->body, "application/vnd.aowis.revision-bundle-v2");
+    check(advanced && advanced->status == 200 && target.head(project.id, "main") == revisions.back(),
+          "pushing HEAD did not fast-forward the recipient");
+}
+
 void exerciseUuidv7HistoryHttp() {
     namespace native = aowis::dvmdb;
     TemporaryRoot temp;
@@ -5482,6 +5694,8 @@ int main(int argc, char** argv) {
         exerciseRevisionBundleHttp();
         exerciseUnbornProjectHttp();
         exerciseUnbornCheckoutHttp();
+        exerciseChunkedCloneTransferHttp();
+        exercisePartialPushHttp();
         exerciseWorkingCopyHttp();
         exerciseWorkingCopyListAndDiscardHttp();
         exerciseHistoryDeletionHttp();

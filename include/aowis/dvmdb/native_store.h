@@ -199,6 +199,14 @@ struct BundleLimits {
     std::uint64_t maxObjectBytes = 0;
 };
 
+// Result of a size-bounded export (Repository::exportRevisionBundleChunk).
+// `head` is the bundle's tip revision; `complete` means it is the branch HEAD,
+// so the recipient has the whole branch once this chunk is imported.
+struct RevisionBundleChunk {
+    RevisionId head;
+    bool complete = false;
+};
+
 // Optional import-stage timings, measured inside the native importer. All
 // durations are wall-clock milliseconds and can overlap neither each other
 // nor the separate post-import repository audit. Populated on success only.
@@ -534,6 +542,27 @@ public:
     void exportIncrementalRevisionBundle(const ProjectId& project, std::string_view branch,
                                            const RevisionId& recipientBase, int fd,
                                            BundleLimits limits = {});
+    // Size-bounded export for transfers through a byte ceiling. The tip is
+    // the newest revision on HEAD's first-parent chain whose bundle (full, or
+    // delta from recipientBase) fits maxBytes and `limits`; it is HEAD when
+    // the whole branch fits. Importing chunks in order, each with the previous
+    // chunk's head as recipientBase, creates and then fast-forwards the
+    // branch to HEAD. Candidates never precede a forked branch's fork revision
+    // (a bundle's fork revision must be an ancestor of its tip). When
+    // recipientBase is not on the first-parent chain, only HEAD is a
+    // candidate. LimitExceeded when not even the smallest candidate fits.
+    // `upTo` (push of part of a branch) ends the transfer at that revision
+    // instead of HEAD: it must be HEAD or on HEAD's first-parent chain, not
+    // older than a forked branch's fork revision (InvalidInput otherwise), and
+    // `complete` then means the chunk ends at `upTo`. A recipient base that is
+    // not an ancestor of `upTo` (the recipient already has newer or other
+    // history) is a Conflict.
+    // Same descriptor contract as exportRevisionBundle.
+    RevisionBundleChunk exportRevisionBundleChunk(const ProjectId& project, std::string_view branch,
+                                                  std::optional<RevisionId> recipientBase,
+                                                  std::uint64_t maxBytes, int fd,
+                                                  BundleLimits limits = {},
+                                                  std::optional<RevisionId> upTo = std::nullopt);
     // Named-file forms: the bundle appears at `bundlePath` only when complete
     // and fsynced (no-replace link, then a directory fsync). A crash or
     // failure never leaves a partial bundle there; an existing file is never
@@ -662,7 +691,11 @@ private:
                                      std::optional<ReservedRevision> reserved = std::nullopt);
     void exportRevisionBundleLocked(const ProjectId& project, std::string_view branch,
                                       std::optional<RevisionId> base, int fd,
-                                      BundleLimits limits);
+                                      BundleLimits limits,
+                                      std::optional<RevisionId> tipRevision = std::nullopt);
+    // Encoded bundle size and object count for a tip and optional base.
+    std::pair<std::uint64_t, std::uint64_t> bundleSizeLocked(
+        const Hash& tipHash, const std::optional<Hash>& baseHash, bool provenance);
     struct RevisionRecord branchRevisionLocked(const ProjectId& project,
                                                    std::string_view branch);
     std::optional<BranchId> branchIdLocked(std::string_view name);

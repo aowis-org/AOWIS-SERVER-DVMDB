@@ -1586,10 +1586,31 @@ void registerBundleRoutes(httplib::Server& server, ProjectService& service, Bund
             const std::string branch = pathParam(request, "branch");
             requireInput(ProjectService::validBranchName(branch), "invalid branch name");
             for (const httplib::Params::value_type& item : request.params)
-                requireInput(item.first == "base", "unknown revision-bundle query parameter");
+                requireInput(item.first == "base" || item.first == "maxBytes" || item.first == "upTo",
+                             "unknown revision-bundle query parameter");
             const std::optional<std::string> baseText = queryValue(request, "base");
             const std::optional<RevisionId> base = baseText ? RevisionId::parse(*baseText) : std::nullopt;
             requireInput(!baseText || base.has_value(), "base must be a revision UUIDv7");
+            // upTo (push of part of a branch) ends the chunk sequence at that
+            // revision of the branch instead of HEAD; it needs maxBytes.
+            const std::optional<std::string> upToText = queryValue(request, "upTo");
+            const std::optional<RevisionId> upTo = upToText ? RevisionId::parse(*upToText) : std::nullopt;
+            requireInput(!upToText || upTo.has_value(), "upTo must be a revision UUIDv7");
+            // maxBytes asks for a chunk: the newest first-parent tip whose
+            // bundle fits (never more than the server's own transfer limit).
+            std::optional<std::uint64_t> maxBytes;
+            if (const std::optional<std::string> text = queryValue(request, "maxBytes")) {
+                requireInput(!text->empty() && text->size() <= 20 &&
+                    std::all_of(text->begin(), text->end(), [](char ch) { return ch >= '0' && ch <= '9'; }),
+                    "maxBytes must be a positive decimal byte count");
+                std::uint64_t parsed = 0;
+                const std::from_chars_result converted =
+                    std::from_chars(text->data(), text->data() + text->size(), parsed);
+                requireInput(converted.ec == std::errc() && converted.ptr == text->data() + text->size() &&
+                             parsed > 0, "maxBytes must be a positive decimal byte count");
+                maxBytes = parsed;
+            }
+            requireInput(!upTo || maxBytes.has_value(), "upTo requires maxBytes");
             std::optional<TransferStagingBudget::Reservation> slot = stagingBudget->reserve(limits.maxBytes);
             if (!slot) {
                 send(response, errorReply(503, "staging_busy",
@@ -1600,9 +1621,12 @@ void registerBundleRoutes(httplib::Server& server, ProjectService& service, Bund
             std::shared_ptr<TransferStagingBudget::Reservation> reservation =
                 std::make_shared<TransferStagingBudget::Reservation>(std::move(*slot));
             std::shared_ptr<ScratchFile> exported = std::make_shared<ScratchFile>();
+            std::optional<RevisionBundleChunk> chunk;
             service.withRepository(id, [&](Repository& repository) {
                 *exported = repository.createScratchFile();
-                if (base) repository.exportIncrementalRevisionBundle(*project, branch, *base,
+                if (maxBytes) chunk = repository.exportRevisionBundleChunk(*project, branch, base, *maxBytes,
+                                                                           exported->fd(), limits, upTo);
+                else if (base) repository.exportIncrementalRevisionBundle(*project, branch, *base,
                                                                          exported->fd(), limits);
                 else repository.exportRevisionBundle(*project, branch, exported->fd(), limits);
             });
@@ -1613,6 +1637,10 @@ void registerBundleRoutes(httplib::Server& server, ProjectService& service, Bund
                 return;
             }
             response.status = 200;
+            if (chunk) {
+                response.set_header("X-AOWIS-Bundle-Head", chunk->head.toString());
+                response.set_header("X-AOWIS-Bundle-Complete", chunk->complete ? "true" : "false");
+            }
             response.set_content_provider(static_cast<std::size_t>(size), revisionBundleMime,
                 [exported, reservation](std::size_t offset, std::size_t length, httplib::DataSink& sink) {
                     (void)reservation;
@@ -1639,6 +1667,10 @@ void registerBundleRoutes(httplib::Server& server, ProjectService& service, Bund
             const std::string branch = pathParam(request, "branch");
             requireInput(ProjectService::validBranchName(branch), "invalid branch name");
             requireInput(request.params.empty(), "revision-bundle upload does not accept query parameters");
+            if (const std::optional<Reply> pin = repositoryPinFailure(request, service)) {
+                sendAndClose(response, *pin);
+                return;
+            }
             const std::optional<std::uint64_t> length = declaredLength(request);
             if (length && limits.maxBytes != 0 && *length > limits.maxBytes) {
                 sendAndClose(response, errorReply(413, "transfer_too_large",
@@ -2129,10 +2161,15 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
     server.Get("/dvmdb/v1/health", [](const httplib::Request&, httplib::Response& response) {
         send(response, Reply{200, QJsonObject{{"status", QStringLiteral("ok")}}});
     });
-    server.Get("/dvmdb/v1/repository", [&service](const httplib::Request&, httplib::Response& response) {
+    server.Get("/dvmdb/v1/repository", [&service, transferLimits](const httplib::Request&,
+                                                                   httplib::Response& response) {
         guarded(response, [&]() {
+            // Clients that copy between repositories size bundle chunks
+            // (GET .../bundle?maxBytes=) so the recipient accepts them.
             return Reply{200, QJsonObject{{"repositoryId", QString::fromStdString(service.repositoryId())},
-                {"modelCodecFingerprint", QString::fromLatin1(AOWIS_MODEL_CODEC_FINGERPRINT)}}};
+                {"modelCodecFingerprint", QString::fromLatin1(AOWIS_MODEL_CODEC_FINGERPRINT)},
+                {"transferLimits", QJsonObject{
+                    {"maxBundleBytes", static_cast<qint64>(transferLimits.maxBytes)}}}}};
         });
     });
     // Read-only VC-03 repository-qualified tracking metadata. The registry
@@ -3379,6 +3416,8 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
     server.Post("/dvmdb/v1/projects/clone-target", [&service](const httplib::Request& request,
                                                                 httplib::Response& response) {
         guarded(response, [&]() {
+            if (const std::optional<Reply> pin = repositoryPinFailure(request, service))
+                return *pin;
             const QJsonObject object = parseBody(request, maxJsonSmallBytes);
             requireKeys(object, {"projectId", "name"});
             const std::string id = requiredString(object, "projectId");
@@ -3391,6 +3430,8 @@ void registerRoutes(httplib::Server& server, ProjectService& service,
     server.Post("/dvmdb/v1/projects/:id/unborn-checkout",
                 [&service](const httplib::Request& request, httplib::Response& response) {
         guarded(response, [&]() {
+            if (const std::optional<Reply> pin = repositoryPinFailure(request, service))
+                return *pin;
             const QJsonObject object = parseBody(request, maxJsonSmallBytes);
             requireKeys(object, {"branchId", "name"});
             const std::string project = pathParam(request, "id");

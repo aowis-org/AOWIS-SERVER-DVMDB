@@ -20,6 +20,27 @@ curl -fsS http://127.0.0.1:8755/dvmdb/v1/projects   # {"projects":[]} on a new r
 `./compile_linux.sh --build-only` builds without starting anything. The script
 starts the server only if configuration, the full build and the server target
 all succeeded, so a failed build never falls back to an older binary.
+
+The listen address, port and storage root can be chosen when starting through
+the script; they are passed to the server as `--bind` / `--port` /
+`--data-root` and take precedence over `aowis-server-dvmdb.ini` (defaults
+`127.0.0.1:8755` and the [storage root](#storage-root) order below):
+
+| Option | Meaning |
+| --- | --- |
+| `--listen-address ADDRESS` | numeric IPv4/IPv6 address, e.g. `0.0.0.0`, `::`, `::1` |
+| `--listen-address ADDRESS:PORT` | IPv4 with port, e.g. `0.0.0.0:9000` |
+| `--listen-address [IPv6]:PORT` | IPv6 with port, e.g. `[::]:9000` |
+| `--listen-port PORT` | port only (1..65535) |
+| `--data-root DIR` | project storage root; relative to the current directory, `~/` is the home directory |
+
+`--option=value` works too. A port given both in the address and with
+`--listen-port`, an invalid address or port, or listen options together with
+`--build-only` are refused before anything is built. `--data-root` selects
+the root even when a leftover `./aowis-dvmdb-data` exists in the checkout
+(e.g. `--data-root ~/.local/share/aowis-dvmdb` for the default). Listening on `0.0.0.0` or
+`::` exposes the unauthenticated HTTP API to the network: only on a trusted
+network or behind a firewall/VPN.
 `SIGINT`/`SIGTERM` closes the listener and lets running requests finish.
 
 ## Storage root
